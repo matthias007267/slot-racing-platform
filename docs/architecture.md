@@ -1,27 +1,29 @@
 # Architecture
 
-Carrera Racing Platform is a modular desktop application ("building-block system"): a small,
+Slot-Racing Platform is a modular desktop application ("building-block system"): a small,
 stable core plus optional feature modules that are plugins. Decisions are recorded in
 [`docs/adr`](adr/README.md).
 
 ```text
-                 ┌──────────────────────────── carrera.app ───────────────────────────┐
-                 │  Runtime (wiring)   MainWindow (PySide6)   Dashboard / Settings    │
-                 └───────────────┬────────────────────────────────────────────────────┘
-                                 │ discovers via entry points (never imports modules)
- ┌───────────────────────────────▼───────────────────────────────────────────────────┐
- │ carrera.modules   drivers_vehicles  tracks  races  timing  statistics  track_planner│
- │ (plugins)         timing_camera*  timing_sensor*  audio_animation   (* off by default)│
- └───────────────────────────────┬───────────────────────────────────────────────────┘
-                                 │ import only
- ┌───────────────────────────────▼───────────────────────────────────────────────────┐
- │ carrera.core   events · plugin · timing · config · domain · storage · clock · i18n │
- └───────────────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────── slot_racing.app ────────────────────────────────┐
+ │  Runtime (wiring)        MainWindow (PySide6)        Dashboard / Settings        │
+ └────────────────────────────────────┬─────────────────────────────────────────────┘
+                                      │ discovers via entry points (never imports modules)
+ ┌────────────────────────────────────▼─────────────────────────────────────────────┐
+ │ slot_racing.modules   drivers_vehicles  tracks  races  timing  statistics        │
+ │ (plugins)             track_planner  timing_camera*  timing_sensor*              │
+ │                       audio_animation       (* off by default)                   │
+ └────────────────────────────────────┬─────────────────────────────────────────────┘
+                                      │ import only
+ ┌────────────────────────────────────▼─────────────────────────────────────────────┐
+ │ slot_racing.core   events · plugin · timing · config · domain · storage · clock · │
+ │                    i18n                                                          │
+ └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Core (`carrera.core`)
+## Core (`slot_racing.core`)
 
-Qt-free and hardware-free. It must not import `carrera.app`, `carrera.modules`, PySide6, OpenCV
+Qt-free and hardware-free. It must not import `slot_racing.app`, `slot_racing.modules`, PySide6, OpenCV
 or GPIO libraries (enforced by import-linter).
 
 | Package / module | Responsibility |
@@ -39,7 +41,7 @@ or GPIO libraries (enforced by import-linter).
 | `storage` | SQLAlchemy base, `Database`, Alembic migrations, core tables |
 | `i18n` | Key based `Translator` (German first), `format` fills placeholders |
 
-## Modules (`carrera.modules`)
+## Modules (`slot_racing.modules`)
 
 Every module is a package with a `plugin.py` (a `Plugin` subclass registered as entry point in
 `pyproject.toml`) and optionally `models.py` and domain code. Modules never import each other.
@@ -53,7 +55,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
 | `timing_camera`, `timing_sensor`, `audio_animation` | Placeholder plugin only (camera/sensor off by default) |
 
-### Shared UI helpers (`carrera.uikit`)
+### Shared UI helpers (`slot_racing.uikit`)
 
 Small Qt helpers used by the pages of several modules: `EntityPage` (list with add / edit /
 (de)activate / delete), `FormDialog`, table helpers, `describe_error` and the common German texts.
@@ -73,7 +75,7 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
 ```
 
 - `races` never imports `drivers_vehicles` or `tracks`; it looks them up through the catalog
-  interfaces in `carrera.core.catalog`, which those modules register as services.
+  interfaces in `slot_racing.core.catalog`, which those modules register as services.
 - Participant rules live in `RaceService.add_participant`: driver and vehicle exist and are
   active, the lane exists on the track and is free, driver and vehicle are used once, and the
   number of participants never exceeds the track's lane count. A race is editable while
@@ -135,7 +137,7 @@ Everything a plugin registers is removed automatically when it is disabled.
 - `disable(name)` first disables all plugins that require it.
 - `optional` dependencies only influence order; a plugin must tolerate their absence.
   Optional UI that depends on another plugin can listen to `PluginEnabled`/`PluginDisabled`.
-- Discovery uses the entry-point group `carrera.plugins`; plugins that cannot be imported are
+- Discovery uses the entry-point group `slot_racing.plugins`; plugins that cannot be imported are
   reported as failed.
 
 ## Timing abstraction
@@ -147,7 +149,7 @@ TimingSource           one per race, built by the factory
      ↑ create_source(TimingSessionSpec)
 TimingSourceFactory    = provider, stable provider_id, capabilities, availability
      ↑ register_timing_provider
-Provider plugin        simulation · camera* · raspberry_pi* · carrera*   (* future modules)
+Provider plugin        simulation · camera* · raspberry_pi* · manufacturer* (* future modules)
 ```
 
 `TimingSource` knows nothing about its origin. Every source delivers the same event,
@@ -253,7 +255,7 @@ A track can have a **timing layout**: an ordered list of *logical positions*.
 - `TimingSetup(layout, sensors)` binds exactly one sensor to every position and validates unique
   sensor ids and unique hardware ids. `ensure_usable()` rejects inactive sensors: a setup with an
   inactive sensor can be stored but cannot be used as timing source.
-- All of this is in `carrera.core.domain`, so every provider and the engine use the same rules.
+- All of this is in `slot_racing.core.domain`, so every provider and the engine use the same rules.
   Invalid configurations raise `ValidationError`; the UI shows the translated message.
 
 ### Providers and engine
@@ -285,7 +287,7 @@ Race ─ track ─▶ TimingSetupService.get_setup(track)   (fallback: default_t
 
 ### Attaching camera and Raspberry Pi later
 
-A camera, Raspberry Pi or Carrera module implements `TimingSource` and a `TimingSourceFactory`
+A camera, Raspberry Pi or manufacturer-specific module implements `TimingSource` and a `TimingSourceFactory`
 with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
 `context.register_timing_provider(...)`, exactly like the simulation. Its `availability()` reports
 "not connected" and the like; the race wizard then lists it as unavailable, and as soon as it is
@@ -318,7 +320,7 @@ sector times) is computed in the UI. `timing_editor` and `timing_test` are Qt-fr
 Host driven hooks on `TimingSource` (`poll`, `pause`, `resume`) default to no-ops, so sources with
 their own threads or callbacks are unaffected.
 
-## Race engine (`carrera.modules.races.engine`)
+## Race engine (`slot_racing.modules.races.engine`)
 
 `RaceEngine(config, bus, clock, timing_sources)` with `RaceConfig(race_id, laps, participants,
 layout)`.
@@ -363,7 +365,7 @@ Alembic environment switches SQLite foreign keys off while tables are rebuilt an
 afterwards. Foreign keys from races to tracks, drivers and vehicles are `RESTRICT`, so used master
 data can be deactivated but not deleted.
 
-## UI shell (`carrera.app`)
+## UI shell (`slot_racing.app`)
 
 - `Runtime.create(config)` builds bus, services, contributions, translator and plugin manager,
   migrates the database and enables the configured plugins. It is Qt-free and testable.

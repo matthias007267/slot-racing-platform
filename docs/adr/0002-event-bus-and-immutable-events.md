@@ -5,7 +5,7 @@ Modules react to what happens in a race (audio, statistics, persistence) without
 knowing them.
 
 ## Decision
-- Events are frozen, slotted dataclasses derived from `Event` and live in `carrera.core.events`.
+- Events are frozen, slotted dataclasses derived from `Event` and live in `slot_racing.core.events`.
 - `EventBus` delivers synchronously, in subscription order, to handlers of the event type or a
   base class.
 - A handler exception is logged and swallowed; it never reaches the publisher or other handlers.

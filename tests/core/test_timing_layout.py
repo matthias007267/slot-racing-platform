@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.domain import (
+from slot_racing.core.domain import (
     TimingLayout,
     TimingPosition,
     TimingPositionType,
@@ -12,7 +12,7 @@ from carrera.core.domain import (
     TimingSetup,
     default_timing_setup,
 )
-from carrera.core.errors import ValidationError
+from slot_racing.core.errors import ValidationError
 
 SF = TimingPositionType.START_FINISH
 SECTOR = TimingPositionType.SECTOR

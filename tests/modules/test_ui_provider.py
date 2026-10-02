@@ -6,11 +6,11 @@ from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import QComboBox
 from pytestqt.qtbot import QtBot
 
-from carrera.core.domain import RaceStatus
-from carrera.core.timing import ProviderAvailability, TimingSourceFactory
-from carrera.modules.races.ui.live_view import LiveRaceView
-from carrera.modules.races.ui.races_page import RacesPage
-from carrera.modules.races.ui.wizard import MODE, NAME, OVERVIEW, START, TRACK, RaceWizard
+from slot_racing.core.domain import RaceStatus
+from slot_racing.core.timing import ProviderAvailability, TimingSourceFactory
+from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.races_page import RacesPage
+from slot_racing.modules.races.ui.wizard import MODE, NAME, OVERVIEW, START, TRACK, RaceWizard
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import configure_race, open_page
 from tests.support.timing import FakeTimingFactory

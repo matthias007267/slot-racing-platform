@@ -1,9 +1,16 @@
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock
-from carrera.core.domain import DriverId, Participant, RaceId, RaceStatus, TimingLayout, TimingSetup
-from carrera.core.events import (
+from slot_racing.core.clock import NANOS_PER_SECOND as S
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.domain import (
+    DriverId,
+    Participant,
+    RaceId,
+    RaceStatus,
+    TimingLayout,
+    TimingSetup,
+)
+from slot_racing.core.events import (
     Event,
     EventBus,
     LapCompleted,
@@ -17,9 +24,9 @@ from carrera.core.events import (
     SensorTriggered,
     WinnerDetermined,
 )
-from carrera.core.timing import SensorSink, TimingSource
-from carrera.modules.races.engine import RaceConfig, RaceEngine, RaceStateError
-from carrera.modules.timing.simulation import SimulatedLane, SimulationTimingProvider
+from slot_racing.core.timing import SensorSink, TimingSource
+from slot_racing.modules.races.engine import RaceConfig, RaceEngine, RaceStateError
+from slot_racing.modules.timing.simulation import SimulatedLane, SimulationTimingProvider
 
 LAYOUT = TimingLayout.from_position_ids(["sf", "s1", "s2"])
 SETUP = TimingSetup.for_layout(LAYOUT)

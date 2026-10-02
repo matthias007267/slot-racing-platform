@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock
-from carrera.core.domain import TimingPositionType, default_timing_setup
-from carrera.core.errors import ValidationError
-from carrera.core.timing import ProviderAvailability, ProviderCapabilities
-from carrera.core.timing_registry import TimingProviderRegistry
-from carrera.modules.timing.simulation import SimulationTimingFactory
-from carrera.modules.tracks.timing_editor import TimingDraft
-from carrera.modules.tracks.timing_test import TimingTestSession
+from slot_racing.core.clock import NANOS_PER_SECOND as S
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.domain import TimingPositionType, default_timing_setup
+from slot_racing.core.errors import ValidationError
+from slot_racing.core.timing import ProviderAvailability, ProviderCapabilities
+from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.timing.simulation import SimulationTimingFactory
+from slot_racing.modules.tracks.timing_editor import TimingDraft
+from slot_racing.modules.tracks.timing_test import TimingTestSession
 from tests.support.timing import FakeManualSource, FakeTimingFactory
 
 

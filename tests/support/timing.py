@@ -3,8 +3,8 @@ without the simulation."""
 
 from __future__ import annotations
 
-from carrera.core.events import SensorTriggered
-from carrera.core.timing import (
+from slot_racing.core.events import SensorTriggered
+from slot_racing.core.timing import (
     ManuallyTriggerable,
     ProviderAvailability,
     ProviderCapabilities,

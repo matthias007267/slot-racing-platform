@@ -7,12 +7,12 @@ from alembic.migration import MigrationContext
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
-from carrera.core.storage import Base, Database, PluginRecord, Setting, import_plugin_models
-from carrera.core.storage.database import alembic_config
-from carrera.modules.drivers_vehicles.models import Driver, Vehicle
-from carrera.modules.races.models import Lap, Race, RaceParticipant, Sector
-from carrera.modules.timing.models import TimingConfiguration, TimingSensor
-from carrera.modules.tracks.models import Track, TrackLayout
+from slot_racing.core.storage import Base, Database, PluginRecord, Setting, import_plugin_models
+from slot_racing.core.storage.database import alembic_config
+from slot_racing.modules.drivers_vehicles.models import Driver, Vehicle
+from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector
+from slot_racing.modules.timing.models import TimingConfiguration, TimingSensor
+from slot_racing.modules.tracks.models import Track, TrackLayout
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def test_migrations_match_models(db: Database) -> None:
 
 def test_models_of_all_plugins_are_registered() -> None:
     imported = import_plugin_models()
-    assert "carrera.modules.races.models" in imported
+    assert "slot_racing.modules.races.models" in imported
     assert {"drivers", "races", "laps", "timing_sensors"} <= set(Base.metadata.tables)
 
 
@@ -130,7 +130,7 @@ def test_session_rolls_back_on_error(db: Database) -> None:
 
 
 def test_file_database_persists(tmp_path):  # type: ignore[no-untyped-def]
-    path = tmp_path / "nested" / "carrera.db"
+    path = tmp_path / "nested" / "slot_racing.db"
     first = Database.from_path(path)
     first.migrate()
     with first.session() as session:
@@ -150,7 +150,7 @@ def test_upgrade_preserves_existing_data() -> None:
     with database.engine.begin() as connection:
         for statement in (
             "INSERT INTO drivers (id, name, nickname, is_active) VALUES (1, 'Anna', 'Anni', 1)",
-            "INSERT INTO vehicles (id, name, manufacturer) VALUES (1, 'Porsche', 'Carrera')",
+            "INSERT INTO vehicles (id, name, manufacturer) VALUES (1, 'Porsche', 'ExampleBrand')",
             "INSERT INTO tracks (id, name, lane_count) VALUES (1, 'Ring', 2)",
             "INSERT INTO races (id, name, track_id, status, target_laps) "
             "VALUES (1, 'Alt', 1, 'finished', 3)",
@@ -171,7 +171,7 @@ def test_upgrade_preserves_existing_data() -> None:
         assert (driver.name, driver.display_name, driver.is_active) == ("Anna", "Anni", True)
         assert driver.created_at is not None
         vehicle = session.get(Vehicle, 1)
-        assert vehicle is not None and vehicle.manufacturer == "Carrera" and vehicle.is_active
+        assert vehicle is not None and vehicle.manufacturer == "ExampleBrand" and vehicle.is_active
         track = session.get(Track, 1)
         assert track is not None and track.is_active and track.lane_count == 2
         race = session.get(Race, 1)

@@ -9,11 +9,11 @@ pieces are connected, so the smallest additions to the existing architecture wer
 
 ## Decision
 - **Catalogs in the core.** `DriverCatalog`, `VehicleCatalog` and `TrackCatalog` (read-only
-  interfaces plus frozen info classes) live in `carrera.core.catalog`. The owning modules
+  interfaces plus frozen info classes) live in `slot_racing.core.catalog`. The owning modules
   implement and register them; `races` depends only on the interfaces. `races` declares
   `requires=("drivers_vehicles", "tracks")` and `optional=("timing",)`.
 - **Timing factory.** `TimingSourceFactory` and `TimingSessionSpec` are added to
-  `carrera.core.timing`. A timing module registers a factory as a service; the race controller
+  `slot_racing.core.timing`. A timing module registers a factory as a service; the race controller
   asks for a fresh source per race. `AppConfig.timing_source` can select a factory by name.
 - **Host driven sources.** `TimingSource` gets no-op `poll()`, `pause()` and `resume()` hooks. The
   simulation uses them to run on a real clock without threads; the engine forwards pause/resume.
@@ -23,7 +23,7 @@ pieces are connected, so the smallest additions to the existing architecture wer
 - **Statuses.** `RaceStatus` gains `READY` and `ABORTED`. The engine still uses only
   `CREATED/RUNNING/PAUSED/FINISHED`; race management sets `READY` (configured) and `ABORTED`
   (stopped early or interrupted).
-- **Shared UI helpers.** A small `carrera.uikit` package holds the list page, dialog and table
+- **Shared UI helpers.** A small `slot_racing.uikit` package holds the list page, dialog and table
   helpers used by several modules. It depends on the core only and is forbidden in the core, the
   engine and the timing modules.
 - **Errors.** User facing rule violations are `core.errors.ValidationError(key, **params)`; the UI

@@ -6,13 +6,13 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect
 
-from carrera.core.domain import RaceId, RaceStatus
-from carrera.core.errors import ProviderConfigurationError, ProviderUnavailable, ValidationError
-from carrera.core.storage import Database
-from carrera.core.storage.database import alembic_config
-from carrera.core.timing import ProviderAvailability, ProviderCapabilities, TimingSourceFactory
-from carrera.modules.races.models import Race
-from carrera.modules.races.service import RaceService
+from slot_racing.core.domain import RaceId, RaceStatus
+from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable, ValidationError
+from slot_racing.core.storage import Database
+from slot_racing.core.storage.database import alembic_config
+from slot_racing.core.timing import ProviderAvailability, ProviderCapabilities, TimingSourceFactory
+from slot_racing.modules.races.models import Race
+from slot_racing.modules.races.service import RaceService
 from tests.modules.conftest import Env
 from tests.support.timing import FakeTimingFactory, FakeTimingSource
 

@@ -5,21 +5,21 @@ from dataclasses import dataclass
 
 import pytest
 
-from carrera.app.runtime import Runtime
-from carrera.core.catalog import DriverInfo, TrackInfo, VehicleInfo
-from carrera.core.clock import ManualClock
-from carrera.core.config import AppConfig
-from carrera.core.domain import DriverId, TrackId, VehicleId
-from carrera.core.storage import Database
-from carrera.modules.drivers_vehicles.service import (
+from slot_racing.app.runtime import Runtime
+from slot_racing.core.catalog import DriverInfo, TrackInfo, VehicleInfo
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.config import AppConfig
+from slot_racing.core.domain import DriverId, TrackId, VehicleId
+from slot_racing.core.storage import Database
+from slot_racing.modules.drivers_vehicles.service import (
     DriverInput,
     DriverService,
     VehicleInput,
     VehicleService,
 )
-from carrera.modules.races.runner import RaceController
-from carrera.modules.races.service import RaceService
-from carrera.modules.tracks.service import TrackInput, TrackService
+from slot_racing.modules.races.runner import RaceController
+from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.tracks.service import TrackInput, TrackService
 
 
 @dataclass

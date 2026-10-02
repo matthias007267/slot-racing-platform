@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from carrera.core.messages import CORE_TRANSLATIONS
-from carrera.modules.tracks.translations import TRANSLATIONS
+from slot_racing.core.messages import CORE_TRANSLATIONS
+from slot_racing.modules.tracks.translations import TRANSLATIONS
 
-SOURCE = Path(__file__).resolve().parents[2] / "src" / "carrera"
+SOURCE = Path(__file__).resolve().parents[2] / "src" / "slot_racing"
 KEY = re.compile(r'"(error\.timing\.[a-z_]+)"')
 DYNAMIC = re.compile(r'f"error\.timing\.\{field\}_blank"')
 

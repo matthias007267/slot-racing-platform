@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from carrera.core.clock import ManualClock, MonotonicClock, format_duration
-from carrera.core.config import AppConfig, ConfigError, load_config, save_config
-from carrera.core.domain import Participant, TimingLayout, TimingPositionType
-from carrera.core.domain.ids import DriverId
-from carrera.core.errors import ValidationError
-from carrera.core.i18n import Translator
+from slot_racing.core.clock import ManualClock, MonotonicClock, format_duration
+from slot_racing.core.config import AppConfig, ConfigError, load_config, save_config
+from slot_racing.core.domain import Participant, TimingLayout, TimingPositionType
+from slot_racing.core.domain.ids import DriverId
+from slot_racing.core.errors import ValidationError
+from slot_racing.core.i18n import Translator
 
 
 def test_manual_clock_moves_forward_only() -> None:

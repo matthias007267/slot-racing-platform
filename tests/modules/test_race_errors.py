@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND
-from carrera.core.domain import RaceId, RaceStatus
-from carrera.core.errors import ProviderUnavailable, ValidationError
-from carrera.core.timing import (
+from slot_racing.core.clock import NANOS_PER_SECOND
+from slot_racing.core.domain import RaceId, RaceStatus
+from slot_racing.core.errors import ProviderUnavailable, ValidationError
+from slot_racing.core.timing import (
     SensorSink,
     TimingSessionSpec,
     TimingSource,

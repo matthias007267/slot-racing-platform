@@ -8,7 +8,7 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect, select
 
-from carrera.core.domain import (
+from slot_racing.core.domain import (
     TimingLayout,
     TimingPosition,
     TimingPositionType,
@@ -17,14 +17,14 @@ from carrera.core.domain import (
     TrackId,
     default_timing_setup,
 )
-from carrera.core.errors import ValidationError
-from carrera.core.storage import Database
-from carrera.core.storage.database import alembic_config
-from carrera.modules.timing.models import TimingConfiguration
-from carrera.modules.timing.models import TimingPosition as PositionRow
-from carrera.modules.timing.models import TimingSensor as SensorRow
-from carrera.modules.timing.service import TimingSetupManager
-from carrera.modules.tracks.service import TrackInput, TrackService
+from slot_racing.core.errors import ValidationError
+from slot_racing.core.storage import Database
+from slot_racing.core.storage.database import alembic_config
+from slot_racing.modules.timing.models import TimingConfiguration
+from slot_racing.modules.timing.models import TimingPosition as PositionRow
+from slot_racing.modules.timing.models import TimingSensor as SensorRow
+from slot_racing.modules.timing.service import TimingSetupManager
+from slot_racing.modules.tracks.service import TrackInput, TrackService
 from tests.modules.conftest import Env
 
 
@@ -112,7 +112,7 @@ def test_deleting_a_track_removes_its_setup(env: Env, manager: TimingSetupManage
 
 
 def test_setup_survives_a_restart(tmp_path: Path) -> None:
-    path = tmp_path / "carrera.db"
+    path = tmp_path / "slot_racing.db"
     first = Database.from_path(path)
     first.migrate()
     track = TrackService(first).create_track(TrackInput(name="Ring", lane_count=2))

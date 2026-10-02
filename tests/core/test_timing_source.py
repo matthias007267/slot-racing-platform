@@ -1,7 +1,7 @@
 import pytest
 
-from carrera.core.events import SensorTriggered
-from carrera.core.timing import SensorSink, TimingSource
+from slot_racing.core.events import SensorTriggered
+from slot_racing.core.timing import SensorSink, TimingSource
 
 
 class _FakeSource(TimingSource):

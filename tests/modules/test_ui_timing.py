@@ -7,13 +7,13 @@ from collections.abc import Callable
 from PySide6.QtWidgets import QDialog, QTableWidget
 from pytestqt.qtbot import QtBot
 
-from carrera.app.main_window import MainWindow
-from carrera.core.catalog import TrackInfo
-from carrera.core.domain import TimingSetup
-from carrera.core.timing import TimingSetupService
-from carrera.modules.tracks.ui import timing_wizard
-from carrera.modules.tracks.ui.timing_dialog import PositionDialog
-from carrera.modules.tracks.ui.tracks_area import TracksArea
+from slot_racing.app.main_window import MainWindow
+from slot_racing.core.catalog import TrackInfo
+from slot_racing.core.domain import TimingSetup
+from slot_racing.core.timing import TimingSetupService
+from slot_racing.modules.tracks.ui import timing_wizard
+from slot_racing.modules.tracks.ui.timing_dialog import PositionDialog
+from slot_racing.modules.tracks.ui.tracks_area import TracksArea
 from tests.modules.conftest import Env
 
 

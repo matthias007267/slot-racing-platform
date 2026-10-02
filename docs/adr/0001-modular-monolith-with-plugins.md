@@ -5,7 +5,7 @@ Features (cameras, Raspberry Pi, audio, statistics, ...) must be developed, enab
 replaced or removed independently. The application is a single desktop program for Windows.
 
 ## Decision
-One Python package (`carrera`) with a small core and feature modules under `carrera.modules`.
+One Python package (`slot_racing`) with a small core and feature modules under `slot_racing.modules`.
 Each module is a plugin with a manifest, lifecycle and contributions. Modules never import each
 other; they communicate through core event types and core service interfaces.
 There are no separate processes or services. Only the Raspberry Pi agent is a separate program

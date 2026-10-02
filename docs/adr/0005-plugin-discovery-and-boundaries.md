@@ -4,11 +4,11 @@
 Module independence must survive years of development and must be checked automatically.
 
 ## Decision
-- Plugins are registered in `pyproject.toml` under the entry-point group `carrera.plugins`. The
+- Plugins are registered in `pyproject.toml` under the entry-point group `slot_racing.plugins`. The
   app shell discovers them with `importlib.metadata` and never imports a module directly.
 - A plugin that fails to import or activate is marked `FAILED`; everything else keeps running.
 - `import-linter` contracts (run in CI) enforce:
-  - `carrera.core` does not import `app`, `modules`, PySide6, OpenCV or GPIO libraries;
+  - `slot_racing.core` does not import `app`, `modules`, PySide6, OpenCV or GPIO libraries;
   - modules are independent of each other and of the app shell;
   - the app shell does not import modules;
   - the race engine does not import UI or hardware libraries.

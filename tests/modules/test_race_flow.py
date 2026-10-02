@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from carrera.core.clock import NANOS_PER_SECOND
-from carrera.core.domain import RaceStatus
-from carrera.core.events import (
+from slot_racing.core.clock import NANOS_PER_SECOND
+from slot_racing.core.domain import RaceStatus
+from slot_racing.core.events import (
     Event,
     LapCompleted,
     RaceFinished,
@@ -13,9 +13,9 @@ from carrera.core.events import (
     SensorTriggered,
     WinnerDetermined,
 )
-from carrera.modules.drivers_vehicles.service import DriverInput, VehicleInput
-from carrera.modules.races.runner import RaceRunner
-from carrera.modules.tracks.service import TrackInput
+from slot_racing.modules.drivers_vehicles.service import DriverInput, VehicleInput
+from slot_racing.modules.races.runner import RaceRunner
+from slot_racing.modules.tracks.service import TrackInput
 from tests.modules.conftest import Env
 
 STEP_NS = 100_000_000
