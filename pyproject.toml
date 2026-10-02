@@ -143,10 +143,39 @@ name = "Timing providers do not know the UI"
 type = "forbidden"
 source_modules = [
     "slot_racing.modules.timing",
-    "slot_racing.modules.timing_camera",
     "slot_racing.modules.timing_sensor",
 ]
 forbidden_modules = ["PySide6", "slot_racing.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Camera timing logic does not know the UI"
+type = "forbidden"
+source_modules = [
+    "slot_racing.modules.timing_camera._checks",
+    "slot_racing.modules.timing_camera.camera_config",
+    "slot_racing.modules.timing_camera.capture",
+    "slot_racing.modules.timing_camera.configuration",
+    "slot_racing.modules.timing_camera.detection",
+    "slot_racing.modules.timing_camera.frame_source",
+    "slot_racing.modules.timing_camera.frames",
+    "slot_racing.modules.timing_camera.geometry",
+    "slot_racing.modules.timing_camera.lease",
+    "slot_racing.modules.timing_camera.opencv_device",
+    "slot_racing.modules.timing_camera.preview",
+    "slot_racing.modules.timing_camera.provider",
+    "slot_racing.modules.timing_camera.store",
+]
+forbidden_modules = ["PySide6", "slot_racing.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Camera setup UI does not touch OpenCV or races"
+type = "forbidden"
+source_modules = ["slot_racing.modules.timing_camera.ui"]
+forbidden_modules = [
+    "cv2",
+    "slot_racing.modules.timing_camera.opencv_device",
+    "slot_racing.modules.races",
+]
 
 [[tool.importlinter.contracts]]
 name = "Simulation and timing setup are free of hardware libraries"

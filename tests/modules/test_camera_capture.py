@@ -40,6 +40,7 @@ from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorS
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
+from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 from slot_racing.modules.timing_camera.opencv_device import OpenCVCapture
 from slot_racing.modules.timing_camera.provider import CameraTimingFactory, CameraTimingProvider
 
@@ -558,3 +559,55 @@ def test_opencv_reports_nothing_when_the_driver_returns_zero(
     assert device.actual_width is None
     assert device.actual_height is None
     assert device.actual_fps is None
+
+
+def test_the_preview_cannot_open_the_camera_while_a_race_holds_it() -> None:
+    lease = CameraLease()
+    race_device = ScriptedCapture()
+    preview_device = ScriptedCapture()
+    race = CameraFrameSource(race_device, lease=lease, lease_owner=CameraLease.RACE)
+    preview = CameraFrameSource(preview_device, lease=lease, lease_owner=CameraLease.PREVIEW)
+    race.start()
+    try:
+        with pytest.raises(CameraBusyError):
+            preview.start()
+        assert not preview_device.opened
+        assert lease.holder() == CameraLease.RACE
+    finally:
+        race.stop()
+    preview.start()
+    try:
+        assert preview_device.opened
+        assert lease.holder() == CameraLease.PREVIEW
+    finally:
+        preview.stop()
+    preview.stop()
+    assert lease.holder() is None
+
+
+def test_a_held_camera_is_reported_in_use_without_opening_it() -> None:
+    lease = CameraLease()
+    assert lease.try_acquire(CameraLease.PREVIEW)
+    opened: list[str] = []
+
+    class _Device:
+        def open(self) -> None:
+            opened.append("open")
+
+        def close(self) -> None:
+            opened.append("close")
+
+        def read(self) -> GrayFrame:
+            raise CameraClosedError()
+
+    factory = CameraTimingFactory(settings=zones(1), devices=lambda _config: _Device(), lease=lease)
+    availability = factory.availability()
+    assert not availability.available
+    assert availability.reason_key == "error.timing_provider.camera_in_use"
+    assert opened == []
+    source = factory.create_source(session())
+    with pytest.raises(ProviderUnavailable) as caught:
+        source.start(lambda _event: None)
+    assert caught.value.key == "error.timing_provider.camera_in_use"
+    assert "open" not in opened
+    source.stop()

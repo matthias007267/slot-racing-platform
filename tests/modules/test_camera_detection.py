@@ -396,6 +396,8 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
         "opencv_device.py",
         "configuration.py",
         "store.py",
+        "lease.py",
+        "preview.py",
     }
     for path in sorted(root.glob("*.py")):
         source = path.read_text(encoding="utf-8")
@@ -414,4 +416,29 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
             blocked = (*forbidden, "slot_racing.core.events")
         for name in imported:
             for prefix in blocked:
+                assert name != prefix and not name.startswith(prefix + "."), (path.name, name)
+    ui_forbidden = (
+        "cv2",
+        "sqlalchemy",
+        "slot_racing.app",
+        "slot_racing.modules.races",
+        "slot_racing.modules.timing_camera.opencv_device",
+    )
+    for path in sorted((root / "ui").glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        assert "import cv2" not in source
+        assert "VideoCapture" not in source
+        assert ".session(" not in source
+        assert "RaceEngine" not in source
+        assert "RaceController" not in source
+        assert "SensorTriggered" not in source
+        tree = ast.parse(source)
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.append(node.module)
+        for name in imported:
+            for prefix in ui_forbidden:
                 assert name != prefix and not name.startswith(prefix + "."), (path.name, name)

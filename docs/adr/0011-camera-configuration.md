@@ -38,3 +38,5 @@ key/value store that already exists.
   still the step-3 behavior: the request is not treated as the actual picture.
 - A future document format bumps `version` and is rejected by this code until a migration of
   the document is written. The SQLite schema does not need a revision for that.
+- The setup page that edits this document is a separate decision (ADR 0012). It writes the same
+  document and does not add a track id.

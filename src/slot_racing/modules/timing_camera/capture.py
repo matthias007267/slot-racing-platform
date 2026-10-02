@@ -31,6 +31,7 @@ from typing import Protocol
 from slot_racing.modules.timing_camera._checks import require_range
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 
 # Newest frames only. Two pictures are enough for the next 100 ms poll to see
 # the latest grab without walking through a backlog.
@@ -117,12 +118,19 @@ class CameraFrameSource(FrameSource):
         *,
         queue_size: int = MAX_QUEUED_FRAMES,
         max_read_failures: int = DEFAULT_READ_FAILURES,
+        lease: CameraLease | None = None,
+        lease_owner: str = CameraLease.RACE,
     ) -> None:
         if not callable(getattr(device, "open", None)):
             raise TypeError("device must be a capture device")
+        if lease is not None and not isinstance(lease, CameraLease):
+            raise TypeError("lease must be a CameraLease")
         self._device = device
         self._queue = FrameQueue(queue_size)
         self._max_read_failures = require_range("max_read_failures", max_read_failures, 1)
+        self._lease = lease
+        self._lease_owner = lease_owner
+        self._holding_lease = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._paused = False
@@ -153,10 +161,14 @@ class CameraFrameSource(FrameSource):
         with self._error_lock:
             self._error = None
         self._queue.clear()
+        if self._lease is not None and not self._lease.try_acquire(self._lease_owner):
+            raise CameraBusyError("camera is in use")
+        self._holding_lease = self._lease is not None
         try:
             self._device.open()
         except Exception:
             self._device.close()
+            self._release_lease()
             raise
         self._running = True
         self._thread = threading.Thread(target=self._run, name="slot-racing-camera", daemon=True)
@@ -168,12 +180,18 @@ class CameraFrameSource(FrameSource):
         self._running = False
         self._device.close()
         self._queue.clear()
+        self._release_lease()
         thread = self._thread
         self._thread = None
         if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=2)
             if thread.is_alive():
                 raise RuntimeError("camera capture thread did not stop")
+
+    def _release_lease(self) -> None:
+        if self._holding_lease and self._lease is not None:
+            self._lease.release(self._lease_owner)
+        self._holding_lease = False
 
     def pause(self) -> None:
         if self._running:

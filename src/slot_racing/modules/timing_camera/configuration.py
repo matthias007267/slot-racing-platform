@@ -179,18 +179,43 @@ def to_detector_settings(configuration: CameraConfiguration) -> DetectorSettings
     )
 
 
+def pixels_to_roi(
+    x: int, y: int, width: int, height: int, frame_width: int, frame_height: int
+) -> NormalizedRoi:
+    """The normalized form of a pixel rectangle inside a frame.
+
+    This is the inverse of :func:`roi_to_pixels` for rectangles that divide the
+    frame evenly, which is what the setup page stores after a drag.
+    """
+    if frame_width < 1 or frame_height < 1:
+        raise ValueError("frame size must be positive")
+    if width < 1 or height < 1:
+        raise ValueError("zone must cover a pixel")
+    if x < 0 or y < 0 or x + width > frame_width or y + height > frame_height:
+        raise ValueError("zone must lie inside the frame")
+    return NormalizedRoi(
+        x=x / frame_width,
+        y=y / frame_height,
+        width=width / frame_width,
+        height=height / frame_height,
+    )
+
+
 def roi_to_pixels(roi: NormalizedRoi, width: int, height: int) -> DetectionRoi:
     """Map one normalized rectangle onto ``width`` by ``height`` pixels.
 
     The mapping is deterministic. The right and bottom edges are clamped to the
     frame so a zone that ends on 1 does not stick out by a rounding error.
+    Values that land within a millionth of a pixel of an integer are that
+    integer: ``0.1 + 0.2`` is not a clean binary fraction, and without this a
+    saved ``0.2`` of a 640-wide frame would come back one pixel too wide.
     """
     if width < 1 or height < 1:
         raise ValueError("frame size must be positive")
-    x = math.floor(roi.x * width)
-    y = math.floor(roi.y * height)
-    right = min(width, math.ceil((roi.x + roi.width) * width))
-    bottom = min(height, math.ceil((roi.y + roi.height) * height))
+    x = math.floor(_quantize(roi.x * width))
+    y = math.floor(_quantize(roi.y * height))
+    right = min(width, math.ceil(_quantize((roi.x + roi.width) * width)))
+    bottom = min(height, math.ceil(_quantize((roi.y + roi.height) * height)))
     pixel_width = right - x
     pixel_height = bottom - y
     if pixel_width < 1 or pixel_height < 1:
@@ -203,6 +228,13 @@ def _strict_int(name: str, value: object, low: int) -> int:
         return require_range(name, value, low)
     except (TypeError, ValueError) as error:
         raise ValueError(str(error)) from error
+
+
+def _quantize(value: float) -> float:
+    nearest = round(value)
+    if math.isclose(value, nearest, abs_tol=1e-6):
+        return float(nearest)
+    return value
 
 
 def _within_unit(start: float, size: float) -> bool:

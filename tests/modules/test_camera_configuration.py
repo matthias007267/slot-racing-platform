@@ -20,6 +20,7 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredCamera,
     StoredDetection,
     StoredDetectionZone,
+    pixels_to_roi,
     roi_to_pixels,
     to_camera_config,
     to_detector_settings,
@@ -195,6 +196,9 @@ def test_normalized_zones_become_the_same_pixels_every_time() -> None:
     assert roi_to_pixels(roi, WIDTH, HEIGHT) == pixels
     full = NormalizedRoi(x=0, y=0, width=1, height=1)
     assert roi_to_pixels(full, 640, 480) == DetectionRoi(0, 0, 640, 480)
+    drawn = pixels_to_roi(64, 120, 128, 48, 640, 480)
+    assert drawn == NormalizedRoi(x=0.1, y=0.25, width=0.2, height=0.1)
+    assert roi_to_pixels(drawn, 640, 480) == DetectionRoi(64, 120, 128, 48)
 
     settings = to_detector_settings(sample())
     assert settings is not None

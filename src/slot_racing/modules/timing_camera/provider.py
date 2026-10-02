@@ -38,6 +38,7 @@ from slot_racing.modules.timing_camera.detection import (
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 from slot_racing.modules.timing_camera.store import (
     CameraConfigurationError,
     CameraConfigurationSource,
@@ -104,6 +105,9 @@ class CameraTimingProvider(TimingSource):
         self._resync = False
         try:
             self._frames.start()
+        except CameraBusyError as error:
+            self._frames.stop()
+            raise ProviderUnavailable("error.timing_provider.camera_in_use") from error
         except CameraOpenError as error:
             self._frames.stop()
             raise ProviderUnavailable("error.timing_provider.camera_not_connected") from error
@@ -197,6 +201,7 @@ class CameraTimingFactory(TimingSourceFactory):
         camera: CameraConfig | None = None,
         devices: DeviceFactory | None = None,
         configurations: CameraConfigurationSource | None = None,
+        lease: CameraLease | None = None,
     ) -> None:
         if frames is not None and not isinstance(frames, FrameSource):
             raise TypeError("frames must be a FrameSource")
@@ -208,12 +213,15 @@ class CameraTimingFactory(TimingSourceFactory):
             raise TypeError("devices must be a callable")
         if configurations is not None and not callable(getattr(configurations, "load", None)):
             raise TypeError("configurations must load a camera configuration")
+        if lease is not None and not isinstance(lease, CameraLease):
+            raise TypeError("lease must be a CameraLease")
         self._frames = frames
         self._settings = settings
         self._background = background
         self._camera = camera
         self._devices = devices
         self._configurations = configurations
+        self._lease = lease
 
     @property
     def provider_id(self) -> str:
@@ -227,6 +235,8 @@ class CameraTimingFactory(TimingSourceFactory):
         """Probe the device, then close it. An injected frame source is not hardware."""
         if self._frames is not None:
             return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
+        if self._lease is not None and self._lease.holder() is not None:
+            return ProviderAvailability.unavailable("error.timing_provider.camera_in_use")
         try:
             device = self._make_device(self._session_camera())
         except ProviderConfigurationError as error:
@@ -259,7 +269,11 @@ class CameraTimingFactory(TimingSourceFactory):
         if self._frames is not None:
             frames = self._frames
         else:
-            frames = CameraFrameSource(self._make_device(camera))
+            frames = CameraFrameSource(
+                self._make_device(camera),
+                lease=self._lease,
+                lease_owner=CameraLease.RACE,
+            )
         return CameraTimingProvider(spec, frames, settings, self._background)
 
     def _prepare(self, spec: TimingSessionSpec) -> tuple[CameraConfig, DetectorSettings | None]:

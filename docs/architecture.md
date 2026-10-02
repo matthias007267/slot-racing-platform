@@ -53,15 +53,15 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
-| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, and one global saved configuration (device hint and detection zones) in the `settings` table. Zones are not stored per track |
+| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Timing** page that edits that document on the live picture. Zones are not stored per track |
 | `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
 
 ### Shared UI helpers (`slot_racing.uikit`)
 
 Small Qt helpers used by the pages of several modules: `EntityPage` (list with add / edit /
 (de)activate / delete), `FormDialog`, table helpers, `describe_error` and the common German texts.
-It depends on the core only; the core, the engine and the timing modules never import it
-(import-linter).
+It depends on the core only. The core, the engine, the timing module and the camera timing
+logic never import it (import-linter). The camera setup page (`timing_camera.ui`) may.
 
 ## Master data and race flow
 
@@ -310,6 +310,16 @@ snapshot on the source; the capture thread does not read it again. No zones mean
 cannot start a race. Another track does not replace the saved zones. The engine stays
 provider-neutral.
 
+The same document is edited on the **Kamera-Timing** page (`timing_camera.ui`, ADR 0012).
+The page is its own navigation entry. It is not part of the track page. Zones are drawn,
+moved and resized on a preview picture and saved again as fractions of the frame. The
+preview opens the capture device only; it does not run the detector and it does not publish
+`SensorTriggered`. A shared lease keeps that preview from opening the camera while a race
+already holds it. `position_id` is typed as an identifier and `lane` is a number, because
+there is no global list of positions: those still belong to each track's timing setup.
+"Speichern" writes the existing settings row. "Abbrechen" reloads it. Closing the page
+releases the device.
+
 ### Timing configuration UI (`tracks` module)
 
 The track page has a *Timing-Konfiguration* button. It opens, inside the same navigation page,
@@ -391,7 +401,8 @@ data can be deactivated but not deleted.
 - *Einstellungen* lists the modules with checkboxes to enable/disable them at runtime; the
   choice is saved in the config file.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
-  Rennen 40, Zeitmessung 50, Statistiken 60, Streckenplaner 70, Einstellungen (shell).
+  Rennen 40, Zeitmessung 50, Kamera-Timing 55 (only when the camera plugin is enabled),
+  Statistiken 60, Streckenplaner 70, Einstellungen (shell).
 
 ## Dependency rules
 
@@ -405,7 +416,9 @@ data can be deactivated but not deleted.
 | `modules.races.ui` ↛ engine, recorder (no race logic in the UI) | import-linter |
 | `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
 | race engine ↛ timing modules, `app`, `uikit` (engine knows only the core) | import-linter |
-| `timing`, `timing_camera`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |
+| `timing`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |
+| camera timing logic (capture, detection, configuration, store, provider, preview) ↛ PySide6, `uikit` | import-linter |
+| `timing_camera.ui` ↛ cv2, `opencv_device`, `races` | import-linter |
 | `tracks.timing_editor`, `tracks.timing_test` ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
 | Adding a module: add entry point and add it to the independence contract | review |
 

@@ -61,6 +61,31 @@ class OpenCVCapture:
             capture.release()
 
 
+def probe_device_indices(limit: int = 5) -> tuple[int, ...]:
+    """Open each index briefly and close it again. Nothing is left running.
+
+    A failure to open one index is skipped. The probe itself must not take the
+    application down when no camera is attached.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be >= 1")
+    cv2 = _cv2()
+    found: list[int] = []
+    for index in range(limit):
+        try:
+            capture = cv2.VideoCapture(index)
+        except Exception:
+            continue
+        try:
+            if bool(capture.isOpened()):
+                found.append(index)
+        except Exception:
+            continue
+        finally:
+            capture.release()
+    return tuple(found)
+
+
 def _cv2() -> Any:
     import cv2
 
