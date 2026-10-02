@@ -73,6 +73,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "timing.test.trigger": "Simulation auslösen",
         "timing.test.trigger_lap": "Ganze Runde simulieren",
         "timing.test.reset": "Zurücksetzen",
+        "timing.test.back": "Zurück zur Konfiguration",
         "timing.test.column.number": "Nr.",
         "timing.test.column.time": "Zeit",
         "timing.test.column.sensor": "Sensor",

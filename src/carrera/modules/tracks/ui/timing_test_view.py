@@ -67,7 +67,7 @@ class TimingTestView(QWidget):
         self.lap_button.setObjectName("timing-test-lap")
         self.reset_button = QPushButton(tr("timing.test.reset"))
         self.reset_button.setObjectName("timing-test-reset")
-        self.back_button = QPushButton(tr("timing.back"))
+        self.back_button = QPushButton(tr("timing.test.back"))
         self.back_button.setObjectName("timing-test-back")
         self.back_button.setVisible(show_back)
 
