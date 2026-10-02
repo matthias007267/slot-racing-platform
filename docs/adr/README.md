@@ -10,5 +10,6 @@
 | [0006](0006-database-layout.md) | One SQLite database, one migration history, module-owned models |
 | [0007](0007-catalogs-timing-factory-and-race-flow.md) | Core catalogs, timing factory and the event driven race flow |
 | [0008](0008-track-timing-layout.md) | Track timing layout: logical positions, sensors and setups |
+| [0009](0009-timing-provider-infrastructure.md) | Timing providers: ids, registry, capabilities, availability and errors |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

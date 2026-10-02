@@ -18,7 +18,8 @@ dynamic navigation. Usable in the application:
   (unique driver start numbers, lane count, driver assignment for vehicles).
 - **Rennen:** six step setup (name, track, mode with laps, participants with driver, vehicle and
   lane, overview, start), live view with positions and lap times, and stored results that can be
-  reopened later. Timing is simulated (`SimulationTimingProvider`).
+  reopened later. Timing comes from a selectable timing provider; the simulation is the only one so far.
+  New providers (camera, Raspberry Pi, ...) register themselves and then appear in the selection.
 - **Timing-Konfiguration (Strecken):** each track can have a timing layout of logical positions
   (start/finish plus any number of sectors) with a sensor assigned to every position. Editor,
   six step wizard and a test mode with simulated events; the simulation and later timing
