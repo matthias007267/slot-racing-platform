@@ -1,0 +1,4 @@
+{
+  "name": "Carrera Racing Platform",
+  "install": "bash .cursor/install.sh"
+}

@@ -36,6 +36,24 @@ uv sync
 `uv sync` installs the project in editable mode, which is also required for module discovery
 (entry points).
 
+### Cursor Cloud / Web environment
+
+The repository ships `.cursor/environment.json`, which Cursor uses with priority over any
+dashboard-managed environment. Its `install` command runs `.cursor/install.sh` on a fresh Ubuntu
+VM (during environment builds, or on agent boot when no build exists). The script is idempotent
+and does exactly what the manual installation above needs, nothing more:
+
+1. installs the Qt system libraries via `apt` if they are missing,
+2. installs the pinned `uv` version (`UV_VERSION`, default `0.12.22`) and links it into
+   `/usr/local/bin`, because install/start run in non-interactive login shells that do not load
+   `~/.bashrc`,
+3. runs `uv sync --locked`, so the environment matches `uv.lock` exactly (it fails if the lock
+   file is out of date; refresh it with `uv lock`).
+
+No `start` command is configured because the application has no background services. Run the
+script locally with `bash .cursor/install.sh`. The GitHub Actions workflow does not use it; it
+installs uv with `astral-sh/setup-uv` and runs `uv sync --locked` itself.
+
 ## Run
 
 ```bash
