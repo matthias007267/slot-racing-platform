@@ -19,6 +19,36 @@ def test_create_vehicle(env: Env) -> None:
     assert vehicle.label == "Rennwagen (Porsche 911)"
 
 
+def test_scale_and_notes_are_stored_and_can_be_cleared(env: Env) -> None:
+    created = env.vehicles.create_vehicle(
+        VehicleInput(name="Rennwagen", model="911", scale=" 1:32 ", notes=" neue Reifen ")
+    )
+    assert created.scale == "1:32"
+    assert created.notes == "neue Reifen"
+    assert env.vehicles.get_vehicle(created.id) == created
+
+    changed = env.vehicles.update_vehicle(
+        created.id, VehicleInput(name="Rennwagen", model="911", scale="1:24", notes="andere Räder")
+    )
+    assert (changed.scale, changed.notes) == ("1:24", "andere Räder")
+
+    cleared = env.vehicles.update_vehicle(
+        created.id, VehicleInput(name="Rennwagen", model="911", scale="  ", notes="")
+    )
+    assert cleared.scale is None
+    assert cleared.notes is None
+
+
+def test_scale_and_notes_reject_text_that_is_too_long(env: Env) -> None:
+    with pytest.raises(ValidationError) as caught:
+        env.vehicles.create_vehicle(VehicleInput(name="A", model="B", scale="1" * 17))
+    assert caught.value.key == "error.vehicle.scale.too_long"
+    with pytest.raises(ValidationError) as caught:
+        env.vehicles.create_vehicle(VehicleInput(name="A", model="B", notes="n" * 2001))
+    assert caught.value.key == "error.vehicle.notes.too_long"
+    assert env.vehicles.list_vehicles() == []
+
+
 def test_vehicle_requires_name_and_model(env: Env) -> None:
     with pytest.raises(ValidationError) as caught:
         env.vehicles.create_vehicle(VehicleInput(name="", model="x"))

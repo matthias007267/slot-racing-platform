@@ -183,6 +183,109 @@ def test_vehicle_page_assigns_and_unassigns_a_driver(qtbot: QtBot, env: Env) -> 
     assert env.vehicles.list_vehicles()[0].driver_id is None
 
 
+def test_vehicle_dialog_saves_and_clears_scale_and_notes(qtbot: QtBot, env: Env) -> None:
+    _, page = open_page(qtbot, env, "vehicles")
+    assert isinstance(page, VehiclesPage)
+
+    def fill(dialog: QDialog) -> None:
+        assert isinstance(dialog, VehicleDialog)
+        dialog.name_edit.setText("Rennwagen")
+        dialog.model_edit.setText("911")
+        dialog.scale_edit.setText("1:32")
+        dialog.notes_edit.setPlainText("neue Reifen")
+
+    page.dialog_runner = runner_for(fill)
+    page.add()
+    stored = env.vehicles.list_vehicles()[0]
+    assert (stored.scale, stored.notes) == ("1:32", "neue Reifen")
+
+    page.select_id(stored.id)
+
+    def edit(dialog: QDialog) -> None:
+        assert isinstance(dialog, VehicleDialog)
+        assert dialog.scale_edit.text() == "1:32"
+        assert dialog.notes_edit.toPlainText() == "neue Reifen"
+        dialog.scale_edit.setText("")
+        dialog.notes_edit.setPlainText("   ")
+
+    page.dialog_runner = runner_for(edit)
+    page.edit_selected()
+    cleared = env.vehicles.get_vehicle(stored.id)
+    assert cleared is not None
+    assert cleared.scale is None and cleared.notes is None
+
+
+def test_driver_page_shows_the_selected_drivers_vehicles(qtbot: QtBot, env: Env) -> None:
+    anna = env.driver("Anna")
+    ben = env.driver("Ben")
+    solo = env.driver("Solo")
+    env.vehicle("Porsche", driver_id=anna.id)
+    env.vehicle("Ferrari", driver_id=ben.id)
+    _, page = open_page(qtbot, env, "drivers")
+    assert isinstance(page, DriversPage)
+    page.refresh()
+    assert page.vehicles_table.rowCount() == 0
+    assert page.vehicles_empty.text() == "Wählen Sie einen Fahrer aus, um seine Fahrzeuge zu sehen."
+
+    page.select_id(anna.id)
+    assert cells(page.vehicles_table, 0) == ["Porsche", "911"]
+    assert page.vehicles_empty.text() == ""
+
+    page.select_id(ben.id)
+    assert cells(page.vehicles_table, 0) == ["Ferrari", "911"]
+
+    page.select_id(solo.id)
+    assert page.vehicles_table.rowCount() == 0
+    assert page.vehicles_empty.text() == "Diesem Fahrer ist kein Fahrzeug zugeordnet."
+
+
+def test_driver_start_number_cannot_exceed_the_service_limit(qtbot: QtBot, env: Env) -> None:
+    _, page = open_page(qtbot, env, "drivers")
+    assert isinstance(page, DriversPage)
+    seen: list[int] = []
+
+    def inspect(dialog: QDialog) -> int:
+        assert isinstance(dialog, DriverDialog)
+        assert dialog.start_number_edit.maximum() == 999
+        dialog.start_number_edit.setValue(5000)
+        seen.append(dialog.start_number_edit.value())
+        return int(QDialog.DialogCode.Rejected)
+
+    page.dialog_runner = inspect
+    page.add()
+    assert seen == [999]
+
+
+def test_wizard_lists_only_the_drivers_own_and_unowned_vehicles(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heimbahn", lanes=2)
+    anna = env.driver("Anna")
+    ben = env.driver("Ben")
+    porsche = env.vehicle("Porsche", driver_id=anna.id)
+    spare = env.vehicle("Ersatz")
+    ferrari = env.vehicle("Ferrari", driver_id=ben.id)
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Finale")
+    assert wizard.go_next()
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(track.id))
+    assert wizard.go_next()
+    assert wizard.go_next()
+    assert wizard.step == PARTICIPANTS
+
+    def offered(driver_id: int) -> set[object]:
+        wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(driver_id))
+        return {
+            wizard.vehicle_combo.itemData(index) for index in range(wizard.vehicle_combo.count())
+        }
+
+    assert offered(anna.id) == {porsche.id, spare.id}
+    assert wizard.vehicle_combo.currentData() == porsche.id
+    assert offered(ben.id) == {ferrari.id, spare.id}
+    assert wizard.vehicle_combo.currentData() == ferrari.id
+
+
 def test_vehicle_dialog_requires_a_model(qtbot: QtBot, env: Env) -> None:
     _, page = open_page(qtbot, env, "vehicles")
     assert isinstance(page, VehiclesPage)

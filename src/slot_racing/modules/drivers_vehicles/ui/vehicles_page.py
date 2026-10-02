@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QPushButton, QSpinBox, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QWidget,
+)
 
 from slot_racing.core.catalog import VehicleInfo
 from slot_racing.core.domain import DriverId, VehicleId
@@ -32,6 +40,11 @@ class VehicleDialog(FormDialog):
         self.model_edit.setObjectName("vehicle-model")
         self.manufacturer_edit = QLineEdit(vehicle.manufacturer or "" if vehicle else "")
         self.manufacturer_edit.setObjectName("vehicle-manufacturer")
+        self.scale_edit = QLineEdit(vehicle.scale or "" if vehicle else "")
+        self.scale_edit.setObjectName("vehicle-scale")
+        self.notes_edit = QPlainTextEdit(vehicle.notes or "" if vehicle else "")
+        self.notes_edit.setObjectName("vehicle-notes")
+        self.notes_edit.setFixedHeight(70)
         self.start_number_edit = QSpinBox()
         self.start_number_edit.setObjectName("vehicle-start-number")
         self.start_number_edit.setRange(0, 9999)
@@ -48,6 +61,8 @@ class VehicleDialog(FormDialog):
         self.form.addRow(tr("vehicle.field.name"), self.name_edit)
         self.form.addRow(tr("vehicle.field.model"), self.model_edit)
         self.form.addRow(tr("vehicle.field.manufacturer"), self.manufacturer_edit)
+        self.form.addRow(tr("vehicle.field.scale"), self.scale_edit)
+        self.form.addRow(tr("vehicle.field.notes"), self.notes_edit)
         self.form.addRow(tr("vehicle.field.start_number"), self.start_number_edit)
         self.form.addRow(tr("vehicle.field.driver"), self.driver_combo)
 
@@ -57,6 +72,8 @@ class VehicleDialog(FormDialog):
             name=self.name_edit.text(),
             model=self.model_edit.text(),
             manufacturer=self.manufacturer_edit.text(),
+            scale=self.scale_edit.text(),
+            notes=self.notes_edit.toPlainText(),
             start_number=self.start_number_edit.value() or None,
             driver_id=None if driver_id is None else DriverId(driver_id),
         )

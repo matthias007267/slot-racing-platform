@@ -112,6 +112,26 @@ def test_unknown_driver_and_vehicle_are_rejected(env: Env) -> None:
     assert key_of(caught) == "error.race.vehicle_unknown"
 
 
+def test_a_vehicle_must_belong_to_the_driver_or_to_nobody(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=4), 3)
+    owner = env.driver("Anna")
+    other = env.driver("Ben")
+    own_car = env.vehicle("Porsche", driver_id=owner.id)
+    free_car = env.vehicle("Ersatz")
+    foreign_car = env.vehicle("Ferrari", driver_id=other.id)
+
+    added = env.races.add_participant(race.id, owner.id, own_car.id, 1)
+    assert added.vehicle_id == own_car.id
+    added_free = env.races.add_participant(race.id, other.id, free_car.id, 2)
+    assert added_free.vehicle_id == free_car.id
+
+    third = env.driver("Chris")
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, third.id, foreign_car.id, 3)
+    assert key_of(caught) == "error.race.vehicle_wrong_driver"
+    assert len(env.races.require_race(race.id).participants) == 2
+
+
 def test_participants_must_be_unique(env: Env) -> None:
     race = env.races.create_race("R", env.track_id(), 3)
     d1, v1 = env.pair(1)

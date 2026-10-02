@@ -118,6 +118,8 @@ class RaceService:
             raise ValidationError("error.race.vehicle_unknown")
         if not vehicle.is_active:
             raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+        if vehicle.driver_id not in (None, driver_id):
+            raise ValidationError("error.race.vehicle_wrong_driver", vehicle=vehicle.label)
 
         with self._database.session() as session:
             race = self._load_editable(session, race_id)

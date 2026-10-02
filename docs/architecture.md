@@ -77,8 +77,9 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
 - `races` never imports `drivers_vehicles` or `tracks`; it looks them up through the catalog
   interfaces in `slot_racing.core.catalog`, which those modules register as services.
 - Participant rules live in `RaceService.add_participant`: driver and vehicle exist and are
-  active, the lane exists on the track and is free, driver and vehicle are used once, and the
-  number of participants never exceeds the track's lane count. A race is editable while
+  active, the vehicle belongs to that driver or to nobody, the lane exists on the track and is
+  free, driver and vehicle are used once, and the number of participants never exceeds the
+  track's lane count. A race is editable while
   `CREATED`/`READY`; adding the first participant makes it `READY`.
 - A race stores its `timing_provider` id (races created before this existed use `simulation`).
   `RaceService.validate_startable` runs the provider preflight, so an unavailable provider is
