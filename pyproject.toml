@@ -1,0 +1,120 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "carrera-racing-platform"
+version = "0.1.0"
+description = "Modular desktop application for managing and running Carrera slot-car races."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+    "PySide6>=6.7",
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "pydantic>=2.6",
+]
+
+[project.gui-scripts]
+carrera = "carrera.app.main:main"
+
+[project.entry-points."carrera.plugins"]
+drivers_vehicles = "carrera.modules.drivers_vehicles.plugin:DriversVehiclesPlugin"
+tracks = "carrera.modules.tracks.plugin:TracksPlugin"
+races = "carrera.modules.races.plugin:RacesPlugin"
+timing = "carrera.modules.timing.plugin:TimingPlugin"
+timing_camera = "carrera.modules.timing_camera.plugin:CameraTimingPlugin"
+timing_sensor = "carrera.modules.timing_sensor.plugin:SensorTimingPlugin"
+track_planner = "carrera.modules.track_planner.plugin:TrackPlannerPlugin"
+audio_animation = "carrera.modules.audio_animation.plugin:AudioAnimationPlugin"
+statistics = "carrera.modules.statistics.plugin:StatisticsPlugin"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.0",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/carrera"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["src/carrera/core/storage/migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF", "PT"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "PT011", "PT012", "PT018"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+# Registries are keyed by abstract interface classes (e.g. TimingSource).
+disable_error_code = ["type-abstract"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+
+[tool.importlinter]
+root_packages = ["carrera"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Core does not depend on app or modules"
+type = "forbidden"
+source_modules = ["carrera.core"]
+forbidden_modules = ["carrera.app", "carrera.modules"]
+
+[[tool.importlinter.contracts]]
+name = "Core is free of UI and hardware libraries"
+type = "forbidden"
+source_modules = ["carrera.core"]
+forbidden_modules = ["PySide6", "cv2", "gpiozero", "RPi"]
+
+[[tool.importlinter.contracts]]
+name = "Modules are independent of each other"
+type = "independence"
+modules = [
+    "carrera.modules.drivers_vehicles",
+    "carrera.modules.tracks",
+    "carrera.modules.races",
+    "carrera.modules.timing",
+    "carrera.modules.timing_camera",
+    "carrera.modules.timing_sensor",
+    "carrera.modules.track_planner",
+    "carrera.modules.audio_animation",
+    "carrera.modules.statistics",
+]
+
+[[tool.importlinter.contracts]]
+name = "Modules do not depend on the app shell"
+type = "forbidden"
+source_modules = ["carrera.modules"]
+forbidden_modules = ["carrera.app"]
+
+[[tool.importlinter.contracts]]
+name = "App shell loads modules only through the plugin system"
+type = "forbidden"
+source_modules = ["carrera.app"]
+forbidden_modules = ["carrera.modules"]
+
+[[tool.importlinter.contracts]]
+name = "Race engine is free of UI and hardware libraries"
+type = "forbidden"
+source_modules = ["carrera.modules.races"]
+forbidden_modules = ["PySide6", "cv2", "gpiozero", "RPi"]
