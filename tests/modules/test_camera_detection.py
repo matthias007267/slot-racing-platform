@@ -111,6 +111,16 @@ def test_leaving_the_zone_returns_to_clear() -> None:
     assert found.zone_state(POSITION, 1) is ZoneState.CLEAR
 
 
+def test_synchronize_marks_a_zone_occupied_without_a_crossing() -> None:
+    found = LaneCrossingDetector(settings(1), background=blank())
+    found.synchronize(car_at(1, x=38))
+    assert found.zone_state(POSITION, 1) is ZoneState.OCCUPIED
+    assert found.observe(car_at(1, x=38), 2) == ()
+    assert found.observe(blank(), 3) == ()
+    assert found.zone_state(POSITION, 1) is ZoneState.CLEAR
+    assert len(found.observe(car_at(1, x=38), 4)) == 1
+
+
 def test_entering_again_emits_a_second_crossing() -> None:
     found = detector(1)
     first = found.observe(car_at(1, x=38), 100)
@@ -367,7 +377,6 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
     root = Path("src/slot_racing/modules/timing_camera")
     forbidden = (
         "PySide6",
-        "cv2",
         "slot_racing.app",
         "slot_racing.uikit",
         "slot_racing.core.domain",
@@ -376,10 +385,21 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
         "slot_racing.modules.drivers_vehicles",
         "slot_racing.modules.tracks",
     )
-    detection_only = {"_checks.py", "detection.py", "frames.py", "geometry.py", "frame_source.py"}
+    detection_only = {
+        "_checks.py",
+        "camera_config.py",
+        "capture.py",
+        "detection.py",
+        "frames.py",
+        "geometry.py",
+        "frame_source.py",
+        "opencv_device.py",
+    }
     for path in sorted(root.glob("*.py")):
         source = path.read_text(encoding="utf-8")
-        assert "VideoCapture" not in source
+        if path.name != "opencv_device.py":
+            assert "VideoCapture" not in source
+            assert "import cv2" not in source
         tree = ast.parse(source)
         imported: list[str] = []
         for node in ast.walk(tree):

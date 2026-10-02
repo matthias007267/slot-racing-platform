@@ -9,7 +9,7 @@ from slot_racing.modules.timing_camera.provider import CameraTimingFactory
 class CameraTimingPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="timing_camera",
-        version="0.2.0",
+        version="0.3.0",
         title="Camera timing",
         enabled_by_default=False,
     )

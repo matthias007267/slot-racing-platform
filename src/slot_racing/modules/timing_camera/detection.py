@@ -157,6 +157,24 @@ class LaneCrossingDetector:
         crossings.sort(key=_crossing_order)
         return tuple(crossings)
 
+    def synchronize(self, frame: GrayFrame) -> None:
+        """Match every zone to ``frame`` without emitting a crossing.
+
+        The reference background stays unchanged. A car that is already inside a
+        zone is occupied afterwards, so the following frames do not treat it as
+        a new entry. Used once after a pause, on the first frame grabbed after
+        the resume.
+        """
+        self._check_frame(frame, self._settings, self._background)
+        if self._background is None:
+            self._background = frame
+            return
+        minimum = self._settings.min_foreground_pixels
+        for zone in self._settings.zones:
+            count = _foreground_pixels(frame, self._background, zone.roi, self._settings.threshold)
+            state = ZoneState.OCCUPIED if count >= minimum else ZoneState.CLEAR
+            self._states[(zone.position_id, zone.lane)] = state
+
     @staticmethod
     def _check_frame(
         frame: GrayFrame, settings: DetectorSettings, background: GrayFrame | None
