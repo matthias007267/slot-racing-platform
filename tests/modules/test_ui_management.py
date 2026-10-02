@@ -11,16 +11,16 @@ from PySide6.QtWidgets import QDialog, QTableWidget
 from pytestqt.qtbot import QtBot
 from sqlalchemy.exc import OperationalError
 
-from carrera.app.main_window import MainWindow
-from carrera.core.domain import RaceStatus
-from carrera.modules.drivers_vehicles.ui.drivers_page import DriverDialog, DriversPage
-from carrera.modules.drivers_vehicles.ui.vehicles_page import VehicleDialog, VehiclesPage
-from carrera.modules.races.ui.live_view import LiveRaceView
-from carrera.modules.races.ui.races_page import RacesPage
-from carrera.modules.races.ui.results_view import ResultsView
-from carrera.modules.races.ui.wizard import MODE, NAME, OVERVIEW, PARTICIPANTS, START, TRACK
-from carrera.modules.tracks.ui.tracks_area import TracksArea
-from carrera.modules.tracks.ui.tracks_page import TrackDialog, TracksPage
+from slot_racing.app.main_window import MainWindow
+from slot_racing.core.domain import RaceStatus
+from slot_racing.modules.drivers_vehicles.ui.drivers_page import DriverDialog, DriversPage
+from slot_racing.modules.drivers_vehicles.ui.vehicles_page import VehicleDialog, VehiclesPage
+from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.races_page import RacesPage
+from slot_racing.modules.races.ui.results_view import ResultsView
+from slot_racing.modules.races.ui.wizard import MODE, NAME, OVERVIEW, PARTICIPANTS, START, TRACK
+from slot_racing.modules.tracks.ui.tracks_area import TracksArea
+from slot_racing.modules.tracks.ui.tracks_page import TrackDialog, TracksPage
 from tests.modules.conftest import Env
 
 

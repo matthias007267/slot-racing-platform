@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock
-from carrera.core.domain import (
+from slot_racing.core.clock import NANOS_PER_SECOND as S
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.domain import (
     DriverId,
     Participant,
     RaceId,
@@ -16,8 +16,8 @@ from carrera.core.domain import (
     TimingSetup,
     TrackId,
 )
-from carrera.core.errors import ValidationError
-from carrera.core.events import (
+from slot_racing.core.errors import ValidationError
+from slot_racing.core.events import (
     Event,
     EventBus,
     LapCompleted,
@@ -25,9 +25,9 @@ from carrera.core.events import (
     SectorCompleted,
     SensorTriggered,
 )
-from carrera.core.timing import ManuallyTriggerable, TimingSessionSpec, TimingSetupService
-from carrera.modules.races.engine import RaceConfig, RaceEngine
-from carrera.modules.timing.simulation import (
+from slot_racing.core.timing import ManuallyTriggerable, TimingSessionSpec, TimingSetupService
+from slot_racing.modules.races.engine import RaceConfig, RaceEngine
+from slot_racing.modules.timing.simulation import (
     SimulatedLane,
     SimulationTimingFactory,
     SimulationTimingProvider,

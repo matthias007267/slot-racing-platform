@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.errors import ValidationError
-from carrera.modules.tracks.service import MAX_LANES, TrackInput
+from slot_racing.core.errors import ValidationError
+from slot_racing.modules.tracks.service import MAX_LANES, TrackInput
 from tests.modules.conftest import Env
 
 

@@ -6,18 +6,18 @@ from typing import ClassVar
 
 import pytest
 
-from carrera.core.clock import ManualClock
-from carrera.core.config import AppConfig
-from carrera.core.domain import default_timing_setup
-from carrera.core.errors import (
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.config import AppConfig
+from slot_racing.core.domain import default_timing_setup
+from slot_racing.core.errors import (
     ProviderConfigurationError,
     ProviderUnavailable,
     TimingProviderError,
     ValidationError,
 )
-from carrera.core.events import EventBus
-from carrera.core.i18n import Translator
-from carrera.core.plugin import (
+from slot_racing.core.events import EventBus
+from slot_racing.core.i18n import Translator
+from slot_racing.core.plugin import (
     ContributionRegistry,
     Plugin,
     PluginContext,
@@ -26,13 +26,13 @@ from carrera.core.plugin import (
     PluginState,
     ServiceRegistry,
 )
-from carrera.core.timing import (
+from slot_racing.core.timing import (
     ProviderAvailability,
     ProviderCapabilities,
     TimingSessionSpec,
     TimingSourceFactory,
 )
-from carrera.core.timing_registry import TimingProviderRegistry
+from slot_racing.core.timing_registry import TimingProviderRegistry
 from tests.support.timing import FakeTimingFactory, FakeTimingSource
 
 

@@ -3,12 +3,12 @@ from typing import ClassVar
 
 import pytest
 
-from carrera.core.clock import ManualClock
-from carrera.core.config import AppConfig
-from carrera.core.domain import RaceId
-from carrera.core.events import Event, EventBus, PluginDisabled, PluginEnabled, RaceStarting
-from carrera.core.i18n import Translator
-from carrera.core.plugin import (
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.config import AppConfig
+from slot_racing.core.domain import RaceId
+from slot_racing.core.events import Event, EventBus, PluginDisabled, PluginEnabled, RaceStarting
+from slot_racing.core.i18n import Translator
+from slot_racing.core.plugin import (
     ContributionRegistry,
     NavigationItem,
     Plugin,
@@ -23,7 +23,7 @@ from carrera.core.plugin import (
     ServiceRegistry,
     discover_plugins,
 )
-from carrera.core.timing import TimingSource
+from slot_racing.core.timing import TimingSource
 
 
 class _Greeter:

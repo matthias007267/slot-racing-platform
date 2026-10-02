@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.domain import DriverId, RaceId, RaceStatus, TrackId, VehicleId
-from carrera.core.errors import ValidationError
+from slot_racing.core.domain import DriverId, RaceId, RaceStatus, TrackId, VehicleId
+from slot_racing.core.errors import ValidationError
 from tests.modules.conftest import Env
 
 

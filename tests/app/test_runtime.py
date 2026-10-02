@@ -1,16 +1,16 @@
 from pathlib import Path
 from typing import ClassVar
 
-from carrera.app.runtime import Runtime
-from carrera.core.config import AppConfig, load_config
-from carrera.core.plugin import (
+from slot_racing.app.runtime import Runtime
+from slot_racing.core.config import AppConfig, load_config
+from slot_racing.core.plugin import (
     NavigationItem,
     Plugin,
     PluginContext,
     PluginManifest,
     PluginState,
 )
-from carrera.core.storage import Database
+from slot_racing.core.storage import Database
 
 
 def create(config: AppConfig | None = None, **kwargs: object) -> Runtime:

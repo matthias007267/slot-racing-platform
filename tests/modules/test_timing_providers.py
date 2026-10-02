@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock
-from carrera.core.domain import (
+from slot_racing.core.clock import NANOS_PER_SECOND as S
+from slot_racing.core.clock import ManualClock
+from slot_racing.core.domain import (
     DriverId,
     Participant,
     RaceId,
@@ -21,7 +21,7 @@ from carrera.core.domain import (
     TimingSetup,
     default_timing_setup,
 )
-from carrera.core.events import (
+from slot_racing.core.events import (
     Event,
     EventBus,
     LapCompleted,
@@ -29,10 +29,10 @@ from carrera.core.events import (
     SectorCompleted,
     SensorTriggered,
 )
-from carrera.core.timing import TimingSessionSpec, TimingSource
-from carrera.core.timing_registry import TimingProviderRegistry
-from carrera.modules.races.engine import RaceConfig, RaceEngine
-from carrera.modules.timing.simulation import SimulationTimingFactory
+from slot_racing.core.timing import TimingSessionSpec, TimingSource
+from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.engine import RaceConfig, RaceEngine
+from slot_racing.modules.timing.simulation import SimulationTimingFactory
 from tests.support.timing import FakeTimingFactory, FakeTimingSource
 
 
@@ -294,7 +294,7 @@ def test_timing_layout_orders_are_independent_of_the_provider() -> None:
     assert [p.id for p in layout.lap_sequence] == [*FIVE[1:], FIVE[0]]
 
 
-ENGINE_FILE = Path(__file__).resolve().parents[2] / "src/carrera/modules/races/engine.py"
+ENGINE_FILE = Path(__file__).resolve().parents[2] / "src/slot_racing/modules/races/engine.py"
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -309,9 +309,11 @@ def imported_modules(path: Path) -> set[str]:
 
 def test_the_race_engine_imports_only_core_abstractions() -> None:
     modules = imported_modules(ENGINE_FILE)
-    carrera = {m for m in modules if m.startswith("carrera")}
-    assert carrera
-    assert all(m.startswith("carrera.core") or m == "carrera.modules.races.types" for m in carrera)
+    internal = {m for m in modules if m.startswith("slot_racing")}
+    assert internal
+    assert all(
+        m.startswith("slot_racing.core") or m == "slot_racing.modules.races.types" for m in internal
+    )
     assert not any(
         part in module
         for module in modules

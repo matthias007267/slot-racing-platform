@@ -1,11 +1,11 @@
 import pytest
 
-from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock, MonotonicClock
-from carrera.core.domain import TimingLayout, TimingSetup
-from carrera.core.events import SensorTriggered
-from carrera.core.timing import TimingSessionSpec, TimingSource
-from carrera.modules.timing.simulation import (
+from slot_racing.core.clock import NANOS_PER_SECOND as S
+from slot_racing.core.clock import ManualClock, MonotonicClock
+from slot_racing.core.domain import TimingLayout, TimingSetup
+from slot_racing.core.events import SensorTriggered
+from slot_racing.core.timing import TimingSessionSpec, TimingSource
+from slot_racing.modules.timing.simulation import (
     SimulatedLane,
     SimulationTimingFactory,
     SimulationTimingProvider,

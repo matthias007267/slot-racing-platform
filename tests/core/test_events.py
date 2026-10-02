@@ -2,8 +2,8 @@ from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 
-from carrera.core.domain import DriverId, RaceId
-from carrera.core.events import (
+from slot_racing.core.domain import DriverId, RaceId
+from slot_racing.core.events import (
     Event,
     EventBus,
     LapCompleted,

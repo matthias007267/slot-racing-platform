@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.errors import ValidationError
-from carrera.modules.drivers_vehicles.service import DriverInput
+from slot_racing.core.errors import ValidationError
+from slot_racing.modules.drivers_vehicles.service import DriverInput
 from tests.modules.conftest import Env
 
 

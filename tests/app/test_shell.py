@@ -5,12 +5,12 @@ import pytest
 from PySide6.QtWidgets import QCheckBox, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
-from carrera.app.main import main
-from carrera.app.main_window import MainWindow
-from carrera.app.runtime import Runtime
-from carrera.core.config import AppConfig
-from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
-from carrera.core.storage import Database
+from slot_racing.app.main import main
+from slot_racing.app.main_window import MainWindow
+from slot_racing.app.runtime import Runtime
+from slot_racing.core.config import AppConfig
+from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
+from slot_racing.core.storage import Database
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ def test_navigation_is_built_from_enabled_modules(qtbot: QtBot, runtime: Runtime
         "Streckenplaner",
         "Einstellungen",
     ]
-    assert window.windowTitle() == "Carrera Racing Platform"
+    assert window.windowTitle() == "Slot-Racing Platform"
     assert window.current_id() == "dashboard"
 
 
@@ -150,5 +150,5 @@ def test_closing_the_window_detaches_it_from_the_runtime(qtbot: QtBot, runtime: 
 
 
 def test_application_starts_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
-    monkeypatch.setenv("CARRERA_HOME", str(tmp_path))
+    monkeypatch.setenv("SLOT_RACING_HOME", str(tmp_path))
     assert main(["--smoke-test"]) == 0

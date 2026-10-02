@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import pytest
 
-from carrera.core.domain import DriverId
-from carrera.core.errors import ValidationError
-from carrera.modules.drivers_vehicles.service import VehicleInput
+from slot_racing.core.domain import DriverId
+from slot_racing.core.errors import ValidationError
+from slot_racing.modules.drivers_vehicles.service import VehicleInput
 from tests.modules.conftest import Env
 
 
 def test_create_vehicle(env: Env) -> None:
     vehicle = env.vehicles.create_vehicle(
-        VehicleInput(name=" Rennwagen ", model="Porsche 911", manufacturer="Carrera")
+        VehicleInput(name=" Rennwagen ", model="Porsche 911", manufacturer="ExampleBrand")
     )
     assert vehicle.name == "Rennwagen"
-    assert vehicle.manufacturer == "Carrera"
+    assert vehicle.manufacturer == "ExampleBrand"
     assert vehicle.driver_id is None
     assert vehicle.is_active
     assert vehicle.label == "Rennwagen (Porsche 911)"
