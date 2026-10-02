@@ -93,7 +93,8 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
 - The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), stored
   results are ordered by the position the engine determined. Last lap and average lap are
   computed by `RaceService`, not by the UI.
-- Races still marked running or paused at startup (crash) are set to `ABORTED`.
+- Races still marked running or paused at startup (crash) are set to `ABORTED`. Their standings
+  are rebuilt from the laps already stored; the open lap is not reconstructed.
 - Errors shown to the user are `ValidationError`s with translation keys; unexpected errors are
   logged and shown on the page. Pages, dialogs and the live view catch errors per action so a
   single failure never closes the application.
@@ -328,12 +329,16 @@ layout)`.
 
 - `start()` → `RaceStarting`, `RaceStarted`, `LapStarted` per participant; starts the sources.
 - Subscribes to `SensorTriggered`; each participant expects the next sensor of the lap sequence.
-  Unexpected sensors, unknown lanes and events while paused are ignored.
+  Unexpected sensors, unknown lanes, events while paused and events whose timestamp falls inside
+  a pause are ignored. The same position on the same lane is ignored again for 200 ms
+  (`SAME_POSITION_DEBOUNCE_NS`); any other position still counts.
 - Publishes `SectorCompleted`, `LapCompleted`, `LapStarted`.
 - A participant finishes after `laps` laps; the first finisher triggers `WinnerDetermined`;
   when all have finished `RaceFinished` is published and sources are stopped.
-- `pause()` / `resume()` exclude paused time from race time. `stop()` ends the race early,
-  ranking by laps and then time (`aborted=True`).
+- `pause()` / `resume()` exclude paused time from race time and may be repeated. The open lap
+  stays open. `stop()` ends the race early (`aborted=True`) without turning the open lap into
+  a completed one. Ranking: finishers by crossing order, then more laps, then the smaller time
+  of the last completed lap, then the lower lane.
 - `elapsed_ns()` is the race time without pauses. `poll_sources()` lets host driven sources
   deliver events; `pause()`/`resume()` are forwarded to the sources.
 - A timing source that fails to start, poll, pause or resume is recorded in `source_errors`; the

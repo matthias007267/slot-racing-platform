@@ -11,7 +11,20 @@ Race rules implemented here:
   The engine looks at the logical position of an event, never at the sensor or hardware.
 * A participant finishes after completing ``laps`` laps. The first one to finish is the winner.
   The race finishes when all participants have finished or when it is stopped manually.
-* Events arriving while the race is paused are ignored and paused time is excluded from race time.
+* Events arriving while the race is paused are ignored. An event whose timestamp falls inside a
+  pause is ignored even when it is delivered after ``resume``. Paused time is excluded from
+  race time.
+* The same logical position on the same lane cannot count twice inside
+  :data:`SAME_POSITION_DEBOUNCE_NS`. A later real crossing of that position still counts, and
+  a different position is never blocked by this window.
+
+Standings (:meth:`RaceEngine.results`):
+
+1. Participants who have completed the lap target rank before those who have not.
+2. Finished participants keep the order in which they crossed the line.
+3. Unfinished participants rank by more completed laps.
+4. Then by the smaller race time of their last completed lap.
+5. Then by the lower lane number. That last step is a deterministic order, not a shared place.
 """
 
 from __future__ import annotations
@@ -46,6 +59,12 @@ from slot_racing.core.events import (
 from slot_racing.core.timing import TimingSource
 
 logger = logging.getLogger(__name__)
+
+# One physical pass can report the same position several times (contact bounce, a long body
+# over a point sensor). Those repeats arrive within a few tens of milliseconds. A slot car
+# cannot be back at the same position in 200 ms, so this gap drops the repeats without hiding
+# the next real lap or any other sector.
+SAME_POSITION_DEBOUNCE_NS = 200_000_000
 
 
 class RaceStateError(Exception):
@@ -105,6 +124,8 @@ class RaceEngine:
         self._started_at_ns = 0
         self._paused_at_ns = 0
         self._paused_total_ns = 0
+        self._pause_intervals: list[tuple[int, int]] = []
+        self._last_accepted_ns: dict[tuple[int, str], int] = {}
         self._finish_counter = 0
         self._final_elapsed_ns = 0
         self._winner_determined = False
@@ -147,6 +168,7 @@ class RaceEngine:
         if self._status is not RaceStatus.PAUSED:
             raise RaceStateError(f"cannot resume a race that is {self._status}")
         now = self._clock.now_ns()
+        self._pause_intervals.append((self._paused_at_ns, now))
         self._paused_total_ns += now - self._paused_at_ns
         self._status = RaceStatus.RUNNING
         self._for_each_source("resume", lambda source: source.resume())
@@ -196,8 +218,22 @@ class RaceEngine:
     def _race_time(self, timestamp_ns: int) -> int:
         return timestamp_ns - self._started_at_ns - self._paused_total_ns
 
+    def _timestamp_in_pause(self, timestamp_ns: int) -> bool:
+        """True when ``timestamp_ns`` was taken while the race was paused.
+
+        The interval is half-open ``[pause, resume)``, so an event at the resume instant counts
+        and an event from inside the pause does not, even if it arrives later.
+        """
+        return any(start <= timestamp_ns < end for start, end in self._pause_intervals)
+
+    def _repeats_same_pass(self, lane: int, position_id: str, timestamp_ns: int) -> bool:
+        last = self._last_accepted_ns.get((lane, position_id))
+        return last is not None and timestamp_ns - last < SAME_POSITION_DEBOUNCE_NS
+
     def _on_sensor(self, event: SensorTriggered) -> None:
         if self._status is not RaceStatus.RUNNING or event.timestamp_ns < self._started_at_ns:
+            return
+        if self._timestamp_in_pause(event.timestamp_ns):
             return
         state = self._states.get(event.lane)
         if state is None or state.finished:
@@ -208,6 +244,9 @@ class RaceEngine:
                 "Ignoring unexpected position %s on lane %s", event.position_id, event.lane
             )
             return
+        if self._repeats_same_pass(event.lane, event.position_id, event.timestamp_ns):
+            return
+        self._last_accepted_ns[(event.lane, event.position_id)] = event.timestamp_ns
 
         race_time = self._race_time(event.timestamp_ns)
         participant = state.participant
@@ -306,6 +345,8 @@ class RaceEngine:
         )
 
     def _ranking(self) -> tuple[ParticipantResult, ...]:
+        """See the module docstring for the five ranking rules."""
+
         def sort_key(state: _ParticipantState) -> tuple[int, int, int, int]:
             if state.finish_order is not None:
                 return (0, state.finish_order, 0, 0)

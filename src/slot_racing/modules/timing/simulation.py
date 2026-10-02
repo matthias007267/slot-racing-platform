@@ -131,15 +131,22 @@ class SimulationTimingProvider(TimingSource, ManuallyTriggerable):
             self._paused_at_ns = self._clock.now_ns()
 
     def resume(self) -> None:
-        """Shift all remaining events by the pause duration, as if the cars had stood still."""
+        """Shift remaining events by the pause, as if the cars had stood still.
+
+        An event that was already due before the pause is placed at the resume instant, so no
+        shifted timestamp stays inside the pause. The engine ignores timestamps from a pause.
+        """
         if self._paused_at_ns is None:
             return
-        shift = self._clock.now_ns() - self._paused_at_ns
+        now = self._clock.now_ns()
+        shift = now - self._paused_at_ns
         self._paused_at_ns = None
         if shift > 0:
             for index in range(self._next_index, len(self._schedule)):
                 event = self._schedule[index]
-                self._schedule[index] = replace(event, timestamp_ns=event.timestamp_ns + shift)
+                self._schedule[index] = replace(
+                    event, timestamp_ns=max(event.timestamp_ns + shift, now)
+                )
 
     def poll(self) -> None:
         """Deliver every event that is due according to the clock. Does not move the clock."""

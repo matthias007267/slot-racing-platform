@@ -88,9 +88,8 @@ class RaceWizard(QWidget):
         self.provider_combo.setObjectName("race-provider")
         self.provider_status = QLabel()
         self.provider_status.setObjectName("race-provider-status")
-        self.mode_combo = QComboBox()
-        self.mode_combo.setObjectName("race-mode")
-        self.mode_combo.addItem(tr("race.wizard.mode.laps"), "laps")
+        self.mode_value = QLabel(tr("race.wizard.mode.laps"))
+        self.mode_value.setObjectName("race-mode")
         self.laps_spin = QSpinBox()
         self.laps_spin.setObjectName("race-laps")
         self.laps_spin.setRange(1, MAX_LAPS)
@@ -207,7 +206,7 @@ class RaceWizard(QWidget):
                 layout.addWidget(self.provider_status)
             elif index == MODE:
                 layout.addWidget(QLabel(tr("race.wizard.mode")))
-                layout.addWidget(self.mode_combo)
+                layout.addWidget(self.mode_value)
                 layout.addWidget(QLabel(tr("race.wizard.laps")))
                 layout.addWidget(self.laps_spin)
             elif index == PARTICIPANTS:

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
-from PySide6.QtWidgets import QDialog, QTableWidget
+from PySide6.QtWidgets import QComboBox, QDialog, QTableWidget
 from pytestqt.qtbot import QtBot
 from sqlalchemy.exc import OperationalError
 
@@ -429,6 +429,21 @@ def test_wizard_reports_rule_violations_and_keeps_going(qtbot: QtBot, env: Env) 
     wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(2))
     assert not wizard.add_participant()  # lane 2 is taken
     assert "Spur 2 ist bereits vergeben" in wizard.status.text()
+
+
+def test_wizard_shows_lap_racing_as_the_only_mode(qtbot: QtBot, env: Env) -> None:
+    env.track("Heimbahn", lanes=2)
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Finale")
+    assert wizard.go_next()
+    wizard.track_combo.setCurrentIndex(0)
+    assert wizard.go_next()
+    assert wizard.step == MODE
+    assert wizard.mode_value.text() == "Rundenrennen"
+    assert wizard.findChild(QComboBox, "race-mode") is None
 
 
 def test_wizard_blocks_empty_steps(qtbot: QtBot, env: Env) -> None:

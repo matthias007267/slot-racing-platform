@@ -27,6 +27,23 @@ MAX_PROVIDER_ID_LENGTH = 64
 
 _EDITABLE = (RaceStatus.CREATED, RaceStatus.READY)
 _LIVE = (RaceStatus.RUNNING, RaceStatus.PAUSED)
+_MISSING_LAP_TIME = 2**62
+
+
+def _stored_standing_key(
+    participant: RaceParticipant, laps: list[Lap], target_laps: int
+) -> tuple[int, int, int, int]:
+    """Order stored laps the way the engine ranks a stopped race.
+
+    Finished cars (lap target reached) come first, by the race time of their finishing lap and
+    then by lane. The others follow by more laps, then the smaller race time of the last stored
+    lap, then the lower lane. The lane step only breaks an equal time; it is not a shared place.
+    """
+    completed = len(laps)
+    last_time = laps[-1].race_time_ns if laps else _MISSING_LAP_TIME
+    if completed >= target_laps:
+        return (0, last_time, participant.lane, 0)
+    return (1, -completed, last_time, participant.lane)
 
 
 class RaceService:
@@ -316,6 +333,9 @@ class RaceService:
                 Sector(lap_id=lap.id, sector_number=number, sector_time_ns=time_ns)
                 for number, time_ns in sorted(sector_times_ns.items())
             )
+            participant.laps_completed = lap_number
+            if participant.best_lap_ns is None or lap_time_ns < participant.best_lap_ns:
+                participant.best_lap_ns = lap_time_ns
 
     def record_finished(
         self, race_id: RaceId, results: Sequence[ParticipantResult], *, aborted: bool
@@ -341,22 +361,60 @@ class RaceService:
         """Mark a race that is recorded as running as aborted. Other races are left alone."""
         with self._database.session() as session:
             race = self._load(session, race_id)
-            self._abort_if_live(race)
+            self._abort_if_live(session, race)
 
     def abort_stale_races(self) -> int:
-        """Mark races that were still running when the application ended as aborted."""
+        """Abort races that were still running when the application ended.
+
+        Completed laps already stored in ``laps`` become the standings: ``laps_completed``,
+        ``best_lap_ns``, ``total_time_ns`` (race time of the last stored lap), ``finished``
+        (the lap target was reached) and ``final_position``. The open lap is not stored, so it
+        is not invented. Crossing order is not stored either; cars that finished the target are
+        ordered by the race time of that lap and then by lane, which is the same order the
+        engine used whenever those times differ.
+        """
         with self._database.session() as session:
             live = [status.value for status in _LIVE]
             stale = list(session.scalars(select(Race).where(Race.status.in_(live))))
             for race in stale:
-                self._abort_if_live(race)
+                self._abort_if_live(session, race)
             return len(stale)
 
+    def _abort_if_live(self, session: Session, race: Race) -> None:
+        if RaceStatus(race.status) not in _LIVE:
+            return
+        self._apply_stored_standings(session, race)
+        race.status = RaceStatus.ABORTED.value
+        race.finished_at = race.finished_at or utc_now()
+
     @staticmethod
-    def _abort_if_live(race: Race) -> None:
-        if RaceStatus(race.status) in _LIVE:
-            race.status = RaceStatus.ABORTED.value
-            race.finished_at = race.finished_at or utc_now()
+    def _apply_stored_standings(session: Session, race: Race) -> None:
+        participants = list(
+            session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
+        )
+        stored = [
+            (
+                participant,
+                list(
+                    session.scalars(
+                        select(Lap)
+                        .where(Lap.participant_id == participant.id)
+                        .order_by(Lap.lap_number)
+                    )
+                ),
+            )
+            for participant in participants
+        ]
+        ranked = sorted(
+            stored,
+            key=lambda item: _stored_standing_key(item[0], item[1], race.target_laps),
+        )
+        for position, (participant, laps) in enumerate(ranked, start=1):
+            participant.laps_completed = len(laps)
+            participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
+            participant.total_time_ns = laps[-1].race_time_ns if laps else None
+            participant.finished = len(laps) >= race.target_laps
+            participant.final_position = position
 
     # --- helpers -------------------------------------------------------------------------------
 

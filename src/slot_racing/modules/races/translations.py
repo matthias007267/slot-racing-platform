@@ -39,7 +39,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.wizard.start": "Rennen starten",
         "race.wizard.name": "Name des Rennens",
         "race.wizard.track": "Strecke",
-        "race.wizard.mode": "Rennmodus",
+        "race.wizard.mode": "Wertung",
         "race.wizard.mode.laps": "Rundenrennen",
         "race.wizard.laps": "Anzahl Runden",
         "race.wizard.driver": "Fahrer",
