@@ -21,6 +21,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "timing.back": "Zurück zur Streckenliste",
         "timing.position.start_finish": "Start/Ziel",
         "timing.position.sector": "Sektor {number}",
+        "timing.type.start_finish": "Start/Ziel",
+        "timing.type.sector": "Sektor",
         "timing.column.number": "Nr.",
         "timing.column.position": "Position",
         "timing.column.type": "Typ",

@@ -28,7 +28,7 @@ from carrera.core.errors import ValidationError
 from carrera.core.i18n import Translator
 from carrera.core.timing import TimingSetupService, TimingSourceFactory
 from carrera.modules.tracks.timing_editor import TimingDraft
-from carrera.modules.tracks.ui.common import entry_text, run_guarded, type_text, yes_no
+from carrera.modules.tracks.ui.common import entry_text, run_guarded, type_label, yes_no
 from carrera.modules.tracks.ui.timing_dialog import PositionDialog
 from carrera.modules.tracks.ui.timing_test_view import TimingTestView
 from carrera.uikit import StatusLabel, fill_table, heading, make_table, selected_id
@@ -324,7 +324,7 @@ class TimingWizard(QWidget):
         fill_table(
             self.positions_table,
             [
-                (str(i), name, type_text(tr, e.type, entries.index(e)))
+                (str(i), name, type_label(tr, e.type))
                 for i, (name, e) in enumerate(zip(names, entries, strict=True), start=1)
             ],
             ids,

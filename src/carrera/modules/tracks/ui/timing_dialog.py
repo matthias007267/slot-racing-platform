@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QWidget
 
 from carrera.core.i18n import Translator
 from carrera.modules.tracks.timing_editor import TimingDraft
-from carrera.modules.tracks.ui.common import entry_text, type_text
+from carrera.modules.tracks.ui.common import entry_text, type_label
 from carrera.uikit import FormDialog
 
 
@@ -23,7 +23,7 @@ class PositionDialog(FormDialog):
         self._draft = draft
         self._position_id = position_id
         entry = draft.entry(position_id)
-        self.type_label = QLabel(type_text(translator, entry.type, draft.entries.index(entry)))
+        self.type_label = QLabel(type_label(translator, entry.type))
         self.type_label.setObjectName("timing-position-type")
         self.name_edit = QLineEdit(entry.name or "")
         self.name_edit.setObjectName("timing-position-name")

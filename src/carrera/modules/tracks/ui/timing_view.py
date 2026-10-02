@@ -20,7 +20,7 @@ from carrera.core.domain import TimingPositionType, TimingSetup, default_timing_
 from carrera.core.i18n import Translator
 from carrera.core.timing import TimingSetupService
 from carrera.modules.tracks.timing_editor import TimingDraft
-from carrera.modules.tracks.ui.common import entry_text, run_guarded, type_text, yes_no
+from carrera.modules.tracks.ui.common import entry_text, run_guarded, type_label, yes_no
 from carrera.modules.tracks.ui.timing_dialog import PositionDialog
 from carrera.uikit import StatusLabel, fill_table, heading, make_table, selected_id
 
@@ -40,7 +40,7 @@ def draft_rows(translator: Translator, draft: TimingDraft) -> list[tuple[str, ..
         (
             str(index),
             entry_text(translator, draft.entries, entry),
-            type_text(translator, entry.type, draft.entries.index(entry)),
+            type_label(translator, entry.type),
             entry.sensor_id,
             entry.sensor_name or "",
             entry.hardware_id or "",

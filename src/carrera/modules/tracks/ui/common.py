@@ -31,6 +31,13 @@ def type_text(translator: Translator, type_: TimingPositionType, sector_number: 
     return translator.format("timing.position.sector", number=sector_number)
 
 
+def type_label(translator: Translator, type_: TimingPositionType) -> str:
+    """Name of a position type, independent of the position's number or display name."""
+    if type_ is TimingPositionType.START_FINISH:
+        return translator.translate("timing.type.start_finish")
+    return translator.translate("timing.type.sector")
+
+
 def entry_text(translator: Translator, entries: list[DraftEntry], entry: DraftEntry) -> str:
     return position_text(translator, entry.type, entries.index(entry), entry.name)
 
