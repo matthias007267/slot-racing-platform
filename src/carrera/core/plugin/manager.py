@@ -131,6 +131,7 @@ class PluginManager:
             contributions=self._contributions,
             clock=self._clock,
             config=self._config,
+            translator=self._translator,
         )
         try:
             record.plugin.activate(context)

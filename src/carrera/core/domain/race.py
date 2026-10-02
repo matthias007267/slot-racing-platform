@@ -9,10 +9,15 @@ from carrera.core.domain.ids import DriverId, VehicleId
 
 
 class RaceStatus(StrEnum):
+    """Lifecycle of a race. The engine uses CREATED, RUNNING, PAUSED and FINISHED; READY (fully
+    configured) and ABORTED (stopped early) are set by race management when persisting."""
+
     CREATED = "created"
+    READY = "ready"
     RUNNING = "running"
     PAUSED = "paused"
     FINISHED = "finished"
+    ABORTED = "aborted"
 
 
 @dataclass(frozen=True, slots=True)

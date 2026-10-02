@@ -1,18 +1,20 @@
-"""Deterministic simulated timing source for development and tests.
+"""Simulated timing source for development, demos and tests.
 
-Time is virtual: the simulation emits events only when it is advanced, and moves the shared
-:class:`ManualClock` to each event's timestamp before delivering it. No threads, no sleeping.
+The simulation never sleeps and has no threads. With a :class:`ManualClock` (tests) it is
+advanced explicitly and moves the clock to each event's timestamp before delivering it. With any
+clock (the real one in the application) the host calls :meth:`poll`, which delivers the events
+that have become due.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from carrera.core.clock import ManualClock
+from carrera.core.clock import NANOS_PER_SECOND, Clock, ManualClock
 from carrera.core.domain import TimingLayout
 from carrera.core.events import SensorTriggered
-from carrera.core.timing import SensorSink, TimingSource
+from carrera.core.timing import SensorSink, TimingSessionSpec, TimingSource, TimingSourceFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +44,7 @@ class SimulationTimingProvider(TimingSource):
 
     def __init__(
         self,
-        clock: ManualClock,
+        clock: Clock,
         layout: TimingLayout,
         lanes: Sequence[SimulatedLane],
         laps: int,
@@ -60,6 +62,7 @@ class SimulationTimingProvider(TimingSource):
         self._sink: SensorSink | None = None
         self._schedule: list[SensorTriggered] = []
         self._next_index = 0
+        self._paused_at_ns: int | None = None
 
     @property
     def source_id(self) -> str:
@@ -88,21 +91,54 @@ class SimulationTimingProvider(TimingSource):
 
     def stop(self) -> None:
         self._sink = None
+        self._paused_at_ns = None
+
+    def pause(self) -> None:
+        if self._sink is not None and self._paused_at_ns is None:
+            self._paused_at_ns = self._clock.now_ns()
+
+    def resume(self) -> None:
+        """Shift all remaining events by the pause duration, as if the cars had stood still."""
+        if self._paused_at_ns is None:
+            return
+        shift = self._clock.now_ns() - self._paused_at_ns
+        self._paused_at_ns = None
+        if shift > 0:
+            for index in range(self._next_index, len(self._schedule)):
+                event = self._schedule[index]
+                self._schedule[index] = replace(event, timestamp_ns=event.timestamp_ns + shift)
+
+    def poll(self) -> None:
+        """Deliver every event that is due according to the clock. Does not move the clock."""
+        if self._sink is None or self._paused_at_ns is not None:
+            return
+        now = self._clock.now_ns()
+        while self._sink is not None and self._next_index < len(self._schedule):
+            event = self._schedule[self._next_index]
+            if event.timestamp_ns > now:
+                break
+            self._next_index += 1
+            self._sink(event)
 
     def advance_to(self, timestamp_ns: int) -> None:
-        """Deliver all events up to and including ``timestamp_ns`` and move the clock there."""
+        """Deliver all events up to and including ``timestamp_ns`` and move the clock there.
+
+        Only available with a :class:`ManualClock`."""
+        clock = self._clock
+        if not isinstance(clock, ManualClock):
+            raise TypeError("advance_to requires a ManualClock; use poll() with a real clock")
         if self._sink is None:
             raise RuntimeError("simulation is not running")
-        if timestamp_ns < self._clock.now_ns():
+        if timestamp_ns < clock.now_ns():
             raise ValueError("cannot advance to a time in the past")
         while self._sink is not None and self._next_index < len(self._schedule):
             event = self._schedule[self._next_index]
             if event.timestamp_ns > timestamp_ns:
                 break
             self._next_index += 1
-            self._clock.set(max(event.timestamp_ns, self._clock.now_ns()))
+            clock.set(max(event.timestamp_ns, clock.now_ns()))
             self._sink(event)
-        self._clock.set(max(timestamp_ns, self._clock.now_ns()))
+        clock.set(max(timestamp_ns, clock.now_ns()))
 
     def advance_by(self, delta_ns: int) -> None:
         self.advance_to(self._clock.now_ns() + delta_ns)
@@ -131,3 +167,39 @@ class SimulationTimingProvider(TimingSource):
                 lap_start += lap_time
         events.sort(key=lambda item: item[:3])
         return [item[3] for item in events]
+
+
+class SimulationTimingFactory(TimingSourceFactory):
+    """Creates a simulation for a race: every lane drives at its own, slightly varying pace."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        base_lap_time_ns: int = 5 * NANOS_PER_SECOND,
+        lane_step_ns: int = 400_000_000,
+    ) -> None:
+        self._clock = clock
+        self._base_lap_time_ns = base_lap_time_ns
+        self._lane_step_ns = lane_step_ns
+
+    @property
+    def name(self) -> str:
+        return "simulation"
+
+    def create_source(self, spec: TimingSessionSpec) -> TimingSource:
+        lanes = [
+            SimulatedLane(
+                lane=lane,
+                lap_times_ns=tuple(
+                    self._lap_time(lane, index, lap) for lap in range(1, spec.laps + 1)
+                ),
+            )
+            for index, lane in enumerate(spec.lanes)
+        ]
+        return SimulationTimingProvider(self._clock, spec.layout, lanes, spec.laps)
+
+    def _lap_time(self, lane: int, index: int, lap: int) -> int:
+        # Deterministic jitter of -100..+100 ms so laps differ but runs are reproducible.
+        jitter_ms = ((lap * 7 + lane * 3) % 5 - 2) * 50
+        return self._base_lap_time_ns + index * self._lane_step_ns + jitter_ms * 1_000_000

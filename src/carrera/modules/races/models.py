@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from carrera.core.storage.base import Base
@@ -13,7 +22,7 @@ class Race(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
-    track_id: Mapped[int | None] = mapped_column(ForeignKey("tracks.id", ondelete="SET NULL"))
+    track_id: Mapped[int | None] = mapped_column(ForeignKey("tracks.id", ondelete="RESTRICT"))
     track_layout_id: Mapped[int | None] = mapped_column(
         ForeignKey("track_layouts.id", ondelete="SET NULL")
     )
@@ -29,14 +38,19 @@ class RaceParticipant(Base):
     __table_args__ = (
         UniqueConstraint("race_id", "lane"),
         UniqueConstraint("race_id", "driver_id"),
+        UniqueConstraint("race_id", "vehicle_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
     driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="RESTRICT"))
-    vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
+    vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="RESTRICT"))
     lane: Mapped[int]
     final_position: Mapped[int | None]
+    laps_completed: Mapped[int] = mapped_column(default=0, server_default="0")
+    finished: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    total_time_ns: Mapped[int | None] = mapped_column(BigInteger)
+    best_lap_ns: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class Lap(Base):

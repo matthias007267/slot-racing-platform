@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import ClassVar
 
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
+from carrera.core.timing import TimingSourceFactory
+from carrera.modules.timing.simulation import SimulationTimingFactory
 
 
 class TimingPlugin(Plugin):
@@ -18,3 +20,6 @@ class TimingPlugin(Plugin):
 
     def activate(self, context: PluginContext) -> None:
         context.add_navigation(NavigationItem(id="timing", title_key="nav.timing", order=50))
+        context.register_service(
+            TimingSourceFactory, SimulationTimingFactory(context.clock), name="simulation"
+        )

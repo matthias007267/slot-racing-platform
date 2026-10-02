@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 
@@ -22,3 +24,8 @@ class Base(DeclarativeBase):
     """
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+def utc_now() -> datetime:
+    """Current UTC time as a naive datetime, matching SQLite's ``CURRENT_TIMESTAMP`` columns."""
+    return datetime.now(UTC).replace(tzinfo=None)

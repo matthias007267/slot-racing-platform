@@ -16,7 +16,7 @@ Race rules implemented here:
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from carrera.core.clock import Clock
@@ -105,6 +105,7 @@ class RaceEngine:
         self._paused_at_ns = 0
         self._paused_total_ns = 0
         self._finish_counter = 0
+        self._final_elapsed_ns = 0
         self._winner_determined = False
         self.source_errors: dict[str, str] = {}
         """Timing sources that failed to start, by source id. The race runs without them."""
@@ -138,6 +139,7 @@ class RaceEngine:
             raise RaceStateError(f"cannot pause a race that is {self._status}")
         self._paused_at_ns = self._clock.now_ns()
         self._status = RaceStatus.PAUSED
+        self._for_each_source("pause", lambda source: source.pause())
         self._bus.publish(RacePaused(timestamp_ns=self._paused_at_ns, race_id=self._config.race_id))
 
     def resume(self) -> None:
@@ -146,6 +148,7 @@ class RaceEngine:
         now = self._clock.now_ns()
         self._paused_total_ns += now - self._paused_at_ns
         self._status = RaceStatus.RUNNING
+        self._for_each_source("resume", lambda source: source.resume())
         self._bus.publish(RaceResumed(timestamp_ns=now, race_id=self._config.race_id))
 
     def stop(self) -> None:
@@ -159,7 +162,35 @@ class RaceEngine:
         self._release()
 
     def results(self) -> tuple[ParticipantResult, ...]:
+        """Current standings as determined by the engine."""
         return self._ranking()
+
+    def elapsed_ns(self) -> int:
+        """Race time so far, excluding paused time. Frozen while paused and after the finish."""
+        if self._status is RaceStatus.CREATED:
+            return 0
+        if self._status is RaceStatus.FINISHED:
+            return self._final_elapsed_ns
+        reference = (
+            self._paused_at_ns if self._status is RaceStatus.PAUSED else self._clock.now_ns()
+        )
+        return max(0, self._race_time(reference))
+
+    def poll_sources(self) -> None:
+        """Let host-driven timing sources deliver due events. A failing source is recorded in
+        ``source_errors`` and does not interrupt the race."""
+        if self._status is RaceStatus.RUNNING:
+            self._for_each_source("poll", lambda source: source.poll())
+
+    def _for_each_source(self, action: str, call: Callable[[TimingSource], None]) -> None:
+        for source in self._sources:
+            if source.source_id in self.source_errors:
+                continue
+            try:
+                call(source)
+            except Exception as error:
+                logger.exception("Timing source %s failed to %s", source.source_id, action)
+                self.source_errors[source.source_id] = f"{type(error).__name__}: {error}"
 
     def _race_time(self, timestamp_ns: int) -> int:
         return timestamp_ns - self._started_at_ns - self._paused_total_ns
@@ -255,6 +286,7 @@ class RaceEngine:
     def _finish(self, timestamp_ns: int, *, aborted: bool) -> None:
         if self._status is RaceStatus.FINISHED:
             return
+        self._final_elapsed_ns = max(0, self._race_time(timestamp_ns))
         self._status = RaceStatus.FINISHED
         self._release()
         results = self._ranking()

@@ -56,7 +56,7 @@ class Database:
     def migrate(self, revision: str = "head") -> None:
         """Bring the schema to ``revision`` using the bundled Alembic migrations."""
         config = alembic_config()
-        with self.engine.begin() as connection:
+        with self.engine.connect() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, revision)
 

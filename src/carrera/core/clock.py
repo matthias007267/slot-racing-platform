@@ -41,3 +41,16 @@ class ManualClock:
         if delta_ns < 0:
             raise ValueError("delta_ns must not be negative")
         self._now_ns += delta_ns
+
+
+def format_duration(duration_ns: int | None) -> str:
+    """Format nanoseconds as ``m:ss.mmm`` (or ``h:mm:ss.mmm``); ``-`` for missing values."""
+    if duration_ns is None:
+        return "-"
+    total_ms = duration_ns // 1_000_000
+    seconds, millis = divmod(total_ms, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{minutes}:{seconds:02d}.{millis:03d}"

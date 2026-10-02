@@ -8,6 +8,7 @@ from typing import TypeVar
 from carrera.core.clock import Clock
 from carrera.core.config import AppConfig
 from carrera.core.events import Event, EventDispatcher, Subscription
+from carrera.core.i18n import Translator
 from carrera.core.plugin.contributions import ContributionRegistry, NavigationItem
 from carrera.core.plugin.services import ServiceRegistry
 
@@ -48,11 +49,13 @@ class PluginContext:
         contributions: ContributionRegistry,
         clock: Clock,
         config: AppConfig,
+        translator: Translator,
     ) -> None:
         self.plugin_name = plugin_name
         self.events = ScopedEventBus(bus)
         self.clock = clock
         self.config = config
+        self.translator = translator
         self._services = services
         self._contributions = contributions
 
