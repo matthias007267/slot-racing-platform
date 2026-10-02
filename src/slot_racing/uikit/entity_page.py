@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
 
 from slot_racing.core.i18n import Translator
 from slot_racing.uikit.errors import describe_error, is_expected
-from slot_racing.uikit.widgets import StatusLabel, fill_table, heading, make_table, selected_id
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
+from slot_racing.uikit.widgets import StatusLabel, fill_table, make_table, selected_id
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class EntityPage(QWidget):
         )
         self._rows: list[EntityRow] = []
         tr = translator.translate
+        self.setAccessibleDescription(tr(title_key))
 
         self.table = make_table([tr(key) for key in header_keys], f"{name}-table")
         self.status = StatusLabel(f"{name}-status")
@@ -71,13 +73,19 @@ class EntityPage(QWidget):
         self.delete_button = QPushButton(tr("common.delete"))
         self.delete_button.setObjectName(f"{name}-delete")
 
+        set_role(self.add_button, "primary")
+        set_role(self.edit_button, "secondary")
+        set_role(self.toggle_button, "ghost")
+        set_role(self.delete_button, "danger")
+
         self.buttons = QHBoxLayout()
+        self.buttons.setSpacing(SPACE.sm)
         for button in (self.add_button, self.edit_button, self.toggle_button, self.delete_button):
             self.buttons.addWidget(button)
         self.buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(heading(tr(title_key)))
+        configure_page(layout)
         layout.addLayout(self.buttons)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.status)

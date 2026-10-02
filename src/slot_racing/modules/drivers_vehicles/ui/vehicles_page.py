@@ -17,6 +17,7 @@ from slot_racing.core.domain import DriverId, VehicleId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.drivers_vehicles.service import DriverService, VehicleInput, VehicleService
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
+from slot_racing.uikit.theme import set_role
 
 
 class VehicleDialog(FormDialog):
@@ -104,6 +105,7 @@ class VehiclesPage(EntityPage):
         self._drivers = drivers
         self.unassign_button = QPushButton(translator.translate("vehicle.unassign"))
         self.unassign_button.setObjectName("vehicles-unassign")
+        set_role(self.unassign_button, "ghost")
         self.buttons.insertWidget(self.buttons.count() - 1, self.unassign_button)
         self.unassign_button.clicked.connect(lambda: self.unassign_selected())
 

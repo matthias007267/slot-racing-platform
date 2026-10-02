@@ -2,7 +2,8 @@
 
 ``races`` needs drivers, vehicles and tracks but must not import the modules that own them.
 Those modules implement these interfaces and register them as services; consumers only depend on
-the interfaces and the plain data classes defined here.
+the interfaces and the plain data classes defined here. ``RaceCatalog`` is the other direction:
+the shell reads race counts and standings without importing the races module.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 
-from slot_racing.core.domain import DriverId, TrackId, VehicleId
+from slot_racing.core.domain import DriverId, RaceStatus, TrackId, VehicleId
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,3 +85,44 @@ class TrackCatalog(ABC):
 
     @abstractmethod
     def get_track(self, track_id: TrackId) -> TrackInfo | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StandingLine:
+    """One line of a standing. Times stay in nanoseconds; the UI formats them."""
+
+    position: int | None
+    driver_label: str
+    best_lap_ns: int | None
+    total_time_ns: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RaceSummary:
+    """A race as the dashboard may show it. ``standings`` is empty when no result exists yet."""
+
+    name: str
+    status: RaceStatus
+    track_name: str
+    timing_provider: str
+    laps: int
+    standings: tuple[StandingLine, ...] = ()
+
+
+class RaceCatalog(ABC):
+    """Read model for races. The races module registers the implementation."""
+
+    @abstractmethod
+    def count_races(self) -> int: ...
+
+    @abstractmethod
+    def active_summary(self) -> RaceSummary | None:
+        """The race currently held by the race controller, including one that just ended."""
+
+    @abstractmethod
+    def latest_summary(self) -> RaceSummary | None:
+        """The newest stored race, whatever its status. No standings."""
+
+    @abstractmethod
+    def latest_result(self) -> RaceSummary | None:
+        """The newest finished or aborted race, with up to three stored standings."""

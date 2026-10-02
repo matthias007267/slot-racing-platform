@@ -11,6 +11,7 @@ from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.ui.formatting import participant_status_key, start_number_text
 from slot_racing.uikit import fill_table, heading, make_table
+from slot_racing.uikit.theme import configure_page, set_role
 
 
 class ResultsView(QWidget):
@@ -55,8 +56,10 @@ class ResultsView(QWidget):
         )
         self.back_button = QPushButton(tr("race.results.back"))
         self.back_button.setObjectName("results-back")
+        set_role(self.back_button, "ghost")
         self.back_button.clicked.connect(self.back_requested.emit)
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.header)
         layout.addWidget(self.summary)
         layout.addWidget(self.table, 2)

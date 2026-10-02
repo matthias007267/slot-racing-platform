@@ -44,6 +44,7 @@ from slot_racing.uikit import (
     selected_id,
 )
 from slot_racing.uikit.errors import is_expected
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class LiveRaceView(QWidget):
         self.status_label.setObjectName("live-status")
         self.time_label = QLabel()
         self.time_label.setObjectName("live-time")
+        set_role(self.time_label, "telemetry")
         self.provider_label = QLabel()
         self.provider_label.setObjectName("live-provider")
         self.laps_label = QLabel()
@@ -127,6 +129,10 @@ class LiveRaceView(QWidget):
         self.results_button.setObjectName("live-results")
         self.back_button = QPushButton(tr("race.live.back"))
         self.back_button.setObjectName("live-back")
+        set_role(self.pause_button, "secondary")
+        set_role(self.stop_button, "danger")
+        set_role(self.results_button, "primary")
+        set_role(self.back_button, "ghost")
 
         info = QHBoxLayout()
         for label in (
@@ -139,10 +145,12 @@ class LiveRaceView(QWidget):
             info.addWidget(label)
         info.addStretch(1)
         buttons = QHBoxLayout()
+        buttons.setSpacing(SPACE.sm)
         for button in (self.pause_button, self.stop_button, self.results_button, self.back_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.name_label)
         layout.addLayout(info)
         layout.addLayout(buttons)

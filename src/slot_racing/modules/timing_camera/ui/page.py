@@ -45,7 +45,8 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.lease import CameraBusyError
 from slot_racing.modules.timing_camera.store import CameraConfigurationError
 from slot_racing.modules.timing_camera.ui.stage import CameraStage
-from slot_racing.uikit import StatusLabel, describe_error, heading
+from slot_racing.uikit import StatusLabel, describe_error
+from slot_racing.uikit.theme import configure_page, set_role, set_tone
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,11 @@ class CameraSetupPage(QWidget):
         self.cancel.setObjectName("camera-cancel")
         self.save = QPushButton(self._tr("camera.action.save"))
         self.save.setObjectName("camera-save")
+        set_role(self.add_zone, "secondary")
+        set_role(self.delete_zone, "danger")
+        set_role(self.refresh, "secondary")
+        set_role(self.cancel, "ghost")
+        set_role(self.save, "primary")
         self.status = QLabel()
         self.status.setObjectName("camera-status")
         self.message = StatusLabel("camera-message")
@@ -171,7 +177,7 @@ class CameraSetupPage(QWidget):
         bar.addWidget(self.cancel)
         bar.addWidget(self.save)
         root = QVBoxLayout(self)
-        root.addWidget(heading(self._tr("camera.heading")))
+        configure_page(root)
         root.addLayout(body, 1)
         root.addLayout(bar)
 
@@ -614,9 +620,15 @@ class CameraSetupPage(QWidget):
     def _refresh_status(self) -> None:
         if self._camera_state == "live":
             lamp = f"Status: ● {self._tr('camera.status.live')}"
+            tone = "ok"
+        elif self._camera_state == "busy":
+            lamp = f"Status: ○ {self._tr('camera.status.offline')}"
+            tone = "warn"
         else:
             lamp = f"Status: ○ {self._tr('camera.status.offline')}"
+            tone = "error"
         self.status.setText(lamp)
+        set_tone(self.status, tone)
         if self._error_key is not None:
             self.message.show_error(self._tr(self._error_key))
             return
@@ -646,9 +658,7 @@ class CameraSetupPage(QWidget):
 
 def _section(text: str) -> QLabel:
     label = QLabel(text)
-    font = label.font()
-    font.setBold(True)
-    label.setFont(font)
+    set_role(label, "section")
     return label
 
 

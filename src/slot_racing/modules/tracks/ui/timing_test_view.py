@@ -15,6 +15,7 @@ from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.tracks.timing_test import TimingTestSession
 from slot_racing.modules.tracks.ui.common import format_time, position_text, run_guarded
 from slot_racing.uikit import StatusLabel, fill_table, heading, make_table
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 
 
 class TimingTestView(QWidget):
@@ -70,14 +71,21 @@ class TimingTestView(QWidget):
         self.back_button = QPushButton(tr("timing.test.back"))
         self.back_button.setObjectName("timing-test-back")
         self.back_button.setVisible(show_back)
+        set_role(self.trigger_button, "primary")
+        set_role(self.lap_button, "secondary")
+        set_role(self.reset_button, "ghost")
+        set_role(self.back_button, "ghost")
+        set_role(self.last_time_label, "telemetry")
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(SPACE.sm)
         for button in (self.trigger_button, self.lap_button, self.reset_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
         buttons.addWidget(self.back_button)
 
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(heading(tr("timing.test.title")))
         layout.addWidget(QLabel(tr("timing.test.hint")))
         layout.addLayout(buttons)

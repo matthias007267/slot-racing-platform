@@ -33,7 +33,7 @@ or GPIO libraries (enforced by import-linter).
 | `plugin` | Manifest, lifecycle, services, UI contributions, discovery, manager |
 | `timing` | `TimingSource`, `TimingSourceFactory` (provider), `ProviderCapabilities`, `ProviderAvailability`, `ManuallyTriggerable`, `TimingSessionSpec`, `TimingSetupService` |
 | `timing_registry` | `TimingProviderRegistry`, `TimingProviderInfo` |
-| `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog` and their read-only info types |
+| `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog`, `RaceCatalog` and their read-only info types |
 | `errors` | `ValidationError(key, **params)` for translatable user errors; `TimingProviderError`, `ProviderUnavailable`, `ProviderConfigurationError` |
 | `domain` | IDs, `Participant`, `ParticipantResult`, `RaceStatus`, `TimingLayout`, `TimingPosition`, `TimingSensor`, `TimingSetup` |
 | `messages` | German texts for the core's `ValidationError` keys (registered by the runtime) |
@@ -50,7 +50,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 |---|---|
 | `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
 | `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
-| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
+| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Timing** page that edits that document on the live picture. Zones are not stored per track |
@@ -59,9 +59,11 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 ### Shared UI helpers (`slot_racing.uikit`)
 
 Small Qt helpers used by the pages of several modules: `EntityPage` (list with add / edit /
-(de)activate / delete), `FormDialog`, table helpers, `describe_error` and the common German texts.
-It depends on the core only. The core, the engine, the timing module and the camera timing
-logic never import it (import-linter). The camera setup page (`timing_camera.ui`) may.
+(de)activate / delete), `FormDialog`, table helpers, cards, `describe_error` and the common German
+texts. The dark racing theme (color and spacing tokens, Fusion palette, stylesheet) lives in
+`uikit.theme` and is applied once by the shell. It depends on the core only. The core, the engine,
+the timing module and the camera timing logic never import it (import-linter). The camera setup
+page (`timing_camera.ui`) may.
 
 ## Master data and race flow
 
@@ -411,10 +413,15 @@ data can be deactivated but not deleted.
 
 - `Runtime.create(config)` builds bus, services, contributions, translator and plugin manager,
   migrates the database and enables the configured plugins. It is Qt-free and testable.
-- `MainWindow` shows a navigation list and a page stack. The navigation consists of the built-in
-  *Dashboard* and *Einstellungen* plus the `NavigationItem`s of enabled plugins, ordered by
-  `order`. It is rebuilt when contributions change. Pages are created lazily; a module without a
+- `MainWindow` is a shell: a sidebar, a header (current page and timing status) and a page stack.
+  The sidebar lists the built-in *Dashboard* and, pinned at the bottom, *Einstellungen*, plus the
+  `NavigationItem`s of enabled plugins, ordered by `order`. It is rebuilt when contributions
+  change. Pages do not own the navigation. Pages are created lazily; a module without a
   `page_factory` gets a placeholder page, and a failing factory yields an error page.
+- The dashboard reads driver, vehicle and track counts through the catalogs and race counts,
+  the active race and the latest stored result through `RaceCatalog` (implemented in `races` by
+  `RaceOverview`, which only calls the existing service and controller). A card is omitted when
+  its service is not registered. No race rules live in the shell.
 - *Einstellungen* lists the modules with checkboxes to enable/disable them at runtime; the
   choice is saved in the config file.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,

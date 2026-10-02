@@ -14,6 +14,7 @@ from slot_racing import __version__
 from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import default_config_path, load_config
+from slot_racing.uikit.theme import apply_theme
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -41,6 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if isinstance(existing, QApplication)
             else QApplication([sys.argv[0], *qt_args])
         )
+        apply_theme(app)
         window = MainWindow(runtime)
         window.show()
         if args.smoke_test:

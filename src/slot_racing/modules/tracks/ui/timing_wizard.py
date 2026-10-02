@@ -33,6 +33,7 @@ from slot_racing.modules.tracks.ui.common import entry_text, run_guarded, type_l
 from slot_racing.modules.tracks.ui.timing_dialog import PositionDialog
 from slot_racing.modules.tracks.ui.timing_test_view import TimingTestView
 from slot_racing.uikit import StatusLabel, fill_table, heading, make_table, selected_id
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 
 TRACK, POSITIONS, SENSORS, ORDER, TEST, SAVE = range(6)
 STEP_KEYS = (
@@ -161,13 +162,21 @@ class TimingWizard(QWidget):
         self.next_button.setObjectName("wizard-next")
         self.save_button = QPushButton(tr("timing.save"))
         self.save_button.setObjectName("wizard-save")
+        set_role(self.cancel_button, "ghost")
+        set_role(self.back_button, "secondary")
+        set_role(self.next_button, "primary")
+        set_role(self.save_button, "primary")
+        set_role(self.add_button, "secondary")
+        set_role(self.remove_button, "danger")
         navigation = QHBoxLayout()
+        navigation.setSpacing(SPACE.sm)
         navigation.addWidget(self.cancel_button)
         navigation.addStretch(1)
         for button in (self.back_button, self.next_button, self.save_button):
             navigation.addWidget(button)
 
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(heading(tr("timing.wizard.title")))
         layout.addWidget(self.step_label)
         layout.addWidget(self.stack, 1)

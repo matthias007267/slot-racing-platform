@@ -27,11 +27,11 @@ from slot_racing.uikit import (
     StatusLabel,
     describe_error,
     fill_table,
-    heading,
     make_table,
     selected_id,
 )
 from slot_racing.uikit.errors import is_expected
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 from slot_racing.uikit.widgets import format_datetime
 
 logger = logging.getLogger(__name__)
@@ -72,16 +72,26 @@ class RacesPage(QWidget):
         self.status = StatusLabel("races-status")
         self.buttons: dict[str, QPushButton] = {}
         button_row = QHBoxLayout()
+        button_row.setSpacing(SPACE.sm)
+        roles = {
+            "new": "primary",
+            "edit": "secondary",
+            "start": "primary",
+            "live": "secondary",
+            "results": "secondary",
+            "delete": "danger",
+        }
         for key in ("new", "edit", "start", "live", "results", "delete"):
             button = QPushButton(tr(f"race.list.{key}"))
             button.setObjectName(f"races-{key}")
+            set_role(button, roles[key])
             self.buttons[key] = button
             button_row.addWidget(button)
         button_row.addStretch(1)
 
         list_page = QWidget()
         list_layout = QVBoxLayout(list_page)
-        list_layout.addWidget(heading(tr("nav.races")))
+        configure_page(list_layout)
         list_layout.addLayout(button_row)
         list_layout.addWidget(self.table, 1)
         list_layout.addWidget(self.status)
@@ -94,6 +104,7 @@ class RacesPage(QWidget):
         for page in (list_page, self.wizard, self.live, self.results):
             self.stack.addWidget(page)
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.stack)
 
         self.buttons["new"].clicked.connect(lambda: self.new_race())

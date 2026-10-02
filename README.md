@@ -17,8 +17,8 @@ they communicate through standardized events and core interfaces.
 ## Status
 
 Implemented: core (events, plugin system, config, domain types, storage), timing abstraction with
-a simulator, a hardware independent race engine, database with migrations and a PySide6 shell with
-dynamic navigation. Usable in the application:
+a simulator, a hardware independent race engine, database with migrations and a dark PySide6
+shell with a sidebar and dynamic navigation. Usable in the application:
 
 - **Fahrer, Fahrzeuge, Strecken:** list, create, edit, deactivate and delete with validation
   (unique driver start numbers, lane count, driver assignment for vehicles).

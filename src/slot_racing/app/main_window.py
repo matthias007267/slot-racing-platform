@@ -1,4 +1,4 @@
-"""Main window with dynamic navigation built from module contributions."""
+"""Main window: sidebar, header and a page stack built from module contributions."""
 
 from __future__ import annotations
 
@@ -6,24 +6,24 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
-from slot_racing.app.pages import DashboardPage, MessagePage, SettingsPage
+from slot_racing.app.dashboard import DashboardPage
+from slot_racing.app.pages import MessagePage, SettingsPage
 from slot_racing.app.runtime import Runtime
+from slot_racing.app.shell import ShellHeader, Sidebar, timing_state
 from slot_racing.core.events import PluginDisabled, PluginEnabled
+from slot_racing.uikit.theme import SPACE, apply_theme
 
 logger = logging.getLogger(__name__)
-
-_ROLE_ID = Qt.ItemDataRole.UserRole
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +34,7 @@ class _Entry:
 
 
 class MainWindow(QMainWindow):
-    """Navigation list on the left, pages on the right.
+    """Sidebar on the left, header and page stack on the right.
 
     The navigation is rebuilt whenever a module adds or removes contributions. Pages are created
     lazily; a page that fails to build is replaced by an error page instead of crashing the shell.
@@ -45,25 +45,39 @@ class MainWindow(QMainWindow):
 
     def __init__(self, runtime: Runtime) -> None:
         super().__init__()
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            apply_theme(app)
         self._runtime = runtime
         self._tr = runtime.translator.translate
         self.setWindowTitle(self._tr("app.title"))
         self.resize(1100, 700)
 
-        self._nav = QListWidget()
-        self._nav.setObjectName("navigation")
-        self._nav.setFixedWidth(220)
+        self._sidebar = Sidebar(self._tr("shell.brand"))
+        self._header = ShellHeader()
         self._stack = QStackedWidget()
+        self._stack.setObjectName("page-host")
         self._pages: dict[str, QWidget] = {}
-        self._dashboard = DashboardPage(runtime)
+        self._factories: dict[str, _Entry] = {}
+        self._dashboard = DashboardPage(runtime, self._open_page)
+
+        content = QWidget()
+        content.setObjectName("shell-content")
+        column = QVBoxLayout(content)
+        column.setContentsMargins(SPACE.lg, SPACE.md, SPACE.lg, SPACE.lg)
+        column.setSpacing(SPACE.md)
+        column.addWidget(self._header)
+        column.addWidget(self._stack, 1)
 
         central = QWidget()
         layout = QHBoxLayout(central)
-        layout.addWidget(self._nav)
-        layout.addWidget(self._stack, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._sidebar)
+        layout.addWidget(content, 1)
         self.setCentralWidget(central)
 
-        self._nav.currentItemChanged.connect(self._on_selection_changed)
+        self._sidebar.selected.connect(self._show)
         self._remove_listener = runtime.contributions.add_listener(self.refresh_navigation)
         self._subscriptions = [
             runtime.bus.subscribe(PluginEnabled, lambda _event: self._dashboard.refresh()),
@@ -72,20 +86,16 @@ class MainWindow(QMainWindow):
         self.refresh_navigation()
 
     def navigation_ids(self) -> list[str]:
-        return [self._nav.item(i).data(_ROLE_ID) for i in range(self._nav.count())]
+        return self._sidebar.ids()
 
     def navigation_titles(self) -> list[str]:
-        return [self._nav.item(i).text() for i in range(self._nav.count())]
+        return self._sidebar.titles()
 
     def select(self, entry_id: str) -> None:
-        for index, known_id in enumerate(self.navigation_ids()):
-            if known_id == entry_id:
-                self._nav.setCurrentRow(index)
-                return
+        self._sidebar.select(entry_id)
 
     def current_id(self) -> str | None:
-        item = self._nav.currentItem()
-        return None if item is None else str(item.data(_ROLE_ID))
+        return self._sidebar.current_id()
 
     def current_page(self) -> QWidget:
         page = self._stack.currentWidget()
@@ -101,18 +111,12 @@ class MainWindow(QMainWindow):
         for entry_id in [known for known in self._pages if known not in ids]:
             self._remove_page(entry_id)
 
-        self._nav.blockSignals(True)
-        self._nav.clear()
-        for entry in entries:
-            item = QListWidgetItem(entry.title)
-            item.setData(_ROLE_ID, entry.id)
-            self._nav.addItem(item)
-        self._nav.blockSignals(False)
-
         self._factories = {entry.id: entry for entry in entries}
+        self._sidebar.set_entries(
+            [(entry.id, entry.title) for entry in entries], footer_id=self.SETTINGS_ID
+        )
         target = previous if previous in ids else self.DASHBOARD_ID
         self.select(target)
-        self._show(target)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._remove_listener()
@@ -135,17 +139,31 @@ class MainWindow(QMainWindow):
         )
         return entries
 
-    def _on_selection_changed(self, current: QListWidgetItem | None) -> None:
-        if current is not None:
-            self._show(str(current.data(_ROLE_ID)))
+    def _open_page(self, entry_id: str, action: str | None = None) -> None:
+        if entry_id not in {entry.id for entry in self._entries()}:
+            return
+        self.select(entry_id)
+        if action is None:
+            return
+        method = getattr(self.current_page(), action, None)
+        if callable(method):
+            method()
 
     def _show(self, entry_id: str) -> None:
         page = self._pages.get(entry_id)
         if page is None:
-            page = self._build_page(self._factories[entry_id])
+            entry = self._factories.get(entry_id)
+            if entry is None:
+                return
+            page = self._build_page(entry)
             self._pages[entry_id] = page
             self._stack.addWidget(page)
         self._stack.setCurrentWidget(page)
+        entry = self._factories.get(entry_id)
+        if entry is not None:
+            self._header.set_title(entry.title)
+        text, tone = timing_state(self._runtime)
+        self._header.set_timing(text, tone)
 
     def _build_page(self, entry: _Entry) -> QWidget:
         if entry.factory is None:
