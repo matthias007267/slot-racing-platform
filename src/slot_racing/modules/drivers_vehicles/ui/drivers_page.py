@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QLineEdit, QSpinBox, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QSpinBox, QVBoxLayout, QWidget
 
 from slot_racing.core.catalog import DriverInfo
 from slot_racing.core.domain import DriverId
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.drivers_vehicles.service import DriverInput, DriverService
+from slot_racing.modules.drivers_vehicles.service import (
+    MAX_START_NUMBER,
+    DriverInput,
+    DriverService,
+    VehicleService,
+)
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog
+from slot_racing.uikit.widgets import fill_table, make_table, selected_id
 
 
 class DriverDialog(FormDialog):
@@ -31,7 +37,7 @@ class DriverDialog(FormDialog):
         self.display_name_edit.setObjectName("driver-display-name")
         self.start_number_edit = QSpinBox()
         self.start_number_edit.setObjectName("driver-start-number")
-        self.start_number_edit.setRange(0, 9999)
+        self.start_number_edit.setRange(0, MAX_START_NUMBER)
         self.start_number_edit.setSpecialValueText(tr("common.none"))
         self.start_number_edit.setValue(driver.start_number or 0 if driver else 0)
         self.form.addRow(tr("driver.field.name"), self.name_edit)
@@ -51,7 +57,9 @@ class DriverDialog(FormDialog):
 
 
 class DriversPage(EntityPage):
-    def __init__(self, translator: Translator, service: DriverService) -> None:
+    def __init__(
+        self, translator: Translator, service: DriverService, vehicles: VehicleService
+    ) -> None:
         super().__init__(
             translator,
             title_key="nav.drivers",
@@ -64,6 +72,48 @@ class DriversPage(EntityPage):
             name="drivers",
         )
         self._service = service
+        self._vehicles = vehicles
+        tr = translator.translate
+        self.vehicles_heading = QLabel(tr("driver.vehicles"))
+        self.vehicles_heading.setObjectName("driver-vehicles-heading")
+        self.vehicles_table = make_table(
+            [tr("vehicle.field.name"), tr("vehicle.field.model")], "driver-vehicles-table"
+        )
+        self.vehicles_empty = QLabel(tr("driver.vehicles.none_selected"))
+        self.vehicles_empty.setObjectName("driver-vehicles-empty")
+        self.vehicles_empty.setWordWrap(True)
+        layout = self.layout()
+        assert isinstance(layout, QVBoxLayout)
+        layout.removeWidget(self.status)
+        layout.addWidget(self.vehicles_heading)
+        layout.addWidget(self.vehicles_table)
+        layout.addWidget(self.vehicles_empty)
+        layout.addWidget(self.status)
+        self.table.itemSelectionChanged.connect(self._show_owned_vehicles)
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._show_owned_vehicles()
+
+    def _show_owned_vehicles(self) -> None:
+        """Read-only list of the vehicles assigned to the selected driver."""
+        tr = self.translator.translate
+        driver_id = selected_id(self.table)
+        if driver_id is None:
+            fill_table(self.vehicles_table, [], keep_selection=False)
+            self.vehicles_empty.setText(tr("driver.vehicles.none_selected"))
+            return
+        owned = self._vehicles.list_vehicles(driver_id=DriverId(driver_id))
+        if not owned:
+            fill_table(self.vehicles_table, [], keep_selection=False)
+            self.vehicles_empty.setText(tr("driver.vehicles.none"))
+            return
+        fill_table(
+            self.vehicles_table,
+            [(vehicle.name, vehicle.model or "") for vehicle in owned],
+            keep_selection=False,
+        )
+        self.vehicles_empty.setText("")
 
     def load_rows(self) -> list[EntityRow]:
         tr = self.translator.translate

@@ -145,7 +145,7 @@ class RaceWizard(QWidget):
         self.start_button.clicked.connect(lambda: self.request_start())
         self.add_participant_button.clicked.connect(lambda: self.add_participant())
         self.remove_participant_button.clicked.connect(lambda: self.remove_selected_participant())
-        self.driver_combo.currentIndexChanged.connect(self._preselect_vehicle)
+        self.driver_combo.currentIndexChanged.connect(lambda _: self._reload_vehicles())
         self.provider_combo.currentIndexChanged.connect(lambda _: self._update_provider_status())
         self._show_step(NAME)
 
@@ -280,10 +280,7 @@ class RaceWizard(QWidget):
         for driver in self._drivers.list_drivers(active_only=True):
             self.driver_combo.addItem(driver.label, driver.id)
         self.driver_combo.blockSignals(False)
-        self.vehicle_combo.clear()
-        for vehicle in self._vehicles.list_vehicles(active_only=True):
-            self.vehicle_combo.addItem(vehicle.label, vehicle.id)
-        self._preselect_vehicle()
+        self._reload_vehicles()
         self._reload_lanes()
 
     def _reload_lanes(self) -> None:
@@ -292,6 +289,15 @@ class RaceWizard(QWidget):
         self.lane_combo.clear()
         for lane in range(1, (track.lane_count if track else 0) + 1):
             self.lane_combo.addItem(str(lane), lane)
+
+    def _reload_vehicles(self) -> None:
+        """Offer the selected driver's vehicles and vehicles that have no owner."""
+        driver_id = self.driver_combo.currentData()
+        self.vehicle_combo.clear()
+        for vehicle in self._vehicles.list_vehicles(active_only=True):
+            if vehicle.driver_id is None or vehicle.driver_id == driver_id:
+                self.vehicle_combo.addItem(vehicle.label, vehicle.id)
+        self._preselect_vehicle()
 
     def _preselect_vehicle(self) -> None:
         """Offer the driver's own vehicle first when the driver owns one."""

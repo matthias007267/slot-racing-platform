@@ -13,6 +13,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "driver.field.name": "Name",
         "driver.field.display_name": "Anzeigename",
         "driver.field.start_number": "Startnummer",
+        "driver.vehicles": "Fahrzeuge dieses Fahrers",
+        "driver.vehicles.none_selected": (
+            "Wählen Sie einen Fahrer aus, um seine Fahrzeuge zu sehen."
+        ),
+        "driver.vehicles.none": "Diesem Fahrer ist kein Fahrzeug zugeordnet.",
         "error.driver.name.required": "Bitte geben Sie einen Namen für den Fahrer ein.",
         "error.driver.name.too_long": "Der Name darf höchstens {limit} Zeichen lang sein.",
         "error.driver.display_name.too_long": (
@@ -30,6 +35,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "vehicle.field.name": "Name",
         "vehicle.field.model": "Modell",
         "vehicle.field.manufacturer": "Hersteller",
+        "vehicle.field.scale": "Maßstab",
+        "vehicle.field.notes": "Notizen",
         "vehicle.field.start_number": "Startnummer",
         "vehicle.field.driver": "Fahrer",
         "vehicle.unassign": "Fahrer entfernen",
@@ -40,6 +47,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.vehicle.manufacturer.too_long": (
             "Der Hersteller darf höchstens {limit} Zeichen lang sein."
         ),
+        "error.vehicle.scale.too_long": "Der Maßstab darf höchstens {limit} Zeichen lang sein.",
+        "error.vehicle.notes.too_long": "Die Notizen dürfen höchstens {limit} Zeichen lang sein.",
         "error.vehicle.start_number.range": (
             "Die Startnummer muss zwischen 1 und {maximum} liegen."
         ),

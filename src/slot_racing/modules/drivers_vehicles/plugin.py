@@ -34,7 +34,7 @@ class DriversVehiclesPlugin(Plugin):
         def drivers_page() -> QWidget:
             from slot_racing.modules.drivers_vehicles.ui.drivers_page import DriversPage
 
-            return DriversPage(translator, drivers)
+            return DriversPage(translator, drivers, vehicles)
 
         def vehicles_page() -> QWidget:
             from slot_racing.modules.drivers_vehicles.ui.vehicles_page import VehiclesPage

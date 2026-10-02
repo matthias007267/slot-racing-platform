@@ -35,6 +35,8 @@ class VehicleInfo:
     name: str
     model: str | None
     manufacturer: str | None
+    scale: str | None
+    notes: str | None
     start_number: int | None
     is_active: bool
     driver_id: DriverId | None

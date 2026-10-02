@@ -15,6 +15,8 @@ from slot_racing.core.storage import Database
 from slot_racing.modules.drivers_vehicles.models import Driver, Vehicle
 
 MAX_START_NUMBER = 999
+MAX_SCALE_LENGTH = 16
+MAX_NOTES_LENGTH = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,8 @@ class VehicleInput:
     name: str
     model: str
     manufacturer: str | None = None
+    scale: str | None = None
+    notes: str | None = None
     start_number: int | None = None
     driver_id: DriverId | None = None
 
@@ -73,6 +77,8 @@ def _vehicle_info(vehicle: Vehicle) -> VehicleInfo:
         name=vehicle.name,
         model=vehicle.model,
         manufacturer=vehicle.manufacturer,
+        scale=vehicle.scale,
+        notes=vehicle.notes,
         start_number=vehicle.start_number,
         is_active=vehicle.is_active,
         driver_id=None if vehicle.driver_id is None else DriverId(vehicle.driver_id),
@@ -235,6 +241,8 @@ class VehicleService(VehicleCatalog):
             "name": _required(data.name, "error.vehicle.name", 100),
             "model": _required(data.model, "error.vehicle.model", 100),
             "manufacturer": _optional(data.manufacturer, "error.vehicle.manufacturer", 100),
+            "scale": _optional(data.scale, "error.vehicle.scale", MAX_SCALE_LENGTH),
+            "notes": _optional(data.notes, "error.vehicle.notes", MAX_NOTES_LENGTH),
             "start_number": _start_number(data.start_number, "error.vehicle.start_number"),
         }
 
