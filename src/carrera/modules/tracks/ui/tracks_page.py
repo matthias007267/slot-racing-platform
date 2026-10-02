@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -17,7 +18,7 @@ from carrera.core.catalog import TrackInfo
 from carrera.core.domain import TrackId
 from carrera.core.i18n import Translator
 from carrera.modules.tracks.service import MAX_LANES, MIN_LANES, TrackInput, TrackService
-from carrera.uikit import EntityPage, EntityRow, FormDialog
+from carrera.uikit import EntityPage, EntityRow, FormDialog, selected_id
 
 
 class TrackDialog(FormDialog):
@@ -79,6 +80,9 @@ class TrackDialog(FormDialog):
 
 
 class TracksPage(EntityPage):
+    timing_requested = Signal(int)
+    """Emitted with the id of the track whose timing configuration should be opened."""
+
     def __init__(self, translator: Translator, service: TrackService) -> None:
         super().__init__(
             translator,
@@ -92,6 +96,20 @@ class TracksPage(EntityPage):
             name="tracks",
         )
         self._service = service
+        self.timing_button = QPushButton(translator.translate("track.timing"))
+        self.timing_button.setObjectName("tracks-timing")
+        self.buttons.insertWidget(self.buttons.count() - 1, self.timing_button)
+        self.timing_button.clicked.connect(lambda: self.open_timing_selected())
+        self.table.itemSelectionChanged.connect(self._update_timing_button)
+        self._update_timing_button()
+
+    def open_timing_selected(self) -> None:
+        track_id = selected_id(self.table)
+        if track_id is not None:
+            self.timing_requested.emit(track_id)
+
+    def _update_timing_button(self) -> None:
+        self.timing_button.setEnabled(selected_id(self.table) is not None)
 
     def load_rows(self) -> list[EntityRow]:
         tr = self.translator.translate

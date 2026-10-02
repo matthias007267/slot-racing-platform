@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 from carrera.core.catalog import TrackCatalog
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from carrera.core.storage import Database
+from carrera.core.timing import TimingSetupService, TimingSourceFactory
 from carrera.modules.tracks.service import TrackService
 from carrera.modules.tracks.translations import TRANSLATIONS
 
@@ -15,8 +16,9 @@ if TYPE_CHECKING:
 class TracksPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="tracks",
-        version="0.2.0",
+        version="0.3.0",
         title="Tracks",
+        optional=("timing",),
         models_module="carrera.modules.tracks.models",
     )
     translations: ClassVar[dict[str, dict[str, str]]] = TRANSLATIONS
@@ -28,9 +30,15 @@ class TracksPlugin(Plugin):
         translator = context.translator
 
         def tracks_page() -> QWidget:
-            from carrera.modules.tracks.ui.tracks_page import TracksPage
+            from carrera.modules.tracks.ui.tracks_area import TracksArea
 
-            return TracksPage(translator, service)
+            return TracksArea(
+                translator,
+                service,
+                setups=lambda: context.find_service(TimingSetupService),
+                factories=lambda: context.find_services(TimingSourceFactory),
+                clock=context.clock,
+            )
 
         context.add_navigation(
             NavigationItem(id="tracks", title_key="nav.tracks", order=30, page_factory=tracks_page)

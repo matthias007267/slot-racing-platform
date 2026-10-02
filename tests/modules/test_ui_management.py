@@ -19,6 +19,7 @@ from carrera.modules.races.ui.live_view import LiveRaceView
 from carrera.modules.races.ui.races_page import RacesPage
 from carrera.modules.races.ui.results_view import ResultsView
 from carrera.modules.races.ui.wizard import MODE, NAME, OVERVIEW, PARTICIPANTS, START, TRACK
+from carrera.modules.tracks.ui.tracks_area import TracksArea
 from carrera.modules.tracks.ui.tracks_page import TrackDialog, TracksPage
 from tests.modules.conftest import Env
 
@@ -51,7 +52,7 @@ def runner_for(fill: Callable[[QDialog], None]) -> Callable[[QDialog], int]:
     [
         ("drivers", DriversPage),
         ("vehicles", VehiclesPage),
-        ("tracks", TracksPage),
+        ("tracks", TracksArea),
         ("races", RacesPage),
     ],
 )
@@ -191,8 +192,9 @@ def test_vehicle_dialog_requires_a_model(qtbot: QtBot, env: Env) -> None:
 
 
 def test_track_page_validates_the_lane_count(qtbot: QtBot, env: Env) -> None:
-    _, page = open_page(qtbot, env, "tracks")
-    assert isinstance(page, TracksPage)
+    _, area = open_page(qtbot, env, "tracks")
+    assert isinstance(area, TracksArea)
+    page: TracksPage = area.tracks_page
     page.refresh()
     seen: list[str] = []
 
