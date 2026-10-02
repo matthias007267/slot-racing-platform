@@ -18,6 +18,8 @@ class AppConfig(BaseModel):
 
     language: str = "de"
     database_path: Path | None = None
+    timing_source: str | None = None
+    """Name of the timing source factory to use for races. ``None`` uses the first available."""
     plugin_overrides: dict[str, bool] = Field(default_factory=dict)
     """Explicit user choice per plugin. Plugins without an entry use their manifest default."""
 

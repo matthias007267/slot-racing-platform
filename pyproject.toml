@@ -114,7 +114,39 @@ source_modules = ["carrera.app"]
 forbidden_modules = ["carrera.modules"]
 
 [[tool.importlinter.contracts]]
-name = "Race engine is free of UI and hardware libraries"
+name = "Race logic is free of UI and hardware libraries"
 type = "forbidden"
-source_modules = ["carrera.modules.races"]
-forbidden_modules = ["PySide6", "cv2", "gpiozero", "RPi"]
+source_modules = [
+    "carrera.modules.races.engine",
+    "carrera.modules.races.service",
+    "carrera.modules.races.recorder",
+    "carrera.modules.races.runner",
+    "carrera.modules.races.types",
+    "carrera.modules.races.models",
+]
+forbidden_modules = ["PySide6", "carrera.uikit", "cv2", "gpiozero", "RPi"]
+
+[[tool.importlinter.contracts]]
+name = "Race UI does not contain race logic"
+type = "forbidden"
+source_modules = ["carrera.modules.races.ui"]
+forbidden_modules = ["carrera.modules.races.engine", "carrera.modules.races.recorder"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Timing does not know the UI"
+type = "forbidden"
+source_modules = ["carrera.modules.timing"]
+forbidden_modules = ["PySide6", "carrera.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Core does not depend on the shared UI helpers"
+type = "forbidden"
+source_modules = ["carrera.core"]
+forbidden_modules = ["carrera.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Shared UI helpers depend on the core only"
+type = "forbidden"
+source_modules = ["carrera.uikit"]
+forbidden_modules = ["carrera.app", "carrera.modules"]

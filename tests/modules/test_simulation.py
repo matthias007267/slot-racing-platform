@@ -1,11 +1,15 @@
 import pytest
 
 from carrera.core.clock import NANOS_PER_SECOND as S
-from carrera.core.clock import ManualClock
+from carrera.core.clock import ManualClock, MonotonicClock
 from carrera.core.domain import TimingLayout
 from carrera.core.events import SensorTriggered
-from carrera.core.timing import TimingSource
-from carrera.modules.timing.simulation import SimulatedLane, SimulationTimingProvider
+from carrera.core.timing import TimingSessionSpec, TimingSource
+from carrera.modules.timing.simulation import (
+    SimulatedLane,
+    SimulationTimingFactory,
+    SimulationTimingProvider,
+)
 
 LAYOUT = TimingLayout.from_sensor_ids(["sf", "s1", "s2"])
 
@@ -125,3 +129,71 @@ def test_configuration_validation() -> None:
         SimulationTimingProvider(
             ManualClock(), LAYOUT, [SimulatedLane(1, (S,)), SimulatedLane(1, (S,))], laps=1
         )
+
+
+def test_poll_delivers_only_due_events_and_never_moves_the_clock() -> None:
+    sim, clock, received = make([SimulatedLane(1, (12 * S,))], laps=1)
+    sim.poll()
+    assert received == []
+    clock.set(8 * S)
+    sim.poll()
+    assert [e.sensor_id for e in received] == ["s1", "s2"]
+    assert clock.now_ns() == 8 * S
+    sim.poll()
+    assert len(received) == 2
+    clock.set(12 * S)
+    sim.poll()
+    assert [e.sensor_id for e in received] == ["s1", "s2", "sf"]
+
+
+def test_pause_and_resume_shift_the_remaining_events() -> None:
+    sim, clock, received = make([SimulatedLane(1, (12 * S,))], laps=1)
+    clock.set(5 * S)
+    sim.poll()
+    assert [e.timestamp_ns for e in received] == [4 * S]
+    sim.pause()
+    clock.set(20 * S)
+    sim.poll()
+    assert len(received) == 1
+    sim.resume()
+    clock.set(23 * S - 1)
+    sim.poll()
+    assert len(received) == 1  # the next pass was due at 8 s and is shifted by the 15 s pause
+    clock.set(23 * S)
+    sim.poll()
+    assert [e.timestamp_ns for e in received] == [4 * S, 23 * S]
+
+
+def test_resume_without_pause_changes_nothing() -> None:
+    sim, clock, received = make([SimulatedLane(1, (12 * S,))], laps=1)
+    sim.resume()
+    clock.set(4 * S)
+    sim.poll()
+    assert [e.timestamp_ns for e in received] == [4 * S]
+
+
+def test_advance_requires_a_manual_clock() -> None:
+    sim = SimulationTimingProvider(MonotonicClock(), LAYOUT, [SimulatedLane(1, (S,))], laps=1)
+    sim.start(lambda _e: None)
+    with pytest.raises(TypeError, match="ManualClock"):
+        sim.advance_to(1)
+    sim.stop()
+
+
+def test_factory_creates_an_independent_source_per_race() -> None:
+    clock = ManualClock()
+    factory = SimulationTimingFactory(clock)
+    assert factory.name == "simulation"
+    spec = TimingSessionSpec(layout=LAYOUT, lanes=(1, 2), laps=2)
+    first = factory.create_source(spec)
+    second = factory.create_source(spec)
+    assert first is not second
+    assert isinstance(first, TimingSource)
+    received: list[SensorTriggered] = []
+    first.start(received.append)
+    clock.set(60 * S)
+    first.poll()
+    assert {e.lane for e in received} == {1, 2}
+    assert len([e for e in received if e.sensor_id == "sf"]) == 4
+    lane_finish = {e.lane: e.timestamp_ns for e in received if e.sensor_id == "sf"}
+    assert lane_finish[1] < lane_finish[2]

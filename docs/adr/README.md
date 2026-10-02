@@ -8,5 +8,6 @@
 | [0004](0004-timing-source-abstraction.md) | `TimingSource` pushes standard events to a sink |
 | [0005](0005-plugin-discovery-and-boundaries.md) | Entry-point discovery and import-linter enforced boundaries |
 | [0006](0006-database-layout.md) | One SQLite database, one migration history, module-owned models |
+| [0007](0007-catalogs-timing-factory-and-race-flow.md) | Core catalogs, timing factory and the event driven race flow |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

@@ -343,3 +343,76 @@ def test_config_validation() -> None:
         RaceConfig(RaceId(1), 1, (Participant(ALICE, 1), Participant(BOB, 1)), LAYOUT)
     with pytest.raises(ValueError, match="driver"):
         RaceConfig(RaceId(1), 1, (Participant(ALICE, 1), Participant(ALICE, 2)), LAYOUT)
+
+
+def test_elapsed_time_excludes_pauses_and_freezes_at_the_end() -> None:
+    harness = two_lane_race(laps=1)
+    assert harness.engine.elapsed_ns() == 0
+    harness.engine.start()
+    harness.clock.advance(3 * S)
+    assert harness.engine.elapsed_ns() == 3 * S
+    harness.engine.pause()
+    harness.clock.advance(10 * S)
+    assert harness.engine.elapsed_ns() == 3 * S
+    harness.engine.resume()
+    harness.clock.advance(2 * S)
+    assert harness.engine.elapsed_ns() == 5 * S
+    harness.engine.stop()
+    final = harness.engine.elapsed_ns()
+    harness.clock.advance(5 * S)
+    assert harness.engine.elapsed_ns() == final == 5 * S
+
+
+def test_poll_sources_delivers_events_of_host_driven_sources() -> None:
+    harness = two_lane_race(laps=1)
+    harness.engine.start()
+    harness.engine.poll_sources()
+    assert not harness.of(LapCompleted)
+    harness.clock.set(12 * S)
+    harness.engine.poll_sources()
+    assert len(harness.of(LapCompleted)) == 1
+
+
+def test_pausing_the_engine_pauses_the_simulation() -> None:
+    harness = two_lane_race(laps=1)
+    harness.engine.start()
+    harness.clock.set(6 * S)
+    harness.engine.pause()
+    harness.clock.set(106 * S)
+    harness.engine.resume()
+    harness.engine.poll_sources()
+    assert not harness.of(LapCompleted)
+    harness.clock.set(112 * S)
+    harness.engine.poll_sources()
+    assert len(harness.of(LapCompleted)) == 1
+
+
+class _PollFails(TimingSource):
+    @property
+    def source_id(self) -> str:
+        return "poll-fails"
+
+    @property
+    def is_running(self) -> bool:
+        return True
+
+    def start(self, sink: SensorSink) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def poll(self) -> None:
+        raise RuntimeError("read error")
+
+
+def test_failing_poll_is_recorded_and_the_source_is_skipped_afterwards() -> None:
+    harness = Harness(
+        [SimulatedLane(1, (12 * S,)), SimulatedLane(2, (15 * S,))], sources=[_PollFails()]
+    )
+    harness.engine.start()
+    harness.clock.set(12 * S)
+    harness.engine.poll_sources()
+    assert "read error" in harness.engine.source_errors["poll-fails"]
+    assert len(harness.of(LapCompleted)) == 1  # the healthy source still delivered
+    harness.engine.poll_sources()

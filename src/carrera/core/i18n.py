@@ -23,3 +23,11 @@ class Translator:
             if message is not None:
                 return message
         return default if default is not None else key
+
+    def format(self, key: str, **params: object) -> str:
+        """Translate ``key`` and fill ``{placeholders}``; a broken template is returned as is."""
+        template = self.translate(key)
+        try:
+            return template.format(**params)
+        except (KeyError, IndexError):
+            return template

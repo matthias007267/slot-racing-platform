@@ -61,7 +61,7 @@ def test_navigation_is_built_from_enabled_modules(qtbot: QtBot, runtime: Runtime
 
 def test_modules_without_a_page_show_a_placeholder(qtbot: QtBot, runtime: Runtime) -> None:
     window = make_window(qtbot, runtime)
-    window.select("races")
+    window.select("statistics")
     assert "noch nicht implementiert" in page_texts(window)
 
 

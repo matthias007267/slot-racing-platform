@@ -29,25 +29,67 @@ or GPIO libraries (enforced by import-linter).
 | `clock` | `Clock` protocol, `MonotonicClock` (`perf_counter_ns`), `ManualClock` |
 | `events` | Immutable typed events and `EventBus` |
 | `plugin` | Manifest, lifecycle, services, UI contributions, discovery, manager |
-| `timing` | `TimingSource` interface |
+| `timing` | `TimingSource`, `TimingSourceFactory`, `TimingSessionSpec` |
+| `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog` and their read-only info types |
+| `errors` | `ValidationError(key, **params)` for translatable user errors |
 | `domain` | IDs, `Participant`, `ParticipantResult`, `RaceStatus`, `TimingLayout` |
 | `config` | `AppConfig` (pydantic), JSON load/save, per-user paths |
 | `storage` | SQLAlchemy base, `Database`, Alembic migrations, core tables |
-| `i18n` | Key based `Translator` (German first) |
+| `i18n` | Key based `Translator` (German first), `format` fills placeholders |
 
 ## Modules (`carrera.modules`)
 
 Every module is a package with a `plugin.py` (a `Plugin` subclass registered as entry point in
 `pyproject.toml`) and optionally `models.py` and domain code. Modules never import each other.
 
-| Module | State in this phase |
+| Module | State |
 |---|---|
-| `drivers_vehicles` | Models (`Driver`, `Vehicle`), navigation entries |
-| `tracks` | Models (`Track`, `TrackLayout`), navigation entry |
-| `races` | Models (`Race`, `RaceParticipant`, `Lap`, `Sector`), **race engine**, navigation entry |
-| `timing` | Models (`TimingConfiguration`, `TimingSensor`), **`SimulationTimingProvider`**, navigation entry |
+| `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
+| `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page |
+| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
+| `timing` | Models, **`SimulationTimingProvider`** and its `TimingSourceFactory` |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
 | `timing_camera`, `timing_sensor`, `audio_animation` | Placeholder plugin only (camera/sensor off by default) |
+
+### Shared UI helpers (`carrera.uikit`)
+
+Small Qt helpers used by the pages of several modules: `EntityPage` (list with add / edit /
+(de)activate / delete), `FormDialog`, table helpers, `describe_error` and the common German texts.
+It depends on the core only; the core, the engine and the timing modules never import it
+(import-linter).
+
+## Master data and race flow
+
+```text
+tracks ──TrackCatalog──┐
+drivers_vehicles ──Driver/VehicleCatalog──▶ races (RaceService: configuration, rules, results)
+
+RaceController.start_race ─ validates ─▶ TimingSourceFactory.create_source ─▶ TimingSource
+TimingSource ─SensorTriggered─▶ EventBus ─▶ RaceEngine ─Sector/Lap/Race events─▶ EventBus
+EventBus ─▶ RaceRecorder ─▶ RaceService (database)          EventBus ─▶ RaceRunner (live standings)
+LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceService.get_results()
+```
+
+- `races` never imports `drivers_vehicles` or `tracks`; it looks them up through the catalog
+  interfaces in `carrera.core.catalog`, which those modules register as services.
+- Participant rules live in `RaceService.add_participant`: driver and vehicle exist and are
+  active, the lane exists on the track and is free, driver and vehicle are used once, and the
+  number of participants never exceeds the track's lane count. A race is editable while
+  `CREATED`/`READY`; adding the first participant makes it `READY`.
+- `RaceController.start_race` allows one running race at a time, re-validates the race, picks a
+  `TimingSourceFactory` (`AppConfig.timing_source`, otherwise the first by name), builds a fresh
+  source and `RaceEngine` and starts it. The simulation is host driven: the live view calls
+  `RaceRunner.tick()` from a Qt timer, which polls the source.
+- `RaceRecorder` subscribes to the race events and stores lifecycle changes, laps with their
+  sector times and the final standings (position, laps, total and best lap time, finish status).
+  Storage problems are logged and shown as a warning; they never interrupt the race.
+- The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), stored
+  results are ordered by the position the engine determined. Last lap and average lap are
+  computed by `RaceService`, not by the UI.
+- Races still marked running or paused at startup (crash) are set to `ABORTED`.
+- Errors shown to the user are `ValidationError`s with translation keys; unexpected errors are
+  logged and shown on the page. Pages, dialogs and the live view catch errors per action so a
+  single failure never closes the application.
 
 ## Event system
 
@@ -76,7 +118,7 @@ A plugin declares a `PluginManifest` (name, version, title, `requires`, `optiona
 - `events` – publish and (scoped) subscribe
 - `register_service(interface, impl, name)` / `find_service(s)` / `get_service`
 - `add_navigation(NavigationItem(id, title_key, order, page_factory))`
-- `clock`, `config`
+- `clock`, `config`, `translator`
 
 Everything a plugin registers is removed automatically when it is disabled.
 
@@ -107,8 +149,14 @@ lap sequence; the last sector ends at `START_FINISH` and completes the lap. The 
 configuration wizard (drive over each sensor in order) produces such a layout.
 
 `SimulationTimingProvider(clock, layout, lanes, laps)` simulates several lanes with individual
-lap times (per lap), start delays and evenly spaced sensors. It runs on virtual time: it is
-advanced with `advance_to`, `advance_by` or `run_to_end` and moves the shared `ManualClock`.
+lap times (per lap), start delays and evenly spaced sensors. With a `ManualClock` it is advanced
+with `advance_to`, `advance_by` or `run_to_end` and moves the clock. With any clock the host calls
+`poll()`, which delivers the events that are due; `pause()`/`resume()` shift the remaining
+schedule. `SimulationTimingFactory` registers the simulation as a `TimingSourceFactory` service
+(`name="simulation"`) and creates one source per race.
+
+Host driven hooks on `TimingSource` (`poll`, `pause`, `resume`) default to no-ops, so sources with
+their own threads or callbacks are unaffected.
 
 ## Race engine (`carrera.modules.races.engine`)
 
@@ -123,7 +171,10 @@ layout)`.
   when all have finished `RaceFinished` is published and sources are stopped.
 - `pause()` / `resume()` exclude paused time from race time. `stop()` ends the race early,
   ranking by laps and then time (`aborted=True`).
-- A timing source that fails to start is recorded in `source_errors`; the race continues.
+- `elapsed_ns()` is the race time without pauses. `poll_sources()` lets host driven sources
+  deliver events; `pause()`/`resume()` are forwarded to the sources.
+- A timing source that fails to start, poll, pause or resume is recorded in `source_errors`; the
+  race continues.
 - It imports no UI, camera or GPIO code (enforced by import-linter).
 
 Standing start: lap 1 begins at `RaceStarted`.
@@ -136,14 +187,18 @@ keys, offers `session()` (commit/rollback), `migrate()` and `in_memory()` for te
 | Owner | Tables |
 |---|---|
 | core | `plugins`, `settings` |
-| `drivers_vehicles` | `drivers`, `vehicles` |
+| `drivers_vehicles` | `drivers` (unique `start_number`), `vehicles` (optional `driver_id`) |
 | `tracks` | `tracks`, `track_layouts` |
 | `races` | `races`, `race_participants`, `laps`, `sectors` |
 | `timing` | `timing_configurations`, `timing_sensors` |
 
 All models share one metadata and one migration history. Create migrations with
 `uv run alembic revision --autogenerate -m "message"` (see `alembic.ini`). A test fails if the
-migrations and models drift apart.
+migrations and models drift apart. Migration `0002` (drivers, vehicles, tracks, race results)
+keeps existing data (for example `nickname` becomes `display_name`) and can be downgraded; the
+Alembic environment switches SQLite foreign keys off while tables are rebuilt and verifies them
+afterwards. Foreign keys from races to tracks, drivers and vehicles are `RESTRICT`, so used master
+data can be deactivated but not deleted.
 
 ## UI shell (`carrera.app`)
 
@@ -166,7 +221,10 @@ migrations and models drift apart.
 | modules ↛ other modules | import-linter (independence) |
 | modules ↛ `app` | import-linter |
 | `app` ↛ `modules` (plugins are discovered) | import-linter |
-| `modules.races` ↛ PySide6, cv2, gpiozero, RPi | import-linter |
+| race engine, service, recorder, runner, types, models ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
+| `modules.races.ui` ↛ engine, recorder (no race logic in the UI) | import-linter |
+| `modules.timing` ↛ PySide6, `uikit` | import-linter |
+| `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
 | Adding a module: add entry point and add it to the independence contract | review |
 
 ## Deviations from the proposed layout

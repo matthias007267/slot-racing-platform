@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+import pytest
+
+from carrera.app.runtime import Runtime
+from carrera.core.catalog import DriverInfo, TrackInfo, VehicleInfo
+from carrera.core.clock import ManualClock
+from carrera.core.config import AppConfig
+from carrera.core.domain import DriverId, TrackId, VehicleId
+from carrera.core.storage import Database
+from carrera.modules.drivers_vehicles.service import (
+    DriverInput,
+    DriverService,
+    VehicleInput,
+    VehicleService,
+)
+from carrera.modules.races.runner import RaceController
+from carrera.modules.races.service import RaceService
+from carrera.modules.tracks.service import TrackInput, TrackService
+
+
+@dataclass
+class Env:
+    runtime: Runtime
+    clock: ManualClock
+    drivers: DriverService
+    vehicles: VehicleService
+    tracks: TrackService
+    races: RaceService
+    controller: RaceController
+
+    def driver(self, name: str = "Anna", number: int | None = None) -> DriverInfo:
+        return self.drivers.create_driver(DriverInput(name=name, start_number=number))
+
+    def vehicle(self, name: str = "Porsche", driver_id: DriverId | None = None) -> VehicleInfo:
+        return self.vehicles.create_vehicle(
+            VehicleInput(name=name, model="911", driver_id=driver_id)
+        )
+
+    def track(self, name: str = "Ring", lanes: int = 2) -> TrackInfo:
+        return self.tracks.create_track(TrackInput(name=name, lane_count=lanes))
+
+    def pair(self, index: int) -> tuple[DriverId, VehicleId]:
+        return self.driver(f"Driver {index}").id, self.vehicle(f"Car {index}").id
+
+    def track_id(self, lanes: int = 2) -> TrackId:
+        return self.track(lanes=lanes).id
+
+
+@pytest.fixture
+def env() -> Iterator[Env]:
+    clock = ManualClock()
+    runtime = Runtime.create(AppConfig(), database=Database.in_memory(), clock=clock)
+    yield Env(
+        runtime=runtime,
+        clock=clock,
+        drivers=runtime.services.get(DriverService),
+        vehicles=runtime.services.get(VehicleService),
+        tracks=runtime.services.get(TrackService),
+        races=runtime.services.get(RaceService),
+        controller=runtime.services.get(RaceController),
+    )
+    runtime.shutdown()

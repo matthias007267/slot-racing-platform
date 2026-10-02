@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import pytest
+
+from carrera.core.domain import DriverId, RaceId, RaceStatus, TrackId, VehicleId
+from carrera.core.errors import ValidationError
+from tests.modules.conftest import Env
+
+
+def key_of(error: pytest.ExceptionInfo[ValidationError]) -> str:
+    return error.value.key
+
+
+def test_create_race(env: Env) -> None:
+    track = env.track(lanes=3)
+    race = env.races.create_race(" Sonntagsrennen ", track.id, 5)
+    assert race.name == "Sonntagsrennen"
+    assert race.status is RaceStatus.CREATED
+    assert (race.track_name, race.lane_count, race.laps) == ("Ring", 3, 5)
+    assert race.participants == ()
+    assert race.created_at is not None and race.started_at is None
+    assert [r.id for r in env.races.list_races()] == [race.id]
+
+
+def test_race_validation(env: Env) -> None:
+    track_id = env.track_id()
+    with pytest.raises(ValidationError) as caught:
+        env.races.create_race("", track_id, 5)
+    assert key_of(caught) == "error.race.name.required"
+    with pytest.raises(ValidationError) as caught:
+        env.races.create_race("R", track_id, 0)
+    assert key_of(caught) == "error.race.laps"
+    with pytest.raises(ValidationError) as caught:
+        env.races.create_race("R", TrackId(999), 3)
+    assert key_of(caught) == "error.race.track_unknown"
+    inactive = env.track("Alt")
+    env.tracks.set_active(inactive.id, False)
+    with pytest.raises(ValidationError) as caught:
+        env.races.create_race("R", inactive.id, 3)
+    assert key_of(caught) == "error.race.track_inactive"
+
+
+def test_add_participant_makes_race_ready(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    driver_id, vehicle_id = env.pair(1)
+    participant = env.races.add_participant(race.id, driver_id, vehicle_id, 2)
+    assert (participant.lane, participant.driver_label, participant.vehicle_label) == (
+        2,
+        "Driver 1",
+        "Car 1 (911)",
+    )
+    loaded = env.races.require_race(race.id)
+    assert loaded.status is RaceStatus.READY
+    env.races.remove_participant(race.id, participant.id)
+    assert env.races.require_race(race.id).status is RaceStatus.CREATED
+
+
+def test_duplicate_lane_is_rejected(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    d1, v1 = env.pair(1)
+    d2, v2 = env.pair(2)
+    env.races.add_participant(race.id, d1, v1, 1)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, d2, v2, 1)
+    assert key_of(caught) == "error.race.lane_taken"
+    assert len(env.races.require_race(race.id).participants) == 1
+
+
+def test_too_many_participants_are_rejected(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=2), 3)
+    for lane in (1, 2):
+        driver_id, vehicle_id = env.pair(lane)
+        env.races.add_participant(race.id, driver_id, vehicle_id, lane)
+    driver_id, vehicle_id = env.pair(3)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    assert key_of(caught) == "error.race.too_many_participants"
+    assert caught.value.params["maximum"] == 2
+
+
+def test_lane_must_exist_on_the_track(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=2), 3)
+    driver_id, vehicle_id = env.pair(1)
+    for lane in (0, 3):
+        with pytest.raises(ValidationError) as caught:
+            env.races.add_participant(race.id, driver_id, vehicle_id, lane)
+        assert key_of(caught) == "error.race.lane_invalid"
+
+
+def test_inactive_driver_and_vehicle_are_rejected(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    driver_id, vehicle_id = env.pair(1)
+    env.drivers.set_active(driver_id, False)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    assert key_of(caught) == "error.race.driver_inactive"
+    env.drivers.set_active(driver_id, True)
+    env.vehicles.set_active(vehicle_id, False)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    assert key_of(caught) == "error.race.vehicle_inactive"
+
+
+def test_unknown_driver_and_vehicle_are_rejected(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    driver_id, vehicle_id = env.pair(1)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, DriverId(999), vehicle_id, 1)
+    assert key_of(caught) == "error.race.driver_unknown"
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, driver_id, VehicleId(999), 1)
+    assert key_of(caught) == "error.race.vehicle_unknown"
+
+
+def test_participants_must_be_unique(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    d1, v1 = env.pair(1)
+    d2, v2 = env.pair(2)
+    env.races.add_participant(race.id, d1, v1, 1)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, d1, v2, 2)
+    assert key_of(caught) == "error.race.driver_duplicate"
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, d2, v1, 2)
+    assert key_of(caught) == "error.race.vehicle_duplicate"
+
+
+def test_changing_to_a_smaller_track_requires_matching_participants(env: Env) -> None:
+    big = env.track_id(lanes=4)
+    small = env.track("Klein", lanes=2).id
+    race = env.races.create_race("R", big, 3)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 3)
+    with pytest.raises(ValidationError) as caught:
+        env.races.update_race(race.id, "R", small, 3)
+    assert key_of(caught) == "error.race.track_too_small"
+    assert env.races.require_race(race.id).track_id == big
+    renamed = env.races.update_race(race.id, "Neu", big, 7)
+    assert (renamed.name, renamed.laps) == ("Neu", 7)
+
+
+def test_start_requires_participants_and_active_resources(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 3)
+    with pytest.raises(ValidationError) as caught:
+        env.controller.start_race(race.id)
+    assert key_of(caught) == "error.race.no_participants"
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    env.drivers.set_active(driver_id, False)
+    with pytest.raises(ValidationError) as caught:
+        env.controller.start_race(race.id)
+    assert key_of(caught) == "error.race.driver_inactive"
+    assert env.races.require_race(race.id).status is RaceStatus.READY
+
+
+def test_start_and_end_a_race(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 2)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+
+    runner = env.controller.start_race(race.id)
+    started = env.races.require_race(race.id)
+    assert started.status is RaceStatus.RUNNING
+    assert started.started_at is not None
+    assert not started.is_editable
+
+    runner.pause()
+    assert env.races.require_race(race.id).status is RaceStatus.PAUSED
+    runner.resume()
+    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+
+    runner.stop()
+    ended = env.races.require_race(race.id)
+    assert ended.status is RaceStatus.ABORTED
+    assert ended.finished_at is not None
+    assert ended.is_over
+
+
+def test_running_and_finished_races_cannot_be_edited_or_restarted(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 2)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    runner = env.controller.start_race(race.id)
+
+    d2, v2 = env.pair(2)
+    with pytest.raises(ValidationError) as caught:
+        env.races.add_participant(race.id, d2, v2, 2)
+    assert key_of(caught) == "error.race.not_editable"
+    with pytest.raises(ValidationError) as caught:
+        env.races.delete_race(race.id)
+    assert key_of(caught) == "error.race.running"
+    with pytest.raises(ValidationError) as caught:
+        env.controller.start_race(race.id)
+    assert key_of(caught) == "error.race.already_running"
+
+    runner.stop()
+    with pytest.raises(ValidationError) as caught:
+        env.controller.start_race(race.id)
+    assert key_of(caught) == "error.race.not_startable"
+    env.races.delete_race(race.id)
+    assert env.races.get_race(race.id) is None
+
+
+def test_unknown_race(env: Env) -> None:
+    with pytest.raises(ValidationError) as caught:
+        env.races.require_race(RaceId(42))
+    assert key_of(caught) == "error.race.not_found"
+
+
+def test_running_race_is_aborted_when_the_module_is_disabled(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 2)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    env.controller.start_race(race.id)
+
+    env.runtime.plugins.disable("races")
+    ended = env.races.require_race(race.id)
+    assert ended.status is RaceStatus.ABORTED
+    assert ended.finished_at is not None
+
+
+def test_races_left_running_by_a_crash_are_aborted(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 2)
+    env.races.record_started(race.id)
+    assert env.races.abort_stale_races() == 1
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    assert env.races.abort_stale_races() == 0
