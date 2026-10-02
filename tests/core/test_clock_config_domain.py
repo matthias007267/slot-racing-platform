@@ -4,7 +4,7 @@ import pytest
 
 from carrera.core.clock import ManualClock, MonotonicClock, format_duration
 from carrera.core.config import AppConfig, ConfigError, load_config, save_config
-from carrera.core.domain import Participant, SensorRole, TimingLayout
+from carrera.core.domain import Participant, TimingLayout, TimingPositionType
 from carrera.core.domain.ids import DriverId
 from carrera.core.errors import ValidationError
 from carrera.core.i18n import Translator
@@ -50,19 +50,19 @@ def test_invalid_config_raises(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_layout_from_sensor_ids_names_points() -> None:
-    layout = TimingLayout.from_sensor_ids(["sf", "a", "b"])
-    assert [p.label for p in layout.points] == ["START_FINISH", "SECTOR_1", "SECTOR_2"]
-    assert [p.sensor_id for p in layout.lap_sequence] == ["a", "b", "sf"]
+def test_layout_from_position_ids_names_positions() -> None:
+    layout = TimingLayout.from_position_ids(["sf", "a", "b"])
+    assert [p.label for p in layout.positions] == ["START_FINISH", "SECTOR_1", "SECTOR_2"]
+    assert [p.id for p in layout.lap_sequence] == ["a", "b", "sf"]
     assert layout.sector_count == 3
-    assert layout.points[0].role is SensorRole.START_FINISH
+    assert layout.positions[0].type is TimingPositionType.START_FINISH
 
 
 def test_layout_validation() -> None:
-    with pytest.raises(ValueError, match="at least"):
+    with pytest.raises(ValueError, match="no_positions"):
         TimingLayout(())
-    with pytest.raises(ValueError, match="unique"):
-        TimingLayout.from_sensor_ids(["a", "a"])
+    with pytest.raises(ValueError, match="position_duplicate"):
+        TimingLayout.from_position_ids(["a", "a"])
 
 
 def test_participant_lane_must_be_positive() -> None:

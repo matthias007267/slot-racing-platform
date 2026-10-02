@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 
-class ValidationError(Exception):
-    """Invalid input or a violated business rule.
+class ValidationError(ValueError):
+    """Invalid input or a violated business rule. It is a ``ValueError`` so domain objects can
+    reject invalid construction with it.
 
     ``key`` is a translation key and ``params`` are its format arguments, so the message can be
     shown in any language by the UI (``Translator.format``).

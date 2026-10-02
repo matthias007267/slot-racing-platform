@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from carrera.core.domain import TimingLayout
+from carrera.core.domain import RaceId, TimingLayout, TimingSetup, TrackId
 from carrera.core.events import SensorTriggered
 
 SensorSink = Callable[[SensorTriggered], None]
@@ -51,13 +51,53 @@ class TimingSource(ABC):
         """The race continues after a pause."""
 
 
+class ManuallyTriggerable(ABC):
+    """Optional capability of a timing source: it can simulate a car passing on request.
+
+    Used by the timing test mode. Sources that detect real cars do not implement it.
+    """
+
+    @abstractmethod
+    def trigger_next(self, lane: int) -> None:
+        """Deliver the event of the next timing position ``lane`` would pass, timed now."""
+
+
 @dataclass(frozen=True, slots=True)
 class TimingSessionSpec:
-    """What a timing source needs to know about the race it will time."""
+    """Everything a timing source needs to know about the session it will time.
 
-    layout: TimingLayout
+    ``setup`` is the track's timing configuration; sources must not invent their own layout. It
+    must be usable, that is every position is covered by an active sensor.
+    """
+
+    setup: TimingSetup
     lanes: tuple[int, ...]
     laps: int
+    race_id: RaceId | None = None
+    track_id: TrackId | None = None
+
+    def __post_init__(self) -> None:
+        self.setup.ensure_usable()
+
+    @property
+    def layout(self) -> TimingLayout:
+        return self.setup.layout
+
+
+class TimingSetupService(ABC):
+    """Stores the timing configuration of tracks. Provided by the timing module."""
+
+    @abstractmethod
+    def get_setup(self, track_id: TrackId) -> TimingSetup | None:
+        """The stored configuration, or ``None`` if the track has none yet."""
+
+    @abstractmethod
+    def save_setup(self, track_id: TrackId, setup: TimingSetup) -> None:
+        """Store ``setup`` for the track, replacing the previous one."""
+
+    @abstractmethod
+    def clear_setup(self, track_id: TrackId) -> None:
+        """Remove the stored configuration; the track falls back to the default layout."""
 
 
 class TimingSourceFactory(ABC):

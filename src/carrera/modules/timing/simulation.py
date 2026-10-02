@@ -12,9 +12,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from carrera.core.clock import NANOS_PER_SECOND, Clock, ManualClock
-from carrera.core.domain import TimingLayout
+from carrera.core.domain import TimingSetup
 from carrera.core.events import SensorTriggered
-from carrera.core.timing import SensorSink, TimingSessionSpec, TimingSource, TimingSourceFactory
+from carrera.core.timing import (
+    ManuallyTriggerable,
+    SensorSink,
+    TimingSessionSpec,
+    TimingSource,
+    TimingSourceFactory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,13 +45,16 @@ class SimulatedLane:
         return self.lap_times_ns[min(lap_number, len(self.lap_times_ns)) - 1]
 
 
-class SimulationTimingProvider(TimingSource):
-    """Cars pass every timing point of the layout at evenly spaced fractions of their lap."""
+class SimulationTimingProvider(TimingSource, ManuallyTriggerable):
+    """Cars pass every position of the configured layout at evenly spaced fractions of a lap.
+
+    The positions and the sensors that report them come from the :class:`TimingSetup`; the
+    simulation has no layout of its own."""
 
     def __init__(
         self,
         clock: Clock,
-        layout: TimingLayout,
+        setup: TimingSetup,
         lanes: Sequence[SimulatedLane],
         laps: int,
         source_id: str = "simulation",
@@ -55,7 +64,9 @@ class SimulationTimingProvider(TimingSource):
         if len({lane.lane for lane in lanes}) != len(lanes):
             raise ValueError("lanes must be unique")
         self._clock = clock
-        self._layout = layout
+        setup.ensure_usable()
+        self._setup = setup
+        self._manual_progress: dict[int, int] = {}
         self._lanes = tuple(lanes)
         self._laps = laps
         self._source_id = source_id
@@ -92,6 +103,26 @@ class SimulationTimingProvider(TimingSource):
     def stop(self) -> None:
         self._sink = None
         self._paused_at_ns = None
+        self._manual_progress.clear()
+
+    def trigger_next(self, lane: int) -> None:
+        sink = self._sink
+        if sink is None:
+            raise RuntimeError("simulation is not running")
+        sequence = self._setup.layout.lap_sequence
+        step = self._manual_progress.get(lane, 0)
+        position = sequence[step % len(sequence)]
+        self._manual_progress[lane] = step + 1
+        sink(self._event(self._clock.now_ns(), position.id, lane))
+
+    def _event(self, timestamp_ns: int, position_id: str, lane: int) -> SensorTriggered:
+        return SensorTriggered(
+            timestamp_ns=timestamp_ns,
+            source_id=self._source_id,
+            sensor_id=self._setup.sensor_at(position_id).id,
+            position_id=position_id,
+            lane=lane,
+        )
 
     def pause(self) -> None:
         if self._sink is not None and self._paused_at_ns is None:
@@ -149,7 +180,7 @@ class SimulationTimingProvider(TimingSource):
         self.advance_to(max(last, self._clock.now_ns()))
 
     def _build_schedule(self, origin_ns: int) -> list[SensorTriggered]:
-        sequence = self._layout.lap_sequence
+        sequence = self._setup.layout.lap_sequence
         events: list[tuple[int, int, int, SensorTriggered]] = []
         for lane in self._lanes:
             lap_start = origin_ns + lane.start_delay_ns
@@ -157,12 +188,7 @@ class SimulationTimingProvider(TimingSource):
                 lap_time = lane.lap_time_ns(lap_number)
                 for position, point in enumerate(sequence):
                     timestamp = lap_start + lap_time * (position + 1) // len(sequence)
-                    event = SensorTriggered(
-                        timestamp_ns=timestamp,
-                        source_id=self._source_id,
-                        sensor_id=point.sensor_id,
-                        lane=lane.lane,
-                    )
+                    event = self._event(timestamp, point.id, lane.lane)
                     events.append((timestamp, lane.lane, position, event))
                 lap_start += lap_time
         events.sort(key=lambda item: item[:3])
@@ -197,7 +223,7 @@ class SimulationTimingFactory(TimingSourceFactory):
             )
             for index, lane in enumerate(spec.lanes)
         ]
-        return SimulationTimingProvider(self._clock, spec.layout, lanes, spec.laps)
+        return SimulationTimingProvider(self._clock, spec.setup, lanes, spec.laps)
 
     def _lap_time(self, lane: int, index: int, lap: int) -> int:
         # Deterministic jitter of -100..+100 ms so laps differ but runs are reproducible.

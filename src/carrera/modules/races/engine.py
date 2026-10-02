@@ -6,8 +6,9 @@ only knows the abstract :class:`TimingSource` and never a camera, GPIO or any ot
 Race rules implemented here:
 
 * Standing start: lap 1 begins at ``RaceStarted``; a lap ends when the car passes the
-  start/finish line after having passed all sector sensors in order.
-* Sensor events that do not match the sensor a car is expected to pass next are ignored.
+  start/finish line after having passed all sector positions in order.
+* Sensor events that do not match the position a car is expected to pass next are ignored.
+  The engine looks at the logical position of an event, never at the sensor or hardware.
 * A participant finishes after completing ``laps`` laps. The first one to finish is the winner.
   The race finishes when all participants have finished or when it is stopped manually.
 * Events arriving while the race is paused are ignored and paused time is excluded from race time.
@@ -202,8 +203,10 @@ class RaceEngine:
         if state is None or state.finished:
             return
         point = self._sequence[state.next_point]
-        if event.sensor_id != point.sensor_id:
-            logger.debug("Ignoring unexpected sensor %s on lane %s", event.sensor_id, event.lane)
+        if event.position_id != point.id:
+            logger.debug(
+                "Ignoring unexpected position %s on lane %s", event.position_id, event.lane
+            )
             return
 
         race_time = self._race_time(event.timestamp_ns)

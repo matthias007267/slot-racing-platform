@@ -24,7 +24,11 @@ class _FakeSource(TimingSource):
 
     def trigger(self) -> None:
         assert self._sink is not None
-        self._sink(SensorTriggered(timestamp_ns=1, source_id=self.source_id, sensor_id="a", lane=1))
+        self._sink(
+            SensorTriggered(
+                timestamp_ns=1, source_id=self.source_id, sensor_id="a", position_id="p", lane=1
+            )
+        )
 
 
 def test_interface_is_abstract() -> None:
