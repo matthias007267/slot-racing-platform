@@ -2,7 +2,7 @@ import pytest
 
 from carrera.core.clock import NANOS_PER_SECOND as S
 from carrera.core.clock import ManualClock
-from carrera.core.domain import DriverId, Participant, RaceId, RaceStatus, TimingLayout
+from carrera.core.domain import DriverId, Participant, RaceId, RaceStatus, TimingLayout, TimingSetup
 from carrera.core.events import (
     Event,
     EventBus,
@@ -21,7 +21,8 @@ from carrera.core.timing import SensorSink, TimingSource
 from carrera.modules.races.engine import RaceConfig, RaceEngine, RaceStateError
 from carrera.modules.timing.simulation import SimulatedLane, SimulationTimingProvider
 
-LAYOUT = TimingLayout.from_sensor_ids(["sf", "s1", "s2"])
+LAYOUT = TimingLayout.from_position_ids(["sf", "s1", "s2"])
+SETUP = TimingSetup.for_layout(LAYOUT)
 ALICE, BOB = DriverId(1), DriverId(2)
 
 
@@ -41,7 +42,7 @@ class Harness:
         self.sim: SimulationTimingProvider | None = None
         all_sources: list[TimingSource] = list(sources or [])
         if lanes is not None:
-            self.sim = SimulationTimingProvider(self.clock, LAYOUT, lanes, laps)
+            self.sim = SimulationTimingProvider(self.clock, SETUP, lanes, laps)
             all_sources.insert(0, self.sim)
         self.engine = RaceEngine(self.config, self.bus, self.clock, all_sources)
 
@@ -51,7 +52,11 @@ class Harness:
     def trigger(self, timestamp_ns: int, sensor_id: str, lane: int = 1) -> None:
         self.bus.publish(
             SensorTriggered(
-                timestamp_ns=timestamp_ns, source_id="manual", sensor_id=sensor_id, lane=lane
+                timestamp_ns=timestamp_ns,
+                source_id="manual",
+                sensor_id=sensor_id,
+                position_id=sensor_id,
+                lane=lane,
             )
         )
 

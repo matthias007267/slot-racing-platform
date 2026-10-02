@@ -15,10 +15,14 @@ from carrera.core.events.base import Event
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SensorTriggered(Event):
-    """A car passed a timing point. The origin (camera, Pi, simulation) is irrelevant."""
+    """A car passed a timing position. The origin (camera, Pi, simulation) is irrelevant.
+
+    ``sensor_id`` names the sensor that fired, ``position_id`` the logical position it stands
+    for. Consumers such as the race engine rely on the position only."""
 
     source_id: str
     sensor_id: str
+    position_id: str
     lane: int
 
 

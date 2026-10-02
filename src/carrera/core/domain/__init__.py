@@ -2,7 +2,14 @@
 
 from carrera.core.domain.ids import DriverId, RaceId, TrackId, VehicleId
 from carrera.core.domain.race import Participant, ParticipantResult, RaceStatus
-from carrera.core.domain.timing import SensorRole, TimingLayout, TimingPoint
+from carrera.core.domain.timing import (
+    TimingLayout,
+    TimingPosition,
+    TimingPositionType,
+    TimingSensor,
+    TimingSetup,
+    default_timing_setup,
+)
 
 __all__ = [
     "DriverId",
@@ -10,9 +17,12 @@ __all__ = [
     "ParticipantResult",
     "RaceId",
     "RaceStatus",
-    "SensorRole",
     "TimingLayout",
-    "TimingPoint",
+    "TimingPosition",
+    "TimingPositionType",
+    "TimingSensor",
+    "TimingSetup",
     "TrackId",
     "VehicleId",
+    "default_timing_setup",
 ]

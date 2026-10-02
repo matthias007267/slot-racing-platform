@@ -29,10 +29,11 @@ or GPIO libraries (enforced by import-linter).
 | `clock` | `Clock` protocol, `MonotonicClock` (`perf_counter_ns`), `ManualClock` |
 | `events` | Immutable typed events and `EventBus` |
 | `plugin` | Manifest, lifecycle, services, UI contributions, discovery, manager |
-| `timing` | `TimingSource`, `TimingSourceFactory`, `TimingSessionSpec` |
+| `timing` | `TimingSource`, `ManuallyTriggerable`, `TimingSourceFactory`, `TimingSessionSpec`, `TimingSetupService` |
 | `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog` and their read-only info types |
 | `errors` | `ValidationError(key, **params)` for translatable user errors |
-| `domain` | IDs, `Participant`, `ParticipantResult`, `RaceStatus`, `TimingLayout` |
+| `domain` | IDs, `Participant`, `ParticipantResult`, `RaceStatus`, `TimingLayout`, `TimingPosition`, `TimingSensor`, `TimingSetup` |
+| `messages` | German texts for the core's `ValidationError` keys (registered by the runtime) |
 | `config` | `AppConfig` (pydantic), JSON load/save, per-user paths |
 | `storage` | SQLAlchemy base, `Database`, Alembic migrations, core tables |
 | `i18n` | Key based `Translator` (German first), `format` fills placeholders |
@@ -45,9 +46,9 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | Module | State |
 |---|---|
 | `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
-| `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page |
+| `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
-| `timing` | Models, **`SimulationTimingProvider`** and its `TimingSourceFactory` |
+| `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
 | `timing_camera`, `timing_sensor`, `audio_animation` | Placeholder plugin only (camera/sensor off by default) |
 
@@ -96,7 +97,7 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
 Events are frozen dataclasses with `timestamp_ns: int`. Every `*_ns` field is validated as a
 non-negative integer. Event types:
 
-- Timing: `SensorTriggered(source_id, sensor_id, lane)`
+- Timing: `SensorTriggered(source_id, sensor_id, position_id, lane)`
 - Race: `RaceStarting`, `RaceStarted`, `RacePaused`, `RaceResumed`, `RaceFinished`
 - Laps/sectors: `LapStarted`, `LapCompleted`, `SectorCompleted`
 - Result: `WinnerDetermined`
@@ -143,17 +144,84 @@ RaspberryPiTimingProvider*┤
 CarreraTimingProvider*   ─┘                                            (* future modules)
 ```
 
-`TimingSource` knows nothing about its origin. `TimingLayout` describes the logical sequence of
-timing points: `START_FINISH`, `SECTOR_1`, … `SECTOR_n`. Sector `k` ends at the k-th point of the
-lap sequence; the last sector ends at `START_FINISH` and completes the lap. The future
-configuration wizard (drive over each sensor in order) produces such a layout.
+`TimingSource` knows nothing about its origin. Every source delivers the same event,
+`SensorTriggered(timestamp_ns, source_id, sensor_id, position_id, lane)`.
 
-`SimulationTimingProvider(clock, layout, lanes, laps)` simulates several lanes with individual
-lap times (per lap), start delays and evenly spaced sensors. With a `ManualClock` it is advanced
-with `advance_to`, `advance_by` or `run_to_end` and moves the clock. With any clock the host calls
-`poll()`, which delivers the events that are due; `pause()`/`resume()` shift the remaining
-schedule. `SimulationTimingFactory` registers the simulation as a `TimingSourceFactory` service
-(`name="simulation"`) and creates one source per race.
+### Track timing layout
+
+A track can have a **timing layout**: an ordered list of *logical positions*.
+
+- `TimingPosition(id, type, order, name)`: `type` is `START_FINISH` or `SECTOR`. The `id` is
+  stable, the `order` is the place along the lap (start/finish is 1), `name` is an optional
+  display name. Display names such as "Sektor 2" are derived from type and order by the UI; no
+  code decides by strings what a position means.
+- `TimingLayout(positions)` validates itself: at least one position, exactly one `START_FINISH`
+  and it is first, unique ids, orders `1..n`. The number of sectors is not limited (0 to many).
+  Sector `k` ends at the k-th position of the lap sequence; the last sector ends at
+  `START_FINISH` and completes the lap.
+- `TimingSensor(id, position_id, name, hardware_id, active)` is a *device* that reports one
+  position. `hardware_id` is an opaque string for providers (for example a GPIO pin); it is not
+  the logical position and the engine never sees it.
+- `TimingSetup(layout, sensors)` binds exactly one sensor to every position and validates unique
+  sensor ids and unique hardware ids. `ensure_usable()` rejects inactive sensors: a setup with an
+  inactive sensor can be stored but cannot be used as timing source.
+- All of this is in `carrera.core.domain`, so every provider and the engine use the same rules.
+  Invalid configurations raise `ValidationError`; the UI shows the translated message.
+
+### Providers and engine
+
+```text
+Race ─ track ─▶ TimingSetupService.get_setup(track)   (fallback: default_timing_setup())
+                         │
+                TimingSessionSpec(setup, lanes, laps, race_id, track_id)
+                         │
+              TimingSourceFactory.create_source(spec) ─▶ TimingSource
+                         │  SensorTriggered(sensor_id, position_id, lane)
+                         ▼
+                      EventBus ─▶ RaceEngine(RaceConfig(layout = setup.layout))
+```
+
+- The *provider* knows sensors (and, for real devices, hardware ids) and translates raw signals
+  into `SensorTriggered` with the `position_id` of the sensor's position.
+- The *engine* knows only the layout (positions). It compares `event.position_id` with the next
+  expected position of a participant. It never imports a provider or reads hardware ids
+  (import-linter).
+- The simulation has no built-in layout. `SimulationTimingProvider(clock, setup, lanes, laps)`
+  passes the positions of the given setup in driving order; `SimulationTimingFactory` takes the
+  setup from `TimingSessionSpec`.
+- `TimingSetupService` (core interface, implemented and registered by the `timing` module) stores
+  and loads the setup per track. The races module asks for it lazily; tracks without a stored
+  setup use `default_timing_setup()` (`start_finish`, `sector_1`, `sector_2`) so existing tracks and
+  races keep working. A stored setup with an inactive sensor stops the race start with a clear
+  message.
+
+### Attaching camera and Raspberry Pi later
+
+A camera or Raspberry Pi module implements `TimingSource` and a `TimingSourceFactory` and
+registers the factory as a service, exactly like the simulation. In `create_source(spec)` it reads
+`spec.setup`: each active `TimingSensor` has a `hardware_id` that tells the provider which pin,
+camera zone or device channel belongs to that sensor, and `position_id` is what it must put into
+`SensorTriggered`. Nothing in the engine, the track UI or the database schema changes. The
+timing test mode works with any source that implements `ManuallyTriggerable`; real hardware
+sources are not simulated there.
+
+### Timing configuration UI (`tracks` module)
+
+The track page has a *Timing-Konfiguration* button. It opens, inside the same navigation page,
+
+- the **configuration view**: a table of positions with sensor id, name, hardware id and active
+  flag; add, remove, reorder, edit and activate/deactivate; save and reset to the default;
+- the **wizard** in six steps: track, positions (start/finish is automatic), sensors, order,
+  test, save;
+- the **test mode**: *Simulation auslösen* creates one simulated `SensorTriggered` through a
+  simulation source built from the current layout and shows a table (time, sensor, position),
+  event count, last position and sensor, time and the detected order. Test events go to a private
+  sink, never to the application bus, and are not stored.
+
+The UI only edits a `TimingDraft` and shows what the `TimingTestSession` reports. Validation lives
+in the core domain, persistence in `TimingSetupManager`, and no race logic (laps, positions,
+sector times) is computed in the UI. `timing_editor` and `timing_test` are Qt-free
+(import-linter).
 
 Host driven hooks on `TimingSource` (`poll`, `pause`, `resume`) default to no-ops, so sources with
 their own threads or callbacks are unaffected.
@@ -190,12 +258,14 @@ keys, offers `session()` (commit/rollback), `migrate()` and `in_memory()` for te
 | `drivers_vehicles` | `drivers` (unique `start_number`), `vehicles` (optional `driver_id`) |
 | `tracks` | `tracks`, `track_layouts` |
 | `races` | `races`, `race_participants`, `laps`, `sectors` |
-| `timing` | `timing_configurations`, `timing_sensors` |
+| `timing` | `timing_configurations` (one per track), `timing_positions`, `timing_sensors` |
 
 All models share one metadata and one migration history. Create migrations with
 `uv run alembic revision --autogenerate -m "message"` (see `alembic.ini`). A test fails if the
 migrations and models drift apart. Migration `0002` (drivers, vehicles, tracks, race results)
-keeps existing data (for example `nickname` becomes `display_name`) and can be downgraded; the
+keeps existing data (for example `nickname` becomes `display_name`) and can be downgraded;
+migration `0003` adds `timing_positions` and extends `timing_sensors` (name, position, hardware id,
+active flag) without removing columns or rows; the
 Alembic environment switches SQLite foreign keys off while tables are rebuilt and verifies them
 afterwards. Foreign keys from races to tracks, drivers and vehicles are `RESTRICT`, so used master
 data can be deactivated but not deleted.
@@ -225,6 +295,8 @@ data can be deactivated but not deleted.
 | `modules.races.ui` ↛ engine, recorder (no race logic in the UI) | import-linter |
 | `modules.timing` ↛ PySide6, `uikit` | import-linter |
 | `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
+| race engine ↛ timing modules, `app`, `uikit` (engine knows only the core) | import-linter |
+| `tracks.timing_editor`, `tracks.timing_test` ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
 | Adding a module: add entry point and add it to the independence contract | review |
 
 ## Deviations from the proposed layout

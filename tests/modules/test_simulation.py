@@ -2,7 +2,7 @@ import pytest
 
 from carrera.core.clock import NANOS_PER_SECOND as S
 from carrera.core.clock import ManualClock, MonotonicClock
-from carrera.core.domain import TimingLayout
+from carrera.core.domain import TimingLayout, TimingSetup
 from carrera.core.events import SensorTriggered
 from carrera.core.timing import TimingSessionSpec, TimingSource
 from carrera.modules.timing.simulation import (
@@ -11,14 +11,15 @@ from carrera.modules.timing.simulation import (
     SimulationTimingProvider,
 )
 
-LAYOUT = TimingLayout.from_sensor_ids(["sf", "s1", "s2"])
+LAYOUT = TimingLayout.from_position_ids(["sf", "s1", "s2"])
+SETUP = TimingSetup.for_layout(LAYOUT)
 
 
 def make(
     lanes: list[SimulatedLane], laps: int = 2, start_ns: int = 0
 ) -> tuple[SimulationTimingProvider, ManualClock, list[SensorTriggered]]:
     clock = ManualClock(start_ns)
-    sim = SimulationTimingProvider(clock, LAYOUT, lanes, laps)
+    sim = SimulationTimingProvider(clock, SETUP, lanes, laps)
     received: list[SensorTriggered] = []
     sim.start(received.append)
     return sim, clock, received
@@ -81,7 +82,7 @@ def test_advance_delivers_only_events_up_to_the_target_and_moves_the_clock() -> 
 
 def test_clock_equals_event_time_during_delivery() -> None:
     clock = ManualClock()
-    sim = SimulationTimingProvider(clock, LAYOUT, [SimulatedLane(1, (12 * S,))], laps=1)
+    sim = SimulationTimingProvider(clock, SETUP, [SimulatedLane(1, (12 * S,))], laps=1)
     seen: list[tuple[int, int]] = []
     sim.start(lambda e: seen.append((clock.now_ns(), e.timestamp_ns)))
     sim.run_to_end()
@@ -90,7 +91,7 @@ def test_clock_equals_event_time_during_delivery() -> None:
 
 def test_stop_halts_delivery_even_from_within_the_sink() -> None:
     clock = ManualClock()
-    sim = SimulationTimingProvider(clock, LAYOUT, [SimulatedLane(1, (12 * S,))], laps=2)
+    sim = SimulationTimingProvider(clock, SETUP, [SimulatedLane(1, (12 * S,))], laps=2)
     received: list[SensorTriggered] = []
 
     def sink(event: SensorTriggered) -> None:
@@ -124,10 +125,10 @@ def test_configuration_validation() -> None:
     with pytest.raises(ValueError):
         SimulatedLane(1, (0,))
     with pytest.raises(ValueError, match="laps"):
-        SimulationTimingProvider(ManualClock(), LAYOUT, [], laps=0)
+        SimulationTimingProvider(ManualClock(), SETUP, [], laps=0)
     with pytest.raises(ValueError, match="unique"):
         SimulationTimingProvider(
-            ManualClock(), LAYOUT, [SimulatedLane(1, (S,)), SimulatedLane(1, (S,))], laps=1
+            ManualClock(), SETUP, [SimulatedLane(1, (S,)), SimulatedLane(1, (S,))], laps=1
         )
 
 
@@ -173,7 +174,7 @@ def test_resume_without_pause_changes_nothing() -> None:
 
 
 def test_advance_requires_a_manual_clock() -> None:
-    sim = SimulationTimingProvider(MonotonicClock(), LAYOUT, [SimulatedLane(1, (S,))], laps=1)
+    sim = SimulationTimingProvider(MonotonicClock(), SETUP, [SimulatedLane(1, (S,))], laps=1)
     sim.start(lambda _e: None)
     with pytest.raises(TypeError, match="ManualClock"):
         sim.advance_to(1)
@@ -184,7 +185,7 @@ def test_factory_creates_an_independent_source_per_race() -> None:
     clock = ManualClock()
     factory = SimulationTimingFactory(clock)
     assert factory.name == "simulation"
-    spec = TimingSessionSpec(layout=LAYOUT, lanes=(1, 2), laps=2)
+    spec = TimingSessionSpec(setup=SETUP, lanes=(1, 2), laps=2)
     first = factory.create_source(spec)
     second = factory.create_source(spec)
     assert first is not second

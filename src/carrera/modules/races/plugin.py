@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 from carrera.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from carrera.core.storage import Database
-from carrera.core.timing import TimingSourceFactory
+from carrera.core.timing import TimingSetupService, TimingSourceFactory
 from carrera.modules.races.recorder import RaceRecorder
 from carrera.modules.races.runner import RaceController
 from carrera.modules.races.service import RaceService
@@ -45,6 +45,7 @@ class RacesPlugin(Plugin):
             factories=lambda: context.find_services(TimingSourceFactory),
             preferred_source=context.config.timing_source,
             storage_errors=lambda: recorder.errors,
+            setups=lambda: context.find_service(TimingSetupService),
         )
         self._recorder = recorder
         self._controller = controller

@@ -18,7 +18,9 @@ class _Custom(Event):
 
 
 def _sensor(timestamp_ns: int = 1) -> SensorTriggered:
-    return SensorTriggered(timestamp_ns=timestamp_ns, source_id="s", sensor_id="a", lane=1)
+    return SensorTriggered(
+        timestamp_ns=timestamp_ns, source_id="s", sensor_id="a", position_id="p", lane=1
+    )
 
 
 def test_events_are_immutable() -> None:
@@ -30,7 +32,7 @@ def test_events_are_immutable() -> None:
 @pytest.mark.parametrize("bad", [1.5, "1", True])
 def test_timestamp_must_be_integer_nanoseconds(bad: object) -> None:
     with pytest.raises(TypeError):
-        SensorTriggered(timestamp_ns=bad, source_id="s", sensor_id="a", lane=1)  # type: ignore[arg-type]
+        SensorTriggered(timestamp_ns=bad, source_id="s", sensor_id="a", position_id="p", lane=1)  # type: ignore[arg-type]
 
 
 def test_negative_times_are_rejected() -> None:

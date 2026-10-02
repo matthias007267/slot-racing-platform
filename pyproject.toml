@@ -150,3 +150,24 @@ name = "Shared UI helpers depend on the core only"
 type = "forbidden"
 source_modules = ["carrera.uikit"]
 forbidden_modules = ["carrera.app", "carrera.modules"]
+
+[[tool.importlinter.contracts]]
+name = "Race engine knows only the core, not timing providers"
+type = "forbidden"
+source_modules = ["carrera.modules.races.engine"]
+forbidden_modules = [
+    "carrera.modules.timing",
+    "carrera.modules.timing_camera",
+    "carrera.modules.timing_sensor",
+    "carrera.app",
+    "carrera.uikit",
+]
+
+[[tool.importlinter.contracts]]
+name = "Timing configuration logic is free of UI and hardware libraries"
+type = "forbidden"
+source_modules = [
+    "carrera.modules.tracks.timing_editor",
+    "carrera.modules.tracks.timing_test",
+]
+forbidden_modules = ["PySide6", "carrera.uikit", "cv2", "gpiozero", "RPi"]
