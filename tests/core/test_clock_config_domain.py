@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from carrera.core.clock import ManualClock, MonotonicClock
+from carrera.core.clock import ManualClock, MonotonicClock, format_duration
 from carrera.core.config import AppConfig, ConfigError, load_config, save_config
 from carrera.core.domain import Participant, SensorRole, TimingLayout
 from carrera.core.domain.ids import DriverId
+from carrera.core.errors import ValidationError
 from carrera.core.i18n import Translator
 
 
@@ -77,3 +78,26 @@ def test_translator_falls_back_to_default_language_then_key() -> None:
     assert translator.translate("hello") == "Hallo"
     assert translator.translate("unknown") == "unknown"
     assert translator.translate("unknown", "Fallback") == "Fallback"
+
+
+def test_format_duration() -> None:
+    assert format_duration(None) == "-"
+    assert format_duration(0) == "0:00.000"
+    assert format_duration(5_432_000_000) == "0:05.432"
+    assert format_duration(75_001_000_000) == "1:15.001"
+    assert format_duration(3_723_400_000_000) == "1:02:03.400"
+
+
+def test_translator_formats_placeholders() -> None:
+    translator = Translator()
+    translator.add_catalog("de", {"hello": "Hallo {name}", "broken": "Hallo {unknown}"})
+    assert translator.format("hello", name="Anna") == "Hallo Anna"
+    assert translator.format("broken", name="Anna") == "Hallo {unknown}"
+    assert translator.format("missing.key") == "missing.key"
+
+
+def test_validation_error_carries_key_and_params() -> None:
+    error = ValidationError("error.x", limit=3)
+    assert error.key == "error.x"
+    assert error.params == {"limit": 3}
+    assert str(error) == "error.x"

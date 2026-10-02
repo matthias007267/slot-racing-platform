@@ -1,12 +1,14 @@
 from collections.abc import Iterator
 
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from carrera.core.storage import Base, Database, PluginRecord, Setting, import_plugin_models
+from carrera.core.storage.database import alembic_config
 from carrera.modules.drivers_vehicles.models import Driver, Vehicle
 from carrera.modules.races.models import Lap, Race, RaceParticipant, Sector
 from carrera.modules.timing.models import TimingConfiguration, TimingSensor
@@ -140,3 +142,62 @@ def test_file_database_persists(tmp_path):  # type: ignore[no-untyped-def]
     with second.session() as session:
         assert session.scalars(select(Driver.name)).all() == ["Persistent"]
     second.dispose()
+
+
+def test_upgrade_preserves_existing_data() -> None:
+    database = Database.in_memory()
+    database.migrate("0001")
+    with database.engine.begin() as connection:
+        for statement in (
+            "INSERT INTO drivers (id, name, nickname, is_active) VALUES (1, 'Anna', 'Anni', 1)",
+            "INSERT INTO vehicles (id, name, manufacturer) VALUES (1, 'Porsche', 'Carrera')",
+            "INSERT INTO tracks (id, name, lane_count) VALUES (1, 'Ring', 2)",
+            "INSERT INTO races (id, name, track_id, status, target_laps) "
+            "VALUES (1, 'Alt', 1, 'finished', 3)",
+            "INSERT INTO race_participants (id, race_id, driver_id, vehicle_id, lane, "
+            "final_position) VALUES (1, 1, 1, 1, 1, 1)",
+            "INSERT INTO laps (id, race_id, participant_id, lap_number, lap_time_ns, "
+            "race_time_ns) VALUES (1, 1, 1, 1, 5000000000, 5000000000)",
+            "INSERT INTO sectors (id, lap_id, sector_number, sector_time_ns) "
+            "VALUES (1, 1, 1, 2500000000)",
+        ):
+            connection.exec_driver_sql(statement)
+
+    database.migrate()
+
+    with database.session() as session:
+        driver = session.get(Driver, 1)
+        assert driver is not None
+        assert (driver.name, driver.display_name, driver.is_active) == ("Anna", "Anni", True)
+        assert driver.created_at is not None
+        vehicle = session.get(Vehicle, 1)
+        assert vehicle is not None and vehicle.manufacturer == "Carrera" and vehicle.is_active
+        track = session.get(Track, 1)
+        assert track is not None and track.is_active and track.lane_count == 2
+        race = session.get(Race, 1)
+        assert race is not None and race.status == "finished" and race.track_id == 1
+        participant = session.get(RaceParticipant, 1)
+        assert participant is not None and participant.final_position == 1
+        assert participant.laps_completed == 0 and not participant.finished
+        lap = session.get(Lap, 1)
+        assert lap is not None and lap.lap_time_ns == 5_000_000_000
+        sector = session.get(Sector, 1)
+        assert sector is not None and sector.sector_time_ns == 2_500_000_000
+    database.dispose()
+
+
+def test_downgrade_restores_the_previous_schema() -> None:
+    database = Database.in_memory()
+    database.migrate()
+    with database.session() as session:
+        session.add(Driver(name="Anna", display_name="Anni", start_number=3))
+    config = alembic_config()
+    with database.engine.connect() as connection:
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0001")
+    columns = {column["name"] for column in inspect(database.engine).get_columns("drivers")}
+    assert "nickname" in columns and "display_name" not in columns
+    with database.engine.connect() as connection:
+        nickname = connection.exec_driver_sql("SELECT nickname FROM drivers").scalar_one()
+    assert nickname == "Anni"
+    database.dispose()
