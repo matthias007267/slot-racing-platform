@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from carrera.core.storage.base import Base
+
+
+class Race(Base):
+    __tablename__ = "races"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    track_id: Mapped[int | None] = mapped_column(ForeignKey("tracks.id", ondelete="SET NULL"))
+    track_layout_id: Mapped[int | None] = mapped_column(
+        ForeignKey("track_layouts.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(16), default="created")
+    target_laps: Mapped[int] = mapped_column(default=10)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class RaceParticipant(Base):
+    __tablename__ = "race_participants"
+    __table_args__ = (
+        UniqueConstraint("race_id", "lane"),
+        UniqueConstraint("race_id", "driver_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
+    driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="RESTRICT"))
+    vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
+    lane: Mapped[int]
+    final_position: Mapped[int | None]
+
+
+class Lap(Base):
+    __tablename__ = "laps"
+    __table_args__ = (UniqueConstraint("participant_id", "lap_number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("race_participants.id", ondelete="CASCADE")
+    )
+    lap_number: Mapped[int]
+    lap_time_ns: Mapped[int] = mapped_column(BigInteger)
+    race_time_ns: Mapped[int] = mapped_column(BigInteger)
+
+
+class Sector(Base):
+    __tablename__ = "sectors"
+    __table_args__ = (UniqueConstraint("lap_id", "sector_number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lap_id: Mapped[int] = mapped_column(ForeignKey("laps.id", ondelete="CASCADE"))
+    sector_number: Mapped[int]
+    sector_time_ns: Mapped[int] = mapped_column(BigInteger)
