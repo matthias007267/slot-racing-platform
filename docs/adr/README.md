@@ -11,5 +11,6 @@
 | [0007](0007-catalogs-timing-factory-and-race-flow.md) | Core catalogs, timing factory and the event driven race flow |
 | [0008](0008-track-timing-layout.md) | Track timing layout: logical positions, sensors and setups |
 | [0009](0009-timing-provider-infrastructure.md) | Timing providers: ids, registry, capabilities, availability and errors |
+| [0010](0010-vendor-neutral-naming.md) | Manufacturer-neutral naming: package, command, plugin group, data locations |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

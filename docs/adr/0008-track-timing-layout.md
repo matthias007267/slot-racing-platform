@@ -14,7 +14,7 @@ extension of the existing models was chosen.
   optional `hardware_id`, active) is a device assigned to exactly one position. The hardware id is
   an opaque string for providers and is never the position.
 - **Core domain.** `TimingLayout`, `TimingSensor` and `TimingSetup` validate themselves in
-  `carrera.core.domain` (one start/finish, first; unique ids and orders; unique sensor and
+  `slot_racing.core.domain` (one start/finish, first; unique ids and orders; unique sensor and
   hardware ids; one sensor per position; inactive sensors are not usable). The sector count is not
   limited. They replace `TimingPoint` and `SensorRole`.
 - **Event.** `SensorTriggered` carries `sensor_id` and `position_id`. The engine matches

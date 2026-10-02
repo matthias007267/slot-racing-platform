@@ -4,7 +4,7 @@
 `TimingSource`, `TimingSourceFactory` and `SensorTriggered` exist (ADR 0004, 0007, 0008), but the
 factory was selected by an ambiguous `name`, nothing told whether a provider was usable before a
 race started, the race did not know its provider and the timing test mode picked a factory by
-name. Camera, Raspberry Pi and Carrera providers are planned and must be addable without
+name. Camera, Raspberry Pi and manufacturer-specific providers are planned and must be addable without
 touching the race engine, the race module, the database model or the UI.
 
 ## Decision

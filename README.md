@@ -1,6 +1,12 @@
-# Carrera Racing Platform
+# Slot-Racing Platform
 
-Modular desktop application for managing and running Carrera slot-car races.
+Slot-Racing Platform is a modular desktop application for managing slot-racing tracks, drivers,
+vehicles, races and timing systems.
+
+The platform is manufacturer-independent. It is an independent project and is not affiliated with,
+endorsed by or supported by any slot-car manufacturer. Manufacturer-specific hardware can be added
+later as optional, separate timing providers; the core, race engine, track model and timing
+abstraction do not depend on any manufacturer.
 
 The long-term scope covers drivers and vehicles, tracks and layout planning, races, lap and
 sector times, camera and Raspberry Pi based timing, statistics, audio and race presentation.
@@ -25,7 +31,7 @@ dynamic navigation. Usable in the application:
   six step wizard and a test mode with simulated events; the simulation and later timing
   providers use the stored layout. Tracks without a configuration use a default layout.
 
-**Not** implemented yet: camera detection, Raspberry Pi/GPIO, Carrera hardware, track planner,
+**Not** implemented yet: camera detection, Raspberry Pi/GPIO, manufacturer-specific hardware, track planner,
 audio/animations, statistics, time limited races.
 
 See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.md).
@@ -41,8 +47,8 @@ See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.
 ## Installation
 
 ```bash
-git clone https://github.com/matthias007267/carrera-racing-platform.git
-cd carrera-racing-platform
+git clone https://github.com/matthias007267/slot-racing-platform.git
+cd slot-racing-platform
 uv sync
 ```
 
@@ -70,13 +76,16 @@ installs uv with `astral-sh/setup-uv` and runs `uv sync --locked` itself.
 ## Run
 
 ```bash
-uv run carrera                   # start the desktop application
-uv run python -m carrera.app     # equivalent
-uv run carrera --smoke-test      # start, show the window briefly, exit (headless friendly)
+uv run slot-racing                   # start the desktop application
+uv run python -m slot_racing.app     # equivalent
+uv run slot-racing --smoke-test      # start, show the window briefly, exit (headless friendly)
 ```
 
-Data location: `%APPDATA%\CarreraRacingPlatform` on Windows, `~/.local/share/CarreraRacingPlatform`
-elsewhere. Set `CARRERA_HOME` to use another directory. It contains `config.json` and `carrera.db`.
+Data location: `%APPDATA%\SlotRacingPlatform` on Windows, `~/.local/share/SlotRacingPlatform`
+elsewhere. Set `SLOT_RACING_HOME` to use another directory. It contains `config.json` and
+`slot_racing.db`. Installations created before the project was renamed keep working: an existing
+`CarreraRacingPlatform` directory, a `carrera.db` file and the `CARRERA_HOME` variable are still
+recognized and never moved or deleted (see [ADR 0010](docs/adr/0010-vendor-neutral-naming.md)).
 The database schema is migrated automatically on startup.
 
 Modules can be switched on and off under *Einstellungen*. The camera and sensor timing modules
@@ -113,10 +122,10 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy src tests \
 ## Repository layout
 
 ```text
-src/carrera/core/      events, plugin system, timing interface, config, domain, storage
-src/carrera/app/       desktop shell (PySide6) and runtime wiring
-src/carrera/uikit/     small Qt helpers shared by module pages (depends on the core only)
-src/carrera/modules/   feature modules (plugins): drivers_vehicles, tracks, races, timing,
+src/slot_racing/core/      events, plugin system, timing interface, config, domain, storage
+src/slot_racing/app/       desktop shell (PySide6) and runtime wiring
+src/slot_racing/uikit/     small Qt helpers shared by module pages (depends on the core only)
+src/slot_racing/modules/   feature modules (plugins): drivers_vehicles, tracks, races, timing,
                        timing_camera, timing_sensor, track_planner, audio_animation, statistics
 pi_agent/              future Raspberry Pi agent (placeholder)
 tests/                 unit and integration tests, no hardware needed
@@ -125,8 +134,8 @@ docs/                  architecture documentation and ADRs
 
 ## Adding a module
 
-1. Create `src/carrera/modules/<name>/` with a `plugin.py` containing a `Plugin` subclass.
-2. Register it in `pyproject.toml` under `[project.entry-points."carrera.plugins"]`.
+1. Create `src/slot_racing/modules/<name>/` with a `plugin.py` containing a `Plugin` subclass.
+2. Register it in `pyproject.toml` under `[project.entry-points."slot_racing.plugins"]`.
 3. Add it to the independence contract in `[tool.importlinter]`.
 4. Run `uv sync`, then the checks above.
 

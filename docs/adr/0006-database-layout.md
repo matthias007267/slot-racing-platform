@@ -6,10 +6,10 @@ database per module.
 
 ## Decision
 - SQLAlchemy 2 (typed `Mapped` models), SQLite, Alembic.
-- All models share one `Base`/`MetaData` (with a naming convention) from `carrera.core.storage`.
+- All models share one `Base`/`MetaData` (with a naming convention) from `slot_racing.core.storage`.
 - Each plugin owns its models and declares them in `PluginManifest.models_module`. The Alembic
   environment imports the models of all installed plugins.
-- One linear migration history in `carrera/core/storage/migrations`, applied automatically at
+- One linear migration history in `slot_racing/core/storage/migrations`, applied automatically at
   startup (`Database.migrate`). SQLite foreign keys are always enabled.
 - Tables may reference other modules' tables by name in foreign keys; the Python model modules
   never import each other.
