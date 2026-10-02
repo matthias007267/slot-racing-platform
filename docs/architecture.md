@@ -320,6 +320,15 @@ there is no global list of positions: those still belong to each track's timing 
 "Speichern" writes the existing settings row. "Abbrechen" reloads it. Closing the page
 releases the device.
 
+A race does not keep a second copy of that document and does not fall back to the device
+defaults when a document is stored. `RaceController` asks the registry for the `camera`
+provider. `CameraTimingFactory` reads the saved document once while it builds the source.
+The capture thread stamps each frame with `perf_counter_ns()` immediately after `read`,
+and the provider copies that value onto `SensorTriggered`. The race engine never sees the
+camera. The same path is covered by an integration test with a scripted capture. Opening a
+real camera is a separate test, `pytest -m camera_hardware`, and the default `pytest` run
+does not include it.
+
 ### Timing configuration UI (`tracks` module)
 
 The track page has a *Timing-Konfiguration* button. It opens, inside the same navigation page,

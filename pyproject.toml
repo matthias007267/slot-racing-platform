@@ -45,7 +45,10 @@ packages = ["src/slot_racing"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not camera_hardware'"
+markers = [
+    "camera_hardware: opens a real camera; not part of the default or CI run",
+]
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.ruff]
