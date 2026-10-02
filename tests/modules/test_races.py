@@ -245,3 +245,67 @@ def test_races_left_running_by_a_crash_are_aborted(env: Env) -> None:
     assert env.races.abort_stale_races() == 1
     assert env.races.require_race(race.id).status is RaceStatus.ABORTED
     assert env.races.abort_stale_races() == 0
+
+
+def test_a_stale_race_without_laps_gets_an_empty_standing(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 4)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    env.races.record_started(race.id)
+    assert env.races.abort_stale_races() == 1
+    (result,) = env.races.get_results(race.id)
+    assert (result.laps_completed, result.best_lap_ns, result.total_time_ns) == (0, None, None)
+    assert result.finished is False and result.position == 1
+    assert env.races.get_laps(race.id) == []
+
+
+def test_a_stale_race_rebuilds_standings_from_stored_laps_only(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=2), 3)
+    lane1 = env.pair(1)
+    lane2 = env.pair(2)
+    env.races.add_participant(race.id, lane1[0], lane1[1], 1)
+    env.races.add_participant(race.id, lane2[0], lane2[1], 2)
+    env.races.record_started(race.id)
+    env.races.record_lap(race.id, 1, 1, 5_000_000_000, 5_000_000_000, {1: 2_000_000_000})
+    (during,) = [row for row in env.races.get_results(race.id) if row.lane == 1]
+    assert during.laps_completed == 1 and during.best_lap_ns == 5_000_000_000
+    env.races.record_lap(race.id, 1, 2, 4_000_000_000, 9_000_000_000, {})
+    env.races.record_lap(race.id, 2, 1, 5_000_000_000, 9_000_000_000, {})
+    assert env.races.abort_stale_races() == 1
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    results = env.races.get_results(race.id)
+    assert [(r.lane, r.position, r.laps_completed, r.finished) for r in results] == [
+        (1, 1, 2, False),
+        (2, 2, 1, False),
+    ]
+    assert results[0].best_lap_ns == 4_000_000_000
+    assert results[0].total_time_ns == 9_000_000_000
+    assert len(env.races.get_laps(race.id)) == 3
+
+
+def test_a_stale_race_orders_equal_times_by_lane_and_finishers_by_race_time(env: Env) -> None:
+    tied = env.races.create_race("Tied", env.track_id(lanes=2), 4)
+    a = env.pair(1)
+    b = env.pair(2)
+    env.races.add_participant(tied.id, a[0], a[1], 1)
+    env.races.add_participant(tied.id, b[0], b[1], 2)
+    env.races.record_started(tied.id)
+    env.races.record_lap(tied.id, 2, 1, 5_000_000_000, 5_000_000_000, {})
+    env.races.record_lap(tied.id, 1, 1, 5_000_000_000, 5_000_000_000, {})
+    env.races.abort_stale_races()
+    assert [row.lane for row in env.races.get_results(tied.id)] == [1, 2]
+
+    finished = env.races.create_race("Done", env.track_id(lanes=2), 1)
+    c = env.pair(3)
+    d = env.pair(4)
+    env.races.add_participant(finished.id, c[0], c[1], 1)
+    env.races.add_participant(finished.id, d[0], d[1], 2)
+    env.races.record_started(finished.id)
+    env.races.record_lap(finished.id, 1, 1, 6_000_000_000, 6_000_000_000, {})
+    env.races.record_lap(finished.id, 2, 1, 4_000_000_000, 4_000_000_000, {})
+    env.races.abort_stale_races()
+    results = env.races.get_results(finished.id)
+    assert [(row.lane, row.position, row.finished) for row in results] == [
+        (2, 1, True),
+        (1, 2, True),
+    ]

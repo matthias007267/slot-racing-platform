@@ -143,6 +143,110 @@ def test_pause_freezes_the_race_time(env: Env) -> None:
     assert result.laps_completed == 2
 
 
+def test_a_single_participant_is_stored_as_the_winner(env: Env) -> None:
+    race = env.races.create_race("Solo", env.track_id(), 2)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    runner = env.controller.start_race(race.id)
+    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+    drive_until_done(env, runner)
+
+    stored = env.races.require_race(race.id)
+    assert stored.status is RaceStatus.FINISHED
+    (result,) = env.races.get_results(race.id)
+    assert (result.position, result.finished, result.laps_completed) == (1, True, 2)
+    assert result.best_lap_ns is not None
+    laps = env.races.get_laps(race.id)
+    assert [lap.lap_number for lap in laps] == [1, 2]
+    assert result.best_lap_ns == min(lap.lap_time_ns for lap in laps)
+    assert runner.snapshot().rows[0].finished
+
+
+def test_stopping_right_after_the_start_stores_no_lap(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 5)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    runner = env.controller.start_race(race.id)
+    runner.stop()
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    assert env.races.get_laps(race.id) == []
+    (result,) = env.races.get_results(race.id)
+    assert (result.laps_completed, result.best_lap_ns, result.finished, result.position) == (
+        0,
+        None,
+        False,
+        1,
+    )
+
+
+def test_stopping_mid_sector_does_not_store_the_open_lap(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 5)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    sectors: list[Event] = []
+    laps: list[Event] = []
+    env.runtime.bus.subscribe(SectorCompleted, sectors.append)
+    env.runtime.bus.subscribe(LapCompleted, laps.append)
+    runner = env.controller.start_race(race.id)
+    for _ in range(200):
+        if sectors:
+            break
+        env.clock.advance(STEP_NS)
+        runner.tick()
+    assert sectors and not laps
+    runner.stop()
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    assert env.races.get_laps(race.id) == []
+    (result,) = env.races.get_results(race.id)
+    assert result.laps_completed == 0 and result.best_lap_ns is None
+
+
+def test_stopping_after_complete_laps_keeps_only_those_laps(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(), 10)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    runner = env.controller.start_race(race.id)
+    for _ in range(2000):
+        if len(env.races.get_laps(race.id)) >= 2:
+            break
+        env.clock.advance(STEP_NS)
+        runner.tick()
+    assert len(env.races.get_laps(race.id)) == 2
+    (mid,) = env.races.get_results(race.id)
+    assert mid.laps_completed == 2 and mid.best_lap_ns is not None
+    runner.stop()
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    assert len(env.races.get_laps(race.id)) == 2
+    (result,) = env.races.get_results(race.id)
+    assert result.laps_completed == 2 and not result.finished
+    assert result.best_lap_ns == min(lap.lap_time_ns for lap in env.races.get_laps(race.id))
+
+
+def test_stopping_after_one_finisher_keeps_both_standings(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=2), 1)
+    first = env.pair(1)
+    second = env.pair(2)
+    env.races.add_participant(race.id, first[0], first[1], 1)
+    env.races.add_participant(race.id, second[0], second[1], 2)
+    winners: list[Event] = []
+    env.runtime.bus.subscribe(WinnerDetermined, winners.append)
+    runner = env.controller.start_race(race.id)
+    for _ in range(2000):
+        if winners:
+            break
+        env.clock.advance(STEP_NS)
+        runner.tick()
+    assert winners and runner.is_active
+    runner.stop()
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+    results = env.races.get_results(race.id)
+    assert [(r.lane, r.finished, r.laps_completed) for r in results] == [
+        (1, True, 1),
+        (2, False, 0),
+    ]
+    assert len(env.races.get_laps(race.id)) == 1
+
+
 def test_a_new_race_can_follow_a_finished_one(env: Env) -> None:
     track_id = env.track_id()
     driver_id, vehicle_id = env.pair(1)

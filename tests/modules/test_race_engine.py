@@ -25,7 +25,12 @@ from slot_racing.core.events import (
     WinnerDetermined,
 )
 from slot_racing.core.timing import SensorSink, TimingSource
-from slot_racing.modules.races.engine import RaceConfig, RaceEngine, RaceStateError
+from slot_racing.modules.races.engine import (
+    SAME_POSITION_DEBOUNCE_NS,
+    RaceConfig,
+    RaceEngine,
+    RaceStateError,
+)
 from slot_racing.modules.timing.simulation import SimulatedLane, SimulationTimingProvider
 
 LAYOUT = TimingLayout.from_position_ids(["sf", "s1", "s2"])
@@ -428,3 +433,212 @@ def test_failing_poll_is_recorded_and_the_source_is_skipped_afterwards() -> None
     assert "read error" in harness.engine.source_errors["poll-fails"]
     assert len(harness.of(LapCompleted)) == 1  # the healthy source still delivered
     harness.engine.poll_sources()
+
+
+def _manual(
+    *,
+    laps: int,
+    positions: list[str],
+    participants: tuple[Participant, ...] = (Participant(ALICE, 1),),
+) -> tuple[ManualClock, EventBus, list[Event], RaceEngine]:
+    clock = ManualClock()
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(Event, events.append)
+    config = RaceConfig(RaceId(1), laps, participants, TimingLayout.from_position_ids(positions))
+    return clock, bus, events, RaceEngine(config, bus, clock)
+
+
+def _hit(bus: EventBus, timestamp_ns: int, position_id: str, lane: int = 1) -> None:
+    bus.publish(
+        SensorTriggered(
+            timestamp_ns=timestamp_ns,
+            source_id="manual",
+            sensor_id=position_id,
+            position_id=position_id,
+            lane=lane,
+        )
+    )
+
+
+def _finished(events: list[Event]) -> RaceFinished:
+    final = events[-1]
+    assert isinstance(final, RaceFinished)
+    return final
+
+
+def test_the_debounce_window_is_200_milliseconds() -> None:
+    assert SAME_POSITION_DEBOUNCE_NS == 200_000_000
+
+
+def test_a_repeat_inside_the_debounce_window_is_not_a_new_lap() -> None:
+    _clock, bus, events, engine = _manual(laps=3, positions=["sf"])
+    engine.start()
+    _hit(bus, S, "sf")
+    _hit(bus, S + SAME_POSITION_DEBOUNCE_NS - 1, "sf")
+    assert len([e for e in events if isinstance(e, LapCompleted)]) == 1
+    _hit(bus, S + SAME_POSITION_DEBOUNCE_NS, "sf")
+    assert len([e for e in events if isinstance(e, LapCompleted)]) == 2
+
+
+def test_debounce_does_not_block_the_following_sector() -> None:
+    harness = Harness(laps=1)
+    harness.engine.start()
+    harness.trigger(S, "s1")
+    harness.trigger(S + 50_000_000, "s2")
+    sectors = [e for e in harness.of(SectorCompleted) if isinstance(e, SectorCompleted)]
+    assert [e.sector_number for e in sectors] == [1, 2]
+
+
+def test_debounce_is_isolated_per_lane() -> None:
+    _clock, bus, events, engine = _manual(
+        laps=1,
+        positions=["sf"],
+        participants=(Participant(ALICE, 1), Participant(BOB, 2)),
+    )
+    engine.start()
+    _hit(bus, S, "sf", lane=1)
+    _hit(bus, S + 10_000_000, "sf", lane=2)
+    assert {e.lane for e in events if isinstance(e, LapCompleted)} == {1, 2}
+
+
+def test_a_sensor_in_the_wrong_order_leaves_the_expected_position_unchanged() -> None:
+    harness = Harness(laps=1)
+    harness.engine.start()
+    harness.trigger(2 * S, "sf")
+    harness.trigger(3 * S, "s2")
+    assert harness.of(SectorCompleted) == []
+    harness.trigger(4 * S, "s1")
+    harness.trigger(5 * S, "s2")
+    harness.trigger(6 * S, "sf")
+    assert len(harness.of(LapCompleted)) == 1
+    sectors = [e for e in harness.of(SectorCompleted) if isinstance(e, SectorCompleted)]
+    assert [e.sector_number for e in sectors] == [1, 2, 3]
+
+
+def test_pause_right_after_the_start_keeps_the_open_lap() -> None:
+    harness = Harness(laps=1)
+    harness.engine.start()
+    harness.engine.pause()
+    harness.clock.set(8 * S)
+    harness.engine.resume()
+    harness.trigger(9 * S, "s1")
+    sector = harness.of(SectorCompleted)[0]
+    assert isinstance(sector, SectorCompleted)
+    assert sector.lap_number == 1
+    assert sector.sector_time_ns == S
+
+
+def test_repeated_pauses_exclude_both_gaps_and_keep_the_lap() -> None:
+    harness = Harness(laps=1)
+    engine = harness.engine
+    engine.start()
+    harness.trigger(4 * S, "s1")
+    harness.clock.set(5 * S)
+    engine.pause()
+    harness.clock.set(10 * S)
+    engine.resume()
+    harness.clock.set(11 * S)
+    engine.pause()
+    harness.clock.set(21 * S)
+    engine.resume()
+    harness.trigger(23 * S, "s2")
+    harness.trigger(25 * S, "sf")
+    lap = harness.of(LapCompleted)[0]
+    assert isinstance(lap, LapCompleted)
+    assert lap.lap_number == 1
+    assert lap.lap_time_ns == 10 * S
+
+
+def test_an_event_from_inside_a_pause_is_ignored_after_resume() -> None:
+    harness = Harness(laps=1)
+    engine = harness.engine
+    engine.start()
+    harness.clock.set(5 * S)
+    engine.pause()
+    harness.clock.set(15 * S)
+    engine.resume()
+    harness.trigger(6 * S, "s1")
+    assert harness.of(SectorCompleted) == []
+    harness.trigger(15 * S, "s1")
+    sector = harness.of(SectorCompleted)[0]
+    assert isinstance(sector, SectorCompleted)
+    assert sector.sector_time_ns == 5 * S
+
+
+def test_stop_during_a_pause_does_not_invent_a_lap() -> None:
+    harness = Harness(laps=3)
+    harness.engine.start()
+    harness.trigger(4 * S, "s1")
+    harness.clock.set(5 * S)
+    harness.engine.pause()
+    harness.engine.stop()
+    final = _finished(harness.events)
+    assert final.aborted
+    assert harness.of(LapCompleted) == []
+    assert [(r.laps_completed, r.finished) for r in final.results] == [(0, False), (0, False)]
+
+
+def test_a_single_participant_finishes_and_is_the_winner() -> None:
+    _clock, bus, events, engine = _manual(laps=2, positions=["sf"])
+    engine.start()
+    _hit(bus, 2 * S, "sf")
+    _hit(bus, 5 * S, "sf")
+    assert engine.status is RaceStatus.FINISHED
+    final = _finished(events)
+    assert not final.aborted
+    assert len(final.results) == 1
+    result = final.results[0]
+    assert (result.position, result.finished, result.laps_completed) == (1, True, 2)
+    assert result.best_lap_ns == 2 * S
+    winners = [e for e in events if isinstance(e, WinnerDetermined)]
+    assert len(winners) == 1
+    assert isinstance(winners[0], WinnerDetermined)
+    assert winners[0].driver_id == ALICE
+
+
+def test_finishers_rank_by_crossing_order_ahead_of_cars_still_running() -> None:
+    _clock, bus, events, engine = _manual(
+        laps=1,
+        positions=["sf"],
+        participants=(Participant(ALICE, 1), Participant(BOB, 2)),
+    )
+    engine.start()
+    _hit(bus, 4 * S, "sf", lane=2)
+    engine.stop()
+    final = _finished(events)
+    assert [(r.lane, r.position, r.finished, r.laps_completed) for r in final.results] == [
+        (2, 1, True, 1),
+        (1, 2, False, 0),
+    ]
+
+
+def test_more_laps_outrank_a_faster_last_lap() -> None:
+    _clock, bus, events, engine = _manual(
+        laps=5,
+        positions=["sf"],
+        participants=(Participant(ALICE, 1), Participant(BOB, 2)),
+    )
+    engine.start()
+    _hit(bus, 3 * S, "sf", lane=1)
+    _hit(bus, 4 * S, "sf", lane=2)
+    _hit(bus, 8 * S, "sf", lane=2)
+    engine.stop()
+    final = _finished(events)
+    assert [(r.lane, r.laps_completed) for r in final.results] == [(2, 2), (1, 1)]
+
+
+def test_equal_lap_times_are_ordered_by_lane_not_shared() -> None:
+    _clock, bus, events, engine = _manual(
+        laps=3,
+        positions=["sf"],
+        participants=(Participant(ALICE, 1), Participant(BOB, 2)),
+    )
+    engine.start()
+    _hit(bus, 5 * S, "sf", lane=2)
+    _hit(bus, 5 * S, "sf", lane=1)
+    engine.stop()
+    final = _finished(events)
+    assert [r.position for r in final.results] == [1, 2]
+    assert [r.lane for r in final.results] == [1, 2]
+    assert all(r.laps_completed == 1 and r.total_time_ns == 5 * S for r in final.results)
