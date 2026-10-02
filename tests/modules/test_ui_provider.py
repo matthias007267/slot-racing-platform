@@ -65,7 +65,7 @@ def test_unavailable_providers_are_shown_but_cannot_be_chosen(qtbot: QtBot, env:
     register(env, offline("raspberry_pi"))
     _, wizard = wizard_at_track_step(qtbot, env)
     assert items(wizard.provider_combo) == [
-        ("camera - nicht verfügbar", "camera", False),
+        ("Kamera - nicht verfügbar", "camera", False),
         ("raspberry_pi - nicht verfügbar", "raspberry_pi", False),
         ("Simulation", "simulation", True),
     ]
@@ -90,7 +90,7 @@ def test_a_newly_registered_provider_appears_without_ui_changes(qtbot: QtBot, en
     wizard.name_edit.setText("Finale")
     assert wizard.go_next()
     assert items(wizard.provider_combo) == [
-        ("camera", "camera", True),
+        ("Kamera", "camera", True),
         ("Simulation", "simulation", True),
     ]
     wizard.provider_combo.setCurrentIndex(wizard.provider_combo.findData("camera"))

@@ -367,23 +367,29 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
     root = Path("src/slot_racing/modules/timing_camera")
     forbidden = (
         "PySide6",
+        "cv2",
         "slot_racing.app",
         "slot_racing.uikit",
-        "slot_racing.core.events",
         "slot_racing.core.domain",
         "slot_racing.modules.races",
         "slot_racing.modules.timing",
         "slot_racing.modules.drivers_vehicles",
         "slot_racing.modules.tracks",
     )
+    detection_only = {"_checks.py", "detection.py", "frames.py", "geometry.py", "frame_source.py"}
     for path in sorted(root.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        assert "VideoCapture" not in source
+        tree = ast.parse(source)
         imported: list[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 imported.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module is not None:
                 imported.append(node.module)
+        blocked: tuple[str, ...] = forbidden
+        if path.name in detection_only:
+            blocked = (*forbidden, "slot_racing.core.events")
         for name in imported:
-            for blocked in forbidden:
-                assert name != blocked and not name.startswith(blocked + "."), (path.name, name)
+            for prefix in blocked:
+                assert name != prefix and not name.startswith(prefix + "."), (path.name, name)
