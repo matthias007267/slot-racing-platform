@@ -23,8 +23,10 @@ dynamic navigation. Usable in the application:
 - **Fahrer, Fahrzeuge, Strecken:** list, create, edit, deactivate and delete with validation
   (unique driver start numbers, lane count, driver assignment for vehicles).
 - **Rennen:** six step setup (name, track, mode with laps, participants with driver, vehicle and
-  lane, overview, start), live view with positions and lap times, and stored results that can be
-  reopened later. Timing comes from a selectable timing provider. The simulation is built in.
+  lane, overview, start), a live view of the engine standings (position, laps, lap times, the
+  selected driver) with pause, resume and abort, and stored results that can be reopened later.
+  The live view can return to the race list without stopping the race. Timing comes from a
+  selectable timing provider. The simulation is built in.
   Camera timing is an optional module, off by default, and a camera race uses the saved camera
   configuration. Further providers register themselves and then appear in the selection.
 - **Timing-Konfiguration (Strecken):** each track can have a timing layout of logical positions

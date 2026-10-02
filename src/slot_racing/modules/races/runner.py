@@ -37,12 +37,15 @@ class LiveRow:
     lane: int
     driver_label: str
     vehicle_label: str
+    start_number: int | None
     current_lap: int
     laps_completed: int
     last_lap_ns: int | None
     total_time_ns: int | None
     best_lap_ns: int | None
     finished: bool
+    lap_times_ns: tuple[int, ...]
+    """Completed lap times in lap order, taken from ``LapCompleted`` events."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +53,7 @@ class RaceSnapshot:
     race_id: RaceId
     name: str
     track_name: str
+    timing_provider: str
     status: RaceStatus
     aborted: bool
     laps: int
@@ -70,7 +74,7 @@ class RaceRunner:
         self._engine = engine
         self._storage_errors = storage_errors
         self._participants = {p.lane: p for p in race.participants}
-        self._last_lap_ns: dict[int, int] = {}
+        self._lap_times_ns: dict[int, list[int]] = {}
         self._aborted = False
         self._subscriptions: list[Subscription] = [
             bus.subscribe(LapCompleted, self._on_lap),
@@ -124,6 +128,7 @@ class RaceRunner:
             race_id=self.race.id,
             name=self.race.name,
             track_name=self.race.track_name,
+            timing_provider=self.race.timing_provider,
             status=self._engine.status,
             aborted=self._aborted,
             laps=self.race.laps,
@@ -134,22 +139,25 @@ class RaceRunner:
 
     def _row(self, result: ParticipantResult) -> LiveRow:
         info: ParticipantInfo = self._participants[result.lane]
+        lap_times = tuple(self._lap_times_ns.get(result.lane, ()))
         return LiveRow(
             position=result.position,
             lane=result.lane,
             driver_label=info.driver_label,
             vehicle_label=info.vehicle_label,
+            start_number=info.start_number,
             current_lap=min(result.laps_completed + 1, self.race.laps),
             laps_completed=result.laps_completed,
-            last_lap_ns=self._last_lap_ns.get(result.lane),
+            last_lap_ns=lap_times[-1] if lap_times else None,
             total_time_ns=result.total_time_ns,
             best_lap_ns=result.best_lap_ns,
             finished=result.finished,
+            lap_times_ns=lap_times,
         )
 
     def _on_lap(self, event: LapCompleted) -> None:
         if event.race_id == self.race.id:
-            self._last_lap_ns[event.lane] = event.lap_time_ns
+            self._lap_times_ns.setdefault(event.lane, []).append(event.lap_time_ns)
 
     def _on_finished(self, event: RaceFinished) -> None:
         if event.race_id == self.race.id:
@@ -175,6 +183,11 @@ class RaceController:
         self._storage_errors = storage_errors
         self._setups = setups
         self.active: RaceRunner | None = None
+
+    @property
+    def events(self) -> EventDispatcher:
+        """Bus the running race publishes on. The live view redraws from these events."""
+        return self._bus
 
     def start_race(self, race_id: RaceId) -> RaceRunner:
         """Validate the race, resolve its timing provider, wire a fresh timing source and engine,

@@ -105,6 +105,7 @@ class RacesPage(QWidget):
         self.wizard.closed.connect(self.show_list)
         self.wizard.start_requested.connect(lambda race_id: self.start_race(RaceId(race_id)))
         self.live.race_over.connect(lambda race_id: self.show_results(RaceId(race_id)))
+        self.live.back_requested.connect(self.show_list)
         self.results.back_requested.connect(self.show_list)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self._races: dict[int, str] = {}

@@ -138,7 +138,11 @@ forbidden_modules = ["PySide6", "slot_racing.uikit", "cv2", "gpiozero", "RPi"]
 name = "Race UI does not contain race logic"
 type = "forbidden"
 source_modules = ["slot_racing.modules.races.ui"]
-forbidden_modules = ["slot_racing.modules.races.engine", "slot_racing.modules.races.recorder"]
+forbidden_modules = [
+    "slot_racing.modules.races.engine",
+    "slot_racing.modules.races.recorder",
+    "cv2",
+]
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]

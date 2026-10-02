@@ -100,6 +100,11 @@ def test_complete_race_from_setup_to_reloaded_result(env: Env) -> None:
     assert snapshot.status is RaceStatus.FINISHED and not snapshot.aborted
     assert [row.driver_label for row in snapshot.rows] == [r.driver_label for r in results]
     assert [row.total_time_ns for row in snapshot.rows] == [r.total_time_ns for r in results]
+    assert snapshot.timing_provider == "simulation"
+    assert [len(row.lap_times_ns) for row in snapshot.rows] == [3, 3]
+    assert snapshot.rows[0].last_lap_ns == snapshot.rows[0].lap_times_ns[-1]
+    assert [row.start_number for row in snapshot.rows] == [1, 2]
+    assert [row.start_number for row in results] == [1, 2]
 
 
 def test_aborted_race_keeps_the_laps_driven_so_far(env: Env) -> None:

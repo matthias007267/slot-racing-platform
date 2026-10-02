@@ -72,7 +72,9 @@ drivers_vehicles ──Driver/VehicleCatalog──▶ races (RaceService: config
 RaceController.start_race ─ validates ─▶ TimingSourceFactory.create_source ─▶ TimingSource
 TimingSource ─SensorTriggered─▶ EventBus ─▶ RaceEngine ─Sector/Lap/Race events─▶ EventBus
 EventBus ─▶ RaceRecorder ─▶ RaceService (database)          EventBus ─▶ RaceRunner (live standings)
-LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceService.get_results()
+EventBus ─ race events ─▶ LiveRaceView (redraw only)
+LiveRaceView ─ read only ─▶ RaceRunner.snapshot()
+ResultsView ─ read only ─▶ RaceService.get_results()
 ```
 
 - `races` never imports `drivers_vehicles` or `tracks`; it looks them up through the catalog
@@ -87,13 +89,19 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
   reported in the wizard before the start. `RaceController.start_race` allows one running race
   at a time, re-validates the race, asks `TimingProviderRegistry.create_source(race.timing_provider,
   spec)` for a fresh source, builds the `RaceEngine` and starts it. The simulation is host driven: the live view calls
-  `RaceRunner.tick()` from a Qt timer, which polls the source.
+  `RaceRunner.tick()` from a Qt timer, which polls the source. The same timer keeps the race clock
+  moving. It is not a status poll: `RaceStarted`, pause/resume, lap, sector, `RaceFinished` and
+  `WinnerDetermined` redraw the live view immediately from the current snapshot. Leaving the live
+  view does not stop that poll, so a host-driven provider keeps timing while the race list is open.
 - `RaceRecorder` subscribes to the race events and stores lifecycle changes, laps with their
   sector times and the final standings (position, laps, total and best lap time, finish status).
   Storage problems are logged and shown as a warning; they never interrupt the race.
-- The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), stored
-  results are ordered by the position the engine determined. Last lap and average lap are
-  computed by `RaceService`, not by the UI.
+- The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), in the
+  engine's order. The snapshot also carries the timing-provider id. Each row carries the driver's
+  start number and the lap times the runner collected from `LapCompleted`. Stored results are
+  ordered by the position the engine determined. Last lap and average lap are computed by
+  `RaceService`, not by the UI. Participant status (racing, waiting, finished, retired) is a
+  label over `finished` and the race status, not a second ranking.
 - Races still marked running or paused at startup (crash) are set to `ABORTED`. Their standings
   are rebuilt from the laps already stored; the open lap is not reconstructed.
 - Errors shown to the user are `ValidationError`s with translation keys; unexpected errors are

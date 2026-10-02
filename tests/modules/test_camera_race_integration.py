@@ -58,6 +58,7 @@ from slot_racing.modules.timing_camera.store import (
 )
 from tests.modules.conftest import Env
 from tests.modules.test_camera_capture import ScriptedCapture
+from tests.modules.test_ui_management import column_text
 
 WIDTH = 100
 HEIGHT = 40
@@ -812,31 +813,29 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         assert live.status_label.text().endswith("Läuft")
         assert live.name_label.text() == "Kamera"
         assert live.track_label.text().endswith("Ring")
-        row = cells(live.table, 0)
-        assert row[0] == "1"
-        assert row[1] == "1"
-        assert row[2] == "Anna"
-        assert row[3] == "Porsche (911)"
-        assert row[4] == "1/1"
-        assert row[7] == "0"
+        assert column_text(live.table, 0, "Platz") == "1"
+        assert column_text(live.table, 0, "Spur") == "1"
+        assert column_text(live.table, 0, "Fahrer") == "Anna"
+        assert column_text(live.table, 0, "Fahrzeug") == "Porsche (911)"
+        assert column_text(live.table, 0, "Aktuelle Runde") == "1/1"
+        assert column_text(live.table, 0, "Runden") == "0"
         names = [child.objectName() for child in live.findChildren(QWidget)]
         assert not any(name.startswith("camera") for name in names)
 
         consume(device, painted((CAR_SECTOR,)))
         live.refresh()
         assert live.status_label.text().endswith("Läuft")
-        assert cells(live.table, 0)[7] == "0"
+        assert column_text(live.table, 0, "Runden") == "0"
 
         consume(device, blank())
         live.refresh()
         consume(device, painted((CAR_IN_ZONE,)))
         live.refresh()
         assert live.status_label.text().endswith("Beendet")
-        finished_row = cells(live.table, 0)
-        assert finished_row[0] == "1"
-        assert finished_row[7] == "1"
-        assert finished_row[5] != "-"
-        assert finished_row[6] != "-"
+        assert column_text(live.table, 0, "Platz") == "1"
+        assert column_text(live.table, 0, "Runden") == "1"
+        assert column_text(live.table, 0, "Letzte Runde") != "-"
+        assert column_text(live.table, 0, "Gesamtzeit") != "-"
         assert runner.status is RaceStatus.FINISHED
 
         results = ResultsView(env.runtime.translator, env.races)
@@ -844,12 +843,11 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         results.show_race(race.id)
         assert "Kamera" in results.summary.text()
         assert "Beendet" in results.summary.text()
-        result_row = cells(results.table, 0)
-        assert result_row[0] == "1"
-        assert result_row[1] == "Anna"
-        assert result_row[3] == "1"
-        assert result_row[4] == "1"
-        assert result_row[5] != "-"
+        assert column_text(results.table, 0, "Platz") == "1"
+        assert column_text(results.table, 0, "Fahrer") == "Anna"
+        assert column_text(results.table, 0, "Spur") == "1"
+        assert column_text(results.table, 0, "Runden") == "1"
+        assert column_text(results.table, 0, "Gesamtzeit") != "-"
         lap_row = cells(results.laps_table, 0)
         assert lap_row[2] == "1"
         assert " | " in lap_row[4]

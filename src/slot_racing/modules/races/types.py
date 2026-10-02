@@ -52,6 +52,7 @@ class ResultRow:
     driver_label: str
     vehicle_label: str
     lane: int
+    start_number: int | None
     laps_completed: int
     finished: bool
     total_time_ns: int | None
