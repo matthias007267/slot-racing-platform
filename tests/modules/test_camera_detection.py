@@ -394,6 +394,8 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
         "geometry.py",
         "frame_source.py",
         "opencv_device.py",
+        "configuration.py",
+        "store.py",
     }
     for path in sorted(root.glob("*.py")):
         source = path.read_text(encoding="utf-8")

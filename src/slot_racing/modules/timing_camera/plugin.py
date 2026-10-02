@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import ClassVar
 
 from slot_racing.core.plugin import Plugin, PluginContext, PluginManifest
+from slot_racing.core.storage import Database
 from slot_racing.modules.timing_camera.provider import CameraTimingFactory
+from slot_racing.modules.timing_camera.store import CameraConfigurationStore
 
 
 class CameraTimingPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="timing_camera",
-        version="0.3.0",
+        version="0.4.0",
         title="Camera timing",
         enabled_by_default=False,
     )
@@ -22,8 +24,16 @@ class CameraTimingPlugin(Plugin):
                 "Die Kamera überwacht die Position „{position}“, "
                 "die im Timing-Setup keinen aktiven Sensor hat."
             ),
+            "error.timing_provider.camera_zones_missing": (
+                "Die Kamera hat noch keine Erkennungszonen. "
+                "Lege die Zonen fest, bevor ein Rennen mit der Kamera gestartet wird."
+            ),
+            "error.timing_provider.camera_configuration_invalid": (
+                "Die gespeicherte Kamerakonfiguration kann nicht gelesen werden."
+            ),
         }
     }
 
     def activate(self, context: PluginContext) -> None:
-        context.register_timing_provider(CameraTimingFactory())
+        store = CameraConfigurationStore(context.get_service(Database))
+        context.register_timing_provider(CameraTimingFactory(configurations=store))

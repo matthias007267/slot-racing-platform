@@ -53,7 +53,8 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
-| `timing_camera`, `timing_sensor`, `audio_animation` | Placeholder plugin only (camera/sensor off by default) |
+| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, and one global saved configuration (device hint and detection zones) in the `settings` table. Zones are not stored per track |
+| `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
 
 ### Shared UI helpers (`slot_racing.uikit`)
 
@@ -287,7 +288,7 @@ Race ─ track ─▶ TimingSetupService.get_setup(track)   (fallback: default_t
   races keep working. A stored setup with an inactive sensor stops the race start with a clear
   message.
 
-### Attaching camera and Raspberry Pi later
+### Attaching a timing provider
 
 A camera, Raspberry Pi or manufacturer-specific module implements `TimingSource` and a `TimingSourceFactory`
 with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
@@ -295,11 +296,19 @@ with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
 "not connected" and the like; the race wizard then lists it as unavailable, and as soon as it is
 available it can be selected, without any change to the engine, race module or UI. It adds its
 label as translation `timing.provider.<provider_id>`. In `create_source(spec)` it reads
-`spec.setup`: each active `TimingSensor` has a `hardware_id` that tells the provider which pin,
-camera zone or device channel belongs to that sensor, and `position_id` is what it must put into
-`SensorTriggered`. Nothing in the engine, the track UI or the database schema changes. The
-timing test mode uses the first available provider with `supports_test_mode` (a source that
-implements `ManuallyTriggerable`); real hardware providers do not declare it.
+`spec.setup`: each active `TimingSensor` supplies the `sensor_id` and `position_id` placed on
+`SensorTriggered`. `hardware_id` stays available for providers that need an opaque device address
+(for example a GPIO pin). The timing test mode uses the first available provider with
+`supports_test_mode` (a source that implements `ManuallyTriggerable`); real hardware providers do
+not declare it.
+
+The camera provider does not take its detection zones from `hardware_id` or from the track.
+Device index, requested resolution, frame rate and zones are one global document in the `settings`
+table (`timing_camera.configuration`, ADR 0011). Zones are fractions of the frame and name a
+`position_id` plus a lane. The factory loads that document when it creates a source and keeps the
+snapshot on the source; the capture thread does not read it again. No zones means the camera
+cannot start a race. Another track does not replace the saved zones. The engine stays
+provider-neutral.
 
 ### Timing configuration UI (`tracks` module)
 
@@ -354,7 +363,7 @@ keys, offers `session()` (commit/rollback), `migrate()` and `in_memory()` for te
 
 | Owner | Tables |
 |---|---|
-| core | `plugins`, `settings` |
+| core | `plugins`, `settings` (the camera module stores its global configuration here, not in a track table) |
 | `drivers_vehicles` | `drivers` (unique `start_number`), `vehicles` (optional `driver_id`) |
 | `tracks` | `tracks`, `track_layouts` |
 | `races` | `races` (incl. `timing_provider`), `race_participants`, `laps`, `sectors` |

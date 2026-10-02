@@ -27,12 +27,21 @@ from slot_racing.modules.timing_camera.capture import (
     CameraOpenError,
     CaptureDevice,
 )
+from slot_racing.modules.timing_camera.configuration import (
+    CameraConfiguration,
+    to_camera_config,
+    to_detector_settings,
+)
 from slot_racing.modules.timing_camera.detection import (
     DetectorSettings,
     LaneCrossingDetector,
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.store import (
+    CameraConfigurationError,
+    CameraConfigurationSource,
+)
 
 DeviceFactory = Callable[[CameraConfig], CaptureDevice]
 
@@ -174,8 +183,10 @@ class CameraTimingFactory(TimingSourceFactory):
     of a device, which is how tests run without hardware; that factory does not
     claim a camera is connected.
 
-    ``frames`` and ``settings``, when given, are shared by every source this
-    factory creates.
+    ``frames``, ``settings`` and ``camera``, when given, replace the saved
+    configuration for every source this factory creates. Without them, and when
+    ``configurations`` is set, the saved document is read once per session and
+    handed to the source. Nothing is read again while that source is running.
     """
 
     def __init__(
@@ -185,6 +196,7 @@ class CameraTimingFactory(TimingSourceFactory):
         background: GrayFrame | None = None,
         camera: CameraConfig | None = None,
         devices: DeviceFactory | None = None,
+        configurations: CameraConfigurationSource | None = None,
     ) -> None:
         if frames is not None and not isinstance(frames, FrameSource):
             raise TypeError("frames must be a FrameSource")
@@ -194,11 +206,14 @@ class CameraTimingFactory(TimingSourceFactory):
             raise TypeError("camera must be a CameraConfig")
         if devices is not None and not callable(devices):
             raise TypeError("devices must be a callable")
+        if configurations is not None and not callable(getattr(configurations, "load", None)):
+            raise TypeError("configurations must load a camera configuration")
         self._frames = frames
         self._settings = settings
         self._background = background
-        self._camera = camera if camera is not None else CameraConfig()
+        self._camera = camera
         self._devices = devices
+        self._configurations = configurations
 
     @property
     def provider_id(self) -> str:
@@ -212,7 +227,10 @@ class CameraTimingFactory(TimingSourceFactory):
         """Probe the device, then close it. An injected frame source is not hardware."""
         if self._frames is not None:
             return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
-        device = self._make_device()
+        try:
+            device = self._make_device(self._session_camera())
+        except ProviderConfigurationError as error:
+            return ProviderAvailability.unavailable(error.key)
         opened = False
         try:
             device.open()
@@ -229,27 +247,81 @@ class CameraTimingFactory(TimingSourceFactory):
         return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
 
     def validate(self, spec: TimingSessionSpec) -> None:
-        if len(set(spec.lanes)) != len(spec.lanes):
-            raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
-        _require_known_positions(
-            self._settings,
-            {sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active},
-        )
+        self._prepare(spec)
 
     def create_source(self, spec: TimingSessionSpec) -> TimingSource:
-        self.validate(spec)
+        """Build a source from the configuration resolved for this call.
+
+        The returned source keeps that snapshot. Later reads of the saved
+        document do not affect it, and the capture thread does not load it.
+        """
+        camera, settings = self._prepare(spec)
         if self._frames is not None:
             frames = self._frames
         else:
-            frames = CameraFrameSource(self._make_device())
-        return CameraTimingProvider(spec, frames, self._settings, self._background)
+            frames = CameraFrameSource(self._make_device(camera))
+        return CameraTimingProvider(spec, frames, settings, self._background)
 
-    def _make_device(self) -> CaptureDevice:
+    def _prepare(self, spec: TimingSessionSpec) -> tuple[CameraConfig, DetectorSettings | None]:
+        if len(set(spec.lanes)) != len(spec.lanes):
+            raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
+        stored = self._stored_configuration()
+        camera = self._camera if self._camera is not None else _camera_or_default(stored)
+        if self._settings is not None:
+            settings: DetectorSettings | None = self._settings
+        elif stored is not None:
+            settings = _zones_from_stored(stored)
+        else:
+            settings = None
+        _require_known_positions(
+            settings,
+            {sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active},
+        )
+        return camera, settings
+
+    def _stored_configuration(self) -> CameraConfiguration | None:
+        """The saved document when this factory still needs something from it."""
+        if self._configurations is None:
+            return None
+        if self._camera is not None and self._settings is not None:
+            return None
+        try:
+            return self._configurations.load()
+        except CameraConfigurationError as error:
+            raise ProviderConfigurationError(
+                "error.timing_provider.camera_configuration_invalid"
+            ) from error
+
+    def _session_camera(self) -> CameraConfig:
+        if self._camera is not None:
+            return self._camera
+        stored = self._stored_configuration()
+        return _camera_or_default(stored)
+
+    def _make_device(self, camera: CameraConfig) -> CaptureDevice:
         if self._devices is not None:
-            return self._devices(self._camera)
+            return self._devices(camera)
         from slot_racing.modules.timing_camera.opencv_device import OpenCVCapture
 
-        return OpenCVCapture(self._camera)
+        return OpenCVCapture(camera)
+
+
+def _camera_or_default(stored: CameraConfiguration | None) -> CameraConfig:
+    if stored is None:
+        return CameraConfig()
+    return to_camera_config(stored)
+
+
+def _zones_from_stored(stored: CameraConfiguration) -> DetectorSettings:
+    try:
+        settings = to_detector_settings(stored)
+    except ValueError as error:
+        raise ProviderConfigurationError(
+            "error.timing_provider.camera_configuration_invalid"
+        ) from error
+    if settings is None:
+        raise ProviderConfigurationError("error.timing_provider.camera_zones_missing")
+    return settings
 
 
 def _require_known_positions(settings: DetectorSettings | None, sensors: dict[str, str]) -> None:

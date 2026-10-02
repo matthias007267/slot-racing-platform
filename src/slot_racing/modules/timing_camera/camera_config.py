@@ -1,4 +1,8 @@
-"""How a camera device is opened. Detection zones are a separate configuration."""
+"""How a camera device is opened.
+
+Detection zones are not part of this object. The saved document that holds
+both lives in ``configuration`` and is read before a session starts.
+"""
 
 from __future__ import annotations
 
