@@ -112,9 +112,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Ein Rennen mit dem Status „{status}“ kann nicht gestartet werden."
         ),
         "error.race.already_running": "Es läuft bereits ein Rennen.",
-        "error.race.no_timing_source": (
-            "Es ist keine Zeitmessung verfügbar. Aktivieren Sie das Modul „Zeitmessung“."
-        ),
-        "error.race.timing_source_missing": "Die Zeitmessung „{name}“ ist nicht verfügbar.",
+        "error.race.provider_required": "Bitte wählen Sie eine Zeitmessung aus.",
+        "error.race.provider_invalid": "Die Kennung der Zeitmessung ist ungültig.",
+        "race.wizard.provider": "Zeitmessung",
+        "race.wizard.provider_status": "Status: {status}",
+        "race.wizard.provider_none": "Keine Zeitmessung registriert.",
+        "race.overview.provider": "Zeitmessung: {provider}",
     }
 }

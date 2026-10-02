@@ -22,7 +22,8 @@ from carrera.core.domain import (
 )
 from carrera.core.errors import ValidationError
 from carrera.core.events import EventDispatcher, LapCompleted, RaceFinished, Subscription
-from carrera.core.timing import TimingSessionSpec, TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSessionSpec, TimingSetupService
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.races.engine import RaceConfig, RaceEngine
 from carrera.modules.races.service import RaceService
 from carrera.modules.races.types import ParticipantInfo, RaceInfo
@@ -163,27 +164,25 @@ class RaceController:
         service: RaceService,
         bus: EventDispatcher,
         clock: Clock,
-        factories: Callable[[], Sequence[TimingSourceFactory]],
-        preferred_source: str | None = None,
+        providers: TimingProviderRegistry,
         storage_errors: Callable[[], Sequence[str]] = lambda: (),
         setups: Callable[[], TimingSetupService | None] = lambda: None,
     ) -> None:
         self._service = service
         self._bus = bus
         self._clock = clock
-        self._factories = factories
-        self._preferred_source = preferred_source
+        self._providers = providers
         self._storage_errors = storage_errors
         self._setups = setups
         self.active: RaceRunner | None = None
 
     def start_race(self, race_id: RaceId) -> RaceRunner:
-        """Validate the race, wire a fresh timing source and engine, and start. The result is
-        also available as :attr:`active`. Raises :class:`ValidationError`."""
+        """Validate the race, resolve its timing provider, wire a fresh timing source and engine,
+        and start. The result is also available as :attr:`active`. Raises
+        :class:`ValidationError` (provider problems are :class:`TimingProviderError`)."""
         if self.active is not None and self.active.is_active:
             raise ValidationError("error.race.already_running")
         race = self._service.validate_startable(race_id)
-        factory = self._select_factory()
         setup = self._timing_setup(race.track_id)
         spec = TimingSessionSpec(
             setup=setup,
@@ -192,7 +191,7 @@ class RaceController:
             race_id=race.id,
             track_id=race.track_id,
         )
-        source = factory.create_source(spec)
+        source = self._providers.create_source(race.timing_provider, spec)
         config = RaceConfig(
             race_id=race.id,
             laps=race.laps,
@@ -232,14 +231,3 @@ class RaceController:
         service = self._setups()
         stored = None if service is None or track_id is None else service.get_setup(track_id)
         return stored if stored is not None else default_timing_setup()
-
-    def _select_factory(self) -> TimingSourceFactory:
-        factories = list(self._factories())
-        if not factories:
-            raise ValidationError("error.race.no_timing_source")
-        if self._preferred_source is not None:
-            for factory in factories:
-                if factory.name == self._preferred_source:
-                    return factory
-            raise ValidationError("error.race.timing_source_missing", name=self._preferred_source)
-        return sorted(factories, key=lambda f: f.name)[0]

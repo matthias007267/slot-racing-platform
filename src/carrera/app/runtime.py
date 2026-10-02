@@ -21,6 +21,8 @@ from carrera.core.plugin import (
     discover_plugins,
 )
 from carrera.core.storage import Database
+from carrera.core.timing import TimingSourceFactory
+from carrera.core.timing_registry import TimingProviderRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,11 @@ class Runtime:
         database = database or Database.from_path(config.resolved_database_path())
         database.migrate()
         services.register(Database, database, owner="core")
+        services.register(
+            TimingProviderRegistry,
+            TimingProviderRegistry(lambda: services.find_all(TimingSourceFactory)),
+            owner="core",
+        )
 
         manager = PluginManager(
             bus=bus,

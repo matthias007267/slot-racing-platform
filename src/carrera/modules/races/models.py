@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from carrera.core.storage.base import Base
+from carrera.core.timing_registry import DEFAULT_TIMING_PROVIDER
 
 
 class Race(Base):
@@ -28,6 +29,10 @@ class Race(Base):
     )
     status: Mapped[str] = mapped_column(String(16), default="created")
     target_laps: Mapped[int] = mapped_column(default=10)
+    timing_provider: Mapped[str] = mapped_column(
+        String(64), default=DEFAULT_TIMING_PROVIDER, server_default=DEFAULT_TIMING_PROVIDER
+    )
+    """Id of the timing provider that times this race. Resolved to a factory at the start."""
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)

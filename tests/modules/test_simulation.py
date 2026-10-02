@@ -184,7 +184,7 @@ def test_advance_requires_a_manual_clock() -> None:
 def test_factory_creates_an_independent_source_per_race() -> None:
     clock = ManualClock()
     factory = SimulationTimingFactory(clock)
-    assert factory.name == "simulation"
+    assert factory.provider_id == "simulation"
     spec = TimingSessionSpec(setup=SETUP, lanes=(1, 2), laps=2)
     first = factory.create_source(spec)
     second = factory.create_source(spec)

@@ -11,6 +11,7 @@ from carrera.core.events import Event, EventDispatcher, Subscription
 from carrera.core.i18n import Translator
 from carrera.core.plugin.contributions import ContributionRegistry, NavigationItem
 from carrera.core.plugin.services import ServiceRegistry
+from carrera.core.timing import TimingSourceFactory
 
 T = TypeVar("T")
 E = TypeVar("E", bound=Event)
@@ -63,6 +64,13 @@ class PluginContext:
         self, interface: type[T], implementation: T, name: str | None = None
     ) -> None:
         self._services.register(interface, implementation, owner=self.plugin_name, name=name)
+
+    def register_timing_provider(self, factory: TimingSourceFactory) -> None:
+        """Offer a timing provider. Its ``provider_id`` must be unique; the registration is
+        removed when this plugin is disabled."""
+        self._services.register(
+            TimingSourceFactory, factory, owner=self.plugin_name, name=factory.provider_id
+        )
 
     def get_service(self, interface: type[T], name: str | None = None) -> T:
         return self._services.get(interface, name)

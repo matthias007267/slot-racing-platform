@@ -42,5 +42,23 @@ CORE_TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "error.timing.text_too_long": "Ein Text im Timing-Layout ist länger als {limit} Zeichen.",
         "error.timing.track_unknown": "Die Strecke existiert nicht mehr.",
+        "error.timing_provider.none_registered": (
+            "Es ist keine Zeitmessung verfügbar. Bitte aktivieren Sie ein Zeitmessungs-Modul."
+        ),
+        "error.timing_provider.unknown": "Die Zeitmessung „{provider}“ ist nicht registriert.",
+        "error.timing_provider.unavailable": "Die gewählte Zeitmessung ist nicht verfügbar.",
+        "error.timing_provider.single_lane": (
+            "Die gewählte Zeitmessung unterstützt nur eine Spur."
+        ),
+        "error.timing_provider.failed": (
+            "Die Zeitmessung „{provider}“ konnte nicht vorbereitet werden: {detail}"
+        ),
+        "error.timing_provider.id_blank": "Eine Zeitmessung hat keine Kennung.",
+        "error.timing_provider.duplicate": (
+            "Die Kennung „{provider}“ ist für mehrere Zeitmessungen registriert."
+        ),
+        "error.timing_provider.lanes_duplicate": "Eine Spur darf nur einmal vorkommen.",
+        "timing.provider.available": "verfügbar",
+        "timing.provider.unavailable": "nicht verfügbar",
     }
 }

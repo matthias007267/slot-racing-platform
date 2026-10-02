@@ -1,24 +1,21 @@
 """Timing test mode: shows the standardized events a timing source delivers for a setup.
 
-Only simulated events are used. Events go to a private sink and never to the application event
-bus, so a test cannot disturb a running race.
+The source comes from the provider registry: the first available provider that declares
+``supports_test_mode``. Today that is the simulation, so only simulated events are used.
+Events go to a private sink and never to the application event bus, so a test cannot disturb
+a running race.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from carrera.core.clock import Clock
 from carrera.core.domain import TimingSetup, TrackId
 from carrera.core.errors import ValidationError
 from carrera.core.events import SensorTriggered
-from carrera.core.timing import (
-    ManuallyTriggerable,
-    TimingSessionSpec,
-    TimingSource,
-    TimingSourceFactory,
-)
+from carrera.core.timing import ManuallyTriggerable, TimingSessionSpec, TimingSource
+from carrera.core.timing_registry import TimingProviderRegistry
 
 TEST_LANE = 1
 
@@ -37,12 +34,12 @@ class TimingTestSession:
     def __init__(
         self,
         setup: TimingSetup,
-        factories: Callable[[], Sequence[TimingSourceFactory]],
+        providers: TimingProviderRegistry,
         clock: Clock,
         track_id: TrackId | None = None,
     ) -> None:
         self.setup = setup
-        self._factories = factories
+        self._providers = providers
         self._clock = clock
         self._track_id = track_id
         self._source: TimingSource | None = None
@@ -85,13 +82,17 @@ class TimingTestSession:
         """Create a simulated source for the setup and start it. Raises ``ValidationError``."""
         if self._source is not None:
             return
-        factories = sorted(self._factories(), key=lambda factory: factory.name)
-        if not factories:
+        candidates = [
+            info
+            for info in self._providers.providers()
+            if info.available and info.capabilities.supports_test_mode
+        ]
+        if not candidates:
             raise ValidationError("error.timing.test_no_source")
         spec = TimingSessionSpec(
             setup=self.setup, lanes=(TEST_LANE,), laps=1, track_id=self._track_id
         )
-        source = factories[0].create_source(spec)
+        source = self._providers.create_source(candidates[0].provider_id, spec)
         if not isinstance(source, ManuallyTriggerable):
             raise ValidationError("error.timing.test_not_simulatable")
         self._started_ns = self._clock.now_ns()
