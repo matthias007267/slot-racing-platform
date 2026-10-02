@@ -18,4 +18,4 @@ database per module.
 - Disabling a module never touches the schema. Physically removing a module that owns referenced
   tables needs a migration.
 - A test verifies that the migrations match the models.
-- Persistence of race results (lap/sector rows) is not wired to events yet.
+- Persistence of race results is done by `RaceRecorder` (see ADR 0007).

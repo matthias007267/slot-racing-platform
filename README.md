@@ -10,10 +10,18 @@ they communicate through standardized events and core interfaces.
 
 ## Status
 
-Foundation phase. Implemented: core (events, plugin system, config, domain types, storage), timing
-abstraction with a simulator, a hardware independent race engine, database foundation with
-migrations, and a minimal PySide6 shell with dynamic navigation. **Not** implemented yet: camera
-detection, Raspberry Pi/GPIO, Carrera hardware, track planner, audio/animations, real screens.
+Implemented: core (events, plugin system, config, domain types, storage), timing abstraction with
+a simulator, a hardware independent race engine, database with migrations and a PySide6 shell with
+dynamic navigation. Usable in the application:
+
+- **Fahrer, Fahrzeuge, Strecken:** list, create, edit, deactivate and delete with validation
+  (unique driver start numbers, lane count, driver assignment for vehicles).
+- **Rennen:** six step setup (name, track, mode with laps, participants with driver, vehicle and
+  lane, overview, start), live view with positions and lap times, and stored results that can be
+  reopened later. Timing is simulated (`SimulationTimingProvider`).
+
+**Not** implemented yet: camera detection, Raspberry Pi/GPIO, Carrera hardware, track planner,
+audio/animations, statistics, time limited races.
 
 See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.md).
 
@@ -102,6 +110,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy src tests \
 ```text
 src/carrera/core/      events, plugin system, timing interface, config, domain, storage
 src/carrera/app/       desktop shell (PySide6) and runtime wiring
+src/carrera/uikit/     small Qt helpers shared by module pages (depends on the core only)
 src/carrera/modules/   feature modules (plugins): drivers_vehicles, tracks, races, timing,
                        timing_camera, timing_sensor, track_planner, audio_animation, statistics
 pi_agent/              future Raspberry Pi agent (placeholder)
