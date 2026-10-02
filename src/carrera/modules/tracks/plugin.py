@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, ClassVar
 from carrera.core.catalog import TrackCatalog
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from carrera.core.storage import Database
-from carrera.core.timing import TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSetupService
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.tracks.service import TrackService
 from carrera.modules.tracks.translations import TRANSLATIONS
 
@@ -36,7 +37,7 @@ class TracksPlugin(Plugin):
                 translator,
                 service,
                 setups=lambda: context.find_service(TimingSetupService),
-                factories=lambda: context.find_services(TimingSourceFactory),
+                providers=context.get_service(TimingProviderRegistry),
                 clock=context.clock,
             )
 

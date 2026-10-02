@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -26,7 +26,8 @@ from carrera.core.clock import Clock
 from carrera.core.domain import default_timing_setup
 from carrera.core.errors import ValidationError
 from carrera.core.i18n import Translator
-from carrera.core.timing import TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSetupService
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.tracks.timing_editor import TimingDraft
 from carrera.modules.tracks.ui.common import entry_text, run_guarded, type_label, yes_no
 from carrera.modules.tracks.ui.timing_dialog import PositionDialog
@@ -54,7 +55,7 @@ class TimingWizard(QWidget):
         translator: Translator,
         tracks: Callable[[], list[TrackInfo]],
         setups: Callable[[], TimingSetupService | None],
-        factories: Callable[[], Sequence[TimingSourceFactory]],
+        providers: TimingProviderRegistry,
         clock: Clock,
     ) -> None:
         super().__init__()
@@ -128,7 +129,7 @@ class TimingWizard(QWidget):
             "timing.wizard.order_hint", self.order_table, [self.up_button, self.down_button]
         )
 
-        self.test_view = TimingTestView(translator, factories, clock, show_back=False)
+        self.test_view = TimingTestView(translator, providers, clock, show_back=False)
 
         self.summary_table = make_table(
             [

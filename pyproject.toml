@@ -134,10 +134,20 @@ forbidden_modules = ["carrera.modules.races.engine", "carrera.modules.races.reco
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-name = "Timing does not know the UI"
+name = "Timing providers do not know the UI"
+type = "forbidden"
+source_modules = [
+    "carrera.modules.timing",
+    "carrera.modules.timing_camera",
+    "carrera.modules.timing_sensor",
+]
+forbidden_modules = ["PySide6", "carrera.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Simulation and timing setup are free of hardware libraries"
 type = "forbidden"
 source_modules = ["carrera.modules.timing"]
-forbidden_modules = ["PySide6", "carrera.uikit"]
+forbidden_modules = ["cv2", "gpiozero", "RPi"]
 
 [[tool.importlinter.contracts]]
 name = "Core does not depend on the shared UI helpers"

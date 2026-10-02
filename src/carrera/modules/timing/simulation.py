@@ -13,9 +13,11 @@ from dataclasses import dataclass, replace
 
 from carrera.core.clock import NANOS_PER_SECOND, Clock, ManualClock
 from carrera.core.domain import TimingSetup
+from carrera.core.errors import ProviderConfigurationError
 from carrera.core.events import SensorTriggered
 from carrera.core.timing import (
     ManuallyTriggerable,
+    ProviderCapabilities,
     SensorSink,
     TimingSessionSpec,
     TimingSource,
@@ -195,6 +197,9 @@ class SimulationTimingProvider(TimingSource, ManuallyTriggerable):
         return [item[3] for item in events]
 
 
+PROVIDER_ID = "simulation"
+
+
 class SimulationTimingFactory(TimingSourceFactory):
     """Creates a simulation for a race: every lane drives at its own, slightly varying pace."""
 
@@ -210,8 +215,16 @@ class SimulationTimingFactory(TimingSourceFactory):
         self._lane_step_ns = lane_step_ns
 
     @property
-    def name(self) -> str:
-        return "simulation"
+    def provider_id(self) -> str:
+        return PROVIDER_ID
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(supports_test_mode=True, supports_multiple_lanes=True)
+
+    def validate(self, spec: TimingSessionSpec) -> None:
+        if len(set(spec.lanes)) != len(spec.lanes):
+            raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
 
     def create_source(self, spec: TimingSessionSpec) -> TimingSource:
         lanes = [

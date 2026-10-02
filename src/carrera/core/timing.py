@@ -1,15 +1,30 @@
-"""The timing abstraction.
+"""The timing abstraction: the hardware independent interface of every timing provider.
 
-A :class:`TimingSource` knows how to detect cars (simulation, camera, Raspberry Pi, Carrera
-hardware, ...) and reports every detection as a :class:`SensorTriggered` event. Consumers such
-as the race engine only ever see those events, never the concrete source.
+A *provider* (simulation, camera, Raspberry Pi, Carrera hardware, ...) is represented by a
+:class:`TimingSourceFactory` with a stable ``provider_id``. For one race the factory builds a
+:class:`TimingSource` from a :class:`TimingSessionSpec`. The source detects cars and reports every
+detection as a :class:`SensorTriggered` event. Consumers such as the race engine only ever see
+those events, never the concrete source.
+
+Time base: every event carries ``timestamp_ns``, an integer number of nanoseconds on the host's
+monotonic :class:`~carrera.core.clock.Clock` timeline (``perf_counter_ns``). The *source* stamps
+its events. A provider whose device has its own clock converts device time onto the host timeline
+(for example by taking ``clock.now_ns()`` on arrival and correcting by the known latency). Wall
+clock time, time zones, daylight saving time and NTP corrections never enter timing.
+
+Lifecycle of a source, driven by the host (the race engine):
+
+``start(sink)`` → events → ``pause()`` / ``resume()`` → ``stop()``. ``poll()`` is called regularly
+while running, so host driven sources need no thread. ``pause()`` freezes the source's own
+timeline; the race engine additionally ignores events that arrive while paused, so a source that
+cannot pause (real devices) stays correct. After ``stop()`` no further events are delivered.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 
 from carrera.core.domain import RaceId, TimingLayout, TimingSetup, TrackId
 from carrera.core.events import SensorTriggered
@@ -18,7 +33,12 @@ SensorSink = Callable[[SensorTriggered], None]
 
 
 class TimingSource(ABC):
-    """Produces standardized sensor events while running."""
+    """Produces standardized sensor events while running.
+
+    A source knows its own device or data source, the sensor and hardware ids of the session's
+    :class:`TimingSetup` and the technical communication. It knows nothing about races, drivers,
+    vehicles, standings, rules or the UI.
+    """
 
     @property
     @abstractmethod
@@ -100,14 +120,66 @@ class TimingSetupService(ABC):
         """Remove the stored configuration; the track falls back to the default layout."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderCapabilities:
+    """What a provider can do. Callers ask the capabilities, never the provider's name."""
+
+    supports_test_mode: bool = False
+    """Its sources are :class:`ManuallyTriggerable`, so the timing test mode can use them."""
+    supports_multiple_lanes: bool = True
+    """It can time more than one lane in one session."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAvailability:
+    """Whether a provider can time a race right now.
+
+    ``reason_key`` and ``reason_params`` form a translatable explanation for the UI when
+    ``available`` is false (for example ``error.timing_provider.not_connected``).
+    """
+
+    available: bool = True
+    reason_key: str | None = None
+    reason_params: Mapping[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def ok(cls) -> ProviderAvailability:
+        return cls()
+
+    @classmethod
+    def unavailable(cls, reason_key: str, **params: object) -> ProviderAvailability:
+        return cls(False, reason_key, params)
+
+
 class TimingSourceFactory(ABC):
-    """Creates a fresh :class:`TimingSource` for one race. Registered as a service by the module
-    that provides the source (simulation today, camera or Raspberry Pi later)."""
+    """A timing provider: creates a fresh :class:`TimingSource` for one race.
+
+    The module that provides the source registers the factory with
+    ``PluginContext.register_timing_provider``. Races store only the ``provider_id`` and resolve
+    the factory when they start, so a stored race does not depend on any Python class.
+
+    The factory may check that the provider is available (:meth:`availability`), that the setup is
+    supported (:meth:`validate`) and that the configuration is valid; it reports problems with
+    :class:`~carrera.core.errors.TimingProviderError` subclasses carrying a translation key.
+    """
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        """Stable identifier used to select this factory, for example ``simulation``."""
+    def provider_id(self) -> str:
+        """Stable technical identifier, for example ``simulation``, ``camera`` or
+        ``raspberry_pi``. Not a UI label: the UI translates ``timing.provider.<provider_id>``."""
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
+
+    def availability(self) -> ProviderAvailability:
+        """Cheap check, safe to call often, whether the provider can start now."""
+        return ProviderAvailability.ok()
+
+    def validate(self, spec: TimingSessionSpec) -> None:  # noqa: B027
+        """Raise ``ProviderConfigurationError`` if this provider cannot time ``spec``."""
 
     @abstractmethod
-    def create_source(self, spec: TimingSessionSpec) -> TimingSource: ...
+    def create_source(self, spec: TimingSessionSpec) -> TimingSource:
+        """Build a source for ``spec``. Does not start it."""

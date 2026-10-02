@@ -18,10 +18,12 @@ from carrera.core.domain import (
 )
 from carrera.core.errors import ValidationError
 from carrera.core.storage import Database, utc_now
+from carrera.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProviderRegistry
 from carrera.modules.races.models import Lap, Race, RaceParticipant, Sector
 from carrera.modules.races.types import LapRecord, ParticipantInfo, RaceInfo, ResultRow
 
 MAX_LAPS = 999
+MAX_PROVIDER_ID_LENGTH = 64
 
 _EDITABLE = (RaceStatus.CREATED, RaceStatus.READY)
 _LIVE = (RaceStatus.RUNNING, RaceStatus.PAUSED)
@@ -36,32 +38,58 @@ class RaceService:
         drivers: DriverCatalog,
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
+        providers: TimingProviderRegistry | None = None,
+        default_provider: str | None = None,
     ) -> None:
         self._database = database
         self._drivers = drivers
         self._vehicles = vehicles
         self._tracks = tracks
+        self._providers = providers
+        self._default_provider = default_provider
+
+    def default_provider_id(self) -> str:
+        """Provider for a new race: the configured one if available, else the first available,
+        else the id every race had before providers were selectable."""
+        if self._providers is not None:
+            chosen = self._providers.default_provider_id(self._default_provider)
+            if chosen is not None:
+                return chosen
+        return self._default_provider or DEFAULT_TIMING_PROVIDER
 
     # --- configuration -------------------------------------------------------------------------
 
-    def create_race(self, name: str, track_id: TrackId, laps: int) -> RaceInfo:
+    def create_race(
+        self, name: str, track_id: TrackId, laps: int, timing_provider: str | None = None
+    ) -> RaceInfo:
         clean_name = self._validate_name(name)
         self._validate_laps(laps)
+        provider = self._validate_provider(timing_provider or self.default_provider_id())
         self._require_active_track(track_id)
         with self._database.session() as session:
             race = Race(
                 name=clean_name,
                 track_id=track_id,
                 target_laps=laps,
+                timing_provider=provider,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
             session.flush()
             return self._race_info(session, race)
 
-    def update_race(self, race_id: RaceId, name: str, track_id: TrackId, laps: int) -> RaceInfo:
+    def update_race(
+        self,
+        race_id: RaceId,
+        name: str,
+        track_id: TrackId,
+        laps: int,
+        timing_provider: str | None = None,
+    ) -> RaceInfo:
+        """Change the configuration. ``timing_provider=None`` keeps the stored provider."""
         clean_name = self._validate_name(name)
         self._validate_laps(laps)
+        provider = None if timing_provider is None else self._validate_provider(timing_provider)
         with self._database.session() as session:
             race = self._load_editable(session, race_id)
             if track_id != race.track_id:
@@ -72,6 +100,8 @@ class RaceService:
                 race.track_id = track_id
             race.name = clean_name
             race.target_laps = laps
+            if provider is not None:
+                race.timing_provider = provider
             session.flush()
             return self._race_info(session, race)
 
@@ -162,6 +192,8 @@ class RaceService:
             raise ValidationError("error.race.no_track")
         if not track.is_active:
             raise ValidationError("error.race.track_inactive", track=track.name)
+        if self._providers is not None:
+            self._providers.check(race.timing_provider, lane_count=len(race.participants))
         for participant in race.participants:
             driver = self._drivers.get_driver(participant.driver_id)
             if driver is None or not driver.is_active:
@@ -327,6 +359,15 @@ class RaceService:
     # --- helpers -------------------------------------------------------------------------------
 
     @staticmethod
+    def _validate_provider(provider_id: str) -> str:
+        clean = provider_id.strip()
+        if not clean:
+            raise ValidationError("error.race.provider_required")
+        if len(clean) > MAX_PROVIDER_ID_LENGTH:
+            raise ValidationError("error.race.provider_invalid")
+        return clean
+
+    @staticmethod
     def _validate_name(name: str) -> str:
         clean = name.strip()
         if not clean:
@@ -418,6 +459,7 @@ class RaceService:
             lane_count=track.lane_count if track else 0,
             status=RaceStatus(race.status),
             laps=race.target_laps,
+            timing_provider=race.timing_provider,
             participants=tuple(self._participant_info(p) for p in participants),
             created_at=race.created_at,
             started_at=race.started_at,

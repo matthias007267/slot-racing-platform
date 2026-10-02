@@ -3,7 +3,7 @@ test mode, as one navigation page."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
 
@@ -11,7 +11,8 @@ from carrera.core.catalog import TrackInfo
 from carrera.core.clock import Clock
 from carrera.core.domain import TrackId
 from carrera.core.i18n import Translator
-from carrera.core.timing import TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSetupService
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.tracks.service import TrackService
 from carrera.modules.tracks.ui.common import run_guarded
 from carrera.modules.tracks.ui.timing_test_view import TimingTestView
@@ -26,15 +27,15 @@ class TracksArea(QWidget):
         translator: Translator,
         service: TrackService,
         setups: Callable[[], TimingSetupService | None],
-        factories: Callable[[], Sequence[TimingSourceFactory]],
+        providers: TimingProviderRegistry,
         clock: Clock,
     ) -> None:
         super().__init__()
         self._service = service
         self.tracks_page = TracksPage(translator, service)
         self.config_view = TimingConfigView(translator, setups)
-        self.test_view = TimingTestView(translator, factories, clock)
-        self.wizard = TimingWizard(translator, service.list_tracks, setups, factories, clock)
+        self.test_view = TimingTestView(translator, providers, clock)
+        self.wizard = TimingWizard(translator, service.list_tracks, setups, providers, clock)
         self.stack = QStackedWidget()
         for page in (self.tracks_page, self.config_view, self.test_view, self.wizard):
             self.stack.addWidget(page)

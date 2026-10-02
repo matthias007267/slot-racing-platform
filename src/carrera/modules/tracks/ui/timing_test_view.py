@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QHideEvent
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 from carrera.core.clock import Clock
 from carrera.core.domain import TimingSetup, TrackId
 from carrera.core.i18n import Translator
-from carrera.core.timing import TimingSourceFactory
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.tracks.timing_test import TimingTestSession
 from carrera.modules.tracks.ui.common import format_time, position_text, run_guarded
 from carrera.uikit import StatusLabel, fill_table, heading, make_table
@@ -25,14 +25,14 @@ class TimingTestView(QWidget):
     def __init__(
         self,
         translator: Translator,
-        factories: Callable[[], Sequence[TimingSourceFactory]],
+        providers: TimingProviderRegistry,
         clock: Clock,
         *,
         show_back: bool = True,
     ) -> None:
         super().__init__()
         self.translator = translator
-        self._factories = factories
+        self._providers = providers
         self._clock = clock
         self.session: TimingTestSession | None = None
         tr = translator.translate
@@ -108,7 +108,7 @@ class TimingTestView(QWidget):
         """Start a fresh test for ``setup``."""
         if self.session is not None:
             self.session.stop()
-        self.session = TimingTestSession(setup, self._factories, self._clock, track_id)
+        self.session = TimingTestSession(setup, self._providers, self._clock, track_id)
         self.status.clear_message()
         self._refresh()
 

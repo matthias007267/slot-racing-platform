@@ -8,15 +8,12 @@ from carrera.core.clock import NANOS_PER_SECOND as S
 from carrera.core.clock import ManualClock
 from carrera.core.domain import TimingPositionType, default_timing_setup
 from carrera.core.errors import ValidationError
-from carrera.core.timing import (
-    SensorSink,
-    TimingSessionSpec,
-    TimingSource,
-    TimingSourceFactory,
-)
+from carrera.core.timing import ProviderAvailability, ProviderCapabilities
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.timing.simulation import SimulationTimingFactory
 from carrera.modules.tracks.timing_editor import TimingDraft
 from carrera.modules.tracks.timing_test import TimingTestSession
+from tests.support.timing import FakeManualSource, FakeTimingFactory
 
 
 def draft() -> TimingDraft:
@@ -137,9 +134,9 @@ def test_default_sensor_ids_are_assigned_by_index() -> None:
 
 def make_session(draft_: TimingDraft | None = None) -> tuple[TimingTestSession, ManualClock]:
     clock = ManualClock()
-    factories: list[TimingSourceFactory] = [SimulationTimingFactory(clock)]
+    providers = TimingProviderRegistry(lambda: [SimulationTimingFactory(clock)])
     setup = (draft_ or draft()).to_setup()
-    return TimingTestSession(setup, lambda: factories, clock), clock
+    return TimingTestSession(setup, providers, clock), clock
 
 
 def test_each_trigger_creates_one_event_in_layout_order() -> None:
@@ -182,38 +179,45 @@ def test_reset_clears_events_and_restarts_the_order() -> None:
 
 
 def test_the_test_needs_a_simulating_source() -> None:
-    session = TimingTestSession(default_timing_setup(), lambda: [], ManualClock())
+    session = TimingTestSession(
+        default_timing_setup(), TimingProviderRegistry(lambda: []), ManualClock()
+    )
     with pytest.raises(ValidationError) as error:
         session.trigger()
     assert error.value.key == "error.timing.test_no_source"
 
 
-class PassiveSource(TimingSource):
-    @property
-    def source_id(self) -> str:
-        return "passive"
-
-    @property
-    def is_running(self) -> bool:
-        return False
-
-    def start(self, sink: SensorSink) -> None:
-        return None
-
-    def stop(self) -> None:
-        return None
-
-
-class PassiveFactory(TimingSourceFactory):
-    name = "passive"
-    display_name = "Passive"
-
-    def create_source(self, spec: TimingSessionSpec) -> TimingSource:
-        return PassiveSource()
-
-
 def test_a_source_that_cannot_be_simulated_is_reported() -> None:
-    session = TimingTestSession(default_timing_setup(), lambda: [PassiveFactory()], ManualClock())
+    factory = FakeTimingFactory(
+        "passive", capabilities=ProviderCapabilities(supports_test_mode=True)
+    )
+    session = TimingTestSession(
+        default_timing_setup(), TimingProviderRegistry(lambda: [factory]), ManualClock()
+    )
     with pytest.raises(ValidationError) as error:
         session.trigger()
     assert error.value.key == "error.timing.test_not_simulatable"
+
+
+def test_the_test_mode_picks_a_provider_by_capability_not_by_name() -> None:
+    manual = FakeManualSource()
+    providers = TimingProviderRegistry(
+        lambda: [
+            FakeTimingFactory("a-no-test-mode"),
+            FakeTimingFactory(
+                "b-offline",
+                availability=ProviderAvailability.unavailable("error.timing_provider.unavailable"),
+                capabilities=ProviderCapabilities(supports_test_mode=True),
+            ),
+            FakeTimingFactory(
+                "c-usable",
+                capabilities=ProviderCapabilities(supports_test_mode=True),
+                source=manual,
+            ),
+        ]
+    )
+    session = TimingTestSession(default_timing_setup(), providers, ManualClock())
+    session.trigger()
+    assert manual.triggered == [1] and manual.calls == ["start"]
+    session.stop()
+    assert manual.calls == ["start", "stop"]

@@ -28,6 +28,7 @@ class RaceInfo:
     lane_count: int
     status: RaceStatus
     laps: int
+    timing_provider: str
     participants: tuple[ParticipantInfo, ...]
     created_at: datetime | None
     started_at: datetime | None

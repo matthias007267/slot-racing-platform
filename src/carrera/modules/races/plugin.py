@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, ClassVar
 from carrera.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from carrera.core.storage import Database
-from carrera.core.timing import TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSetupService
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.races.recorder import RaceRecorder
 from carrera.modules.races.runner import RaceController
 from carrera.modules.races.service import RaceService
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 class RacesPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="races",
-        version="0.2.0",
+        version="0.3.0",
         title="Races",
         requires=("drivers_vehicles", "tracks"),
         optional=("timing",),
@@ -34,7 +35,15 @@ class RacesPlugin(Plugin):
         drivers = context.get_service(DriverCatalog)
         vehicles = context.get_service(VehicleCatalog)
         tracks = context.get_service(TrackCatalog)
-        service = RaceService(context.get_service(Database), drivers, vehicles, tracks)
+        providers = context.get_service(TimingProviderRegistry)
+        service = RaceService(
+            context.get_service(Database),
+            drivers,
+            vehicles,
+            tracks,
+            providers,
+            context.config.timing_source,
+        )
         service.abort_stale_races()
 
         recorder = RaceRecorder(service, context.events)
@@ -42,8 +51,7 @@ class RacesPlugin(Plugin):
             service,
             context.events,
             context.clock,
-            factories=lambda: context.find_services(TimingSourceFactory),
-            preferred_source=context.config.timing_source,
+            providers=providers,
             storage_errors=lambda: recorder.errors,
             setups=lambda: context.find_service(TimingSetupService),
         )
@@ -56,7 +64,7 @@ class RacesPlugin(Plugin):
         def races_page() -> QWidget:
             from carrera.modules.races.ui.races_page import RacesPage
 
-            return RacesPage(translator, service, controller, drivers, vehicles, tracks)
+            return RacesPage(translator, service, controller, drivers, vehicles, tracks, providers)
 
         context.add_navigation(
             NavigationItem(id="races", title_key="nav.races", order=40, page_factory=races_page)

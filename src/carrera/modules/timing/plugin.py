@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from carrera.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from carrera.core.storage import Database
-from carrera.core.timing import TimingSetupService, TimingSourceFactory
+from carrera.core.timing import TimingSetupService
 from carrera.modules.timing.service import TimingSetupManager
 from carrera.modules.timing.simulation import SimulationTimingFactory
 
@@ -12,12 +12,16 @@ from carrera.modules.timing.simulation import SimulationTimingFactory
 class TimingPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="timing",
-        version="0.2.0",
+        version="0.3.0",
         title="Timing",
         models_module="carrera.modules.timing.models",
     )
     translations: ClassVar[dict[str, dict[str, str]]] = {
-        "de": {"plugin.timing.title": "Zeitmessung", "nav.timing": "Zeitmessung"}
+        "de": {
+            "plugin.timing.title": "Zeitmessung",
+            "nav.timing": "Zeitmessung",
+            "timing.provider.simulation": "Simulation",
+        }
     }
 
     def activate(self, context: PluginContext) -> None:
@@ -25,6 +29,4 @@ class TimingPlugin(Plugin):
         context.register_service(
             TimingSetupService, TimingSetupManager(context.get_service(Database))
         )
-        context.register_service(
-            TimingSourceFactory, SimulationTimingFactory(context.clock), name="simulation"
-        )
+        context.register_timing_provider(SimulationTimingFactory(context.clock))

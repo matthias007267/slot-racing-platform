@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -21,9 +22,20 @@ from carrera.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from carrera.core.domain import DriverId, RaceId, TrackId, VehicleId
 from carrera.core.errors import ValidationError
 from carrera.core.i18n import Translator
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.races.service import MAX_LAPS, RaceService
 from carrera.modules.races.types import RaceInfo
-from carrera.uikit import StatusLabel, describe_error, fill_table, heading, make_table, selected_id
+from carrera.uikit import (
+    StatusLabel,
+    availability_text,
+    describe_error,
+    fill_table,
+    heading,
+    make_table,
+    provider_item_text,
+    provider_label,
+    selected_id,
+)
 from carrera.uikit.errors import is_expected
 
 logger = logging.getLogger(__name__)
@@ -50,6 +62,7 @@ class RaceWizard(QWidget):
         drivers: DriverCatalog,
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
+        providers: TimingProviderRegistry,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -57,6 +70,7 @@ class RaceWizard(QWidget):
         self._drivers = drivers
         self._vehicles = vehicles
         self._tracks = tracks
+        self._providers = providers
         self._race: RaceInfo | None = None
         tr = translator.translate
 
@@ -70,6 +84,10 @@ class RaceWizard(QWidget):
         self.name_edit.setObjectName("race-name")
         self.track_combo = QComboBox()
         self.track_combo.setObjectName("race-track")
+        self.provider_combo = QComboBox()
+        self.provider_combo.setObjectName("race-provider")
+        self.provider_status = QLabel()
+        self.provider_status.setObjectName("race-provider-status")
         self.mode_combo = QComboBox()
         self.mode_combo.setObjectName("race-mode")
         self.mode_combo.addItem(tr("race.wizard.mode.laps"), "laps")
@@ -128,6 +146,7 @@ class RaceWizard(QWidget):
         self.add_participant_button.clicked.connect(lambda: self.add_participant())
         self.remove_participant_button.clicked.connect(lambda: self.remove_selected_participant())
         self.driver_combo.currentIndexChanged.connect(self._preselect_vehicle)
+        self.provider_combo.currentIndexChanged.connect(lambda _: self._update_provider_status())
         self._show_step(NAME)
 
     @property
@@ -183,6 +202,9 @@ class RaceWizard(QWidget):
             elif index == TRACK:
                 layout.addWidget(QLabel(tr("race.wizard.track")))
                 layout.addWidget(self.track_combo)
+                layout.addWidget(QLabel(tr("race.wizard.provider")))
+                layout.addWidget(self.provider_combo)
+                layout.addWidget(self.provider_status)
             elif index == MODE:
                 layout.addWidget(QLabel(tr("race.wizard.mode")))
                 layout.addWidget(self.mode_combo)
@@ -214,7 +236,42 @@ class RaceWizard(QWidget):
             layout.addStretch(1)
             self.stack.addWidget(page)
 
+    def _reload_providers(self, keep: str | None = None) -> None:
+        """List every registered provider; unusable ones are shown but cannot be selected."""
+        chosen = keep or self.provider_combo.currentData() or self._service.default_provider_id()
+        infos = self._providers.providers()
+        model = self.provider_combo.model()
+        assert isinstance(model, QStandardItemModel)
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.clear()
+        for info in infos:
+            self.provider_combo.addItem(provider_item_text(self.translator, info), info.provider_id)
+            item = model.item(self.provider_combo.count() - 1)
+            if item is not None:
+                item.setEnabled(info.available)
+        self.provider_combo.blockSignals(False)
+        usable = [info.provider_id for info in infos if info.available]
+        known = {info.provider_id for info in infos}
+        self._select_provider(chosen if chosen in known else (usable[0] if usable else None))
+
+    def _select_provider(self, provider_id: str | None) -> None:
+        self.provider_combo.setCurrentIndex(
+            -1 if provider_id is None else self.provider_combo.findData(provider_id)
+        )
+        self._update_provider_status()
+
+    def _update_provider_status(self) -> None:
+        provider_id = self.provider_combo.currentData()
+        if provider_id is None:
+            self.provider_status.setText(self.translator.translate("race.wizard.provider_none"))
+            return
+        status = availability_text(self.translator, self._providers.info(provider_id))
+        self.provider_status.setText(
+            self.translator.format("race.wizard.provider_status", status=status)
+        )
+
     def _reload_choices(self) -> None:
+        self._reload_providers(None if self._race is None else self._race.timing_provider)
         self.track_combo.clear()
         for track in self._tracks.list_tracks(active_only=True):
             self.track_combo.addItem(track.name, track.id)
@@ -258,6 +315,8 @@ class RaceWizard(QWidget):
         )
         self.back_button.setEnabled(step > NAME)
         self.next_button.setEnabled(step < START)
+        if step == TRACK:
+            self._reload_providers()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
 
@@ -269,6 +328,7 @@ class RaceWizard(QWidget):
         elif step == TRACK:
             if self.track_combo.currentData() is None:
                 raise ValidationError("error.race.track_required")
+            self._check_provider()
         elif step == MODE:
             self._save_basics()
             self._reload_lanes()
@@ -280,14 +340,22 @@ class RaceWizard(QWidget):
         self.status.clear_message()
         self._show_step(step + 1)
 
+    def _check_provider(self) -> str:
+        provider_id = self.provider_combo.currentData()
+        if provider_id is None:
+            raise ValidationError("error.race.provider_required")
+        self._providers.check(provider_id)
+        return str(provider_id)
+
     def _save_basics(self) -> None:
         name = self.name_edit.text()
         track_id = TrackId(self.track_combo.currentData())
         laps = self.laps_spin.value()
+        provider = self._check_provider()
         if self._race is None:
-            self._race = self._service.create_race(name, track_id, laps)
+            self._race = self._service.create_race(name, track_id, laps, provider)
         else:
-            self._race = self._service.update_race(self._race.id, name, track_id, laps)
+            self._race = self._service.update_race(self._race.id, name, track_id, laps, provider)
         self._refresh_participants()
 
     def _add_participant(self) -> None:
@@ -338,6 +406,10 @@ class RaceWizard(QWidget):
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
             fmt("race.overview.laps", laps=race.laps),
+            fmt(
+                "race.overview.provider",
+                provider=provider_label(self.translator, race.timing_provider),
+            ),
             "",
             self.translator.translate("race.overview.participants"),
         ]

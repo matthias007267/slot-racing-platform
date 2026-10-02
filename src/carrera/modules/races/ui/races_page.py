@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from carrera.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from carrera.core.domain import RaceId
 from carrera.core.i18n import Translator
+from carrera.core.timing_registry import TimingProviderRegistry
 from carrera.modules.races.runner import RaceController
 from carrera.modules.races.service import RaceService
 from carrera.modules.races.ui.live_view import LiveRaceView
@@ -38,6 +39,7 @@ class RacesPage(QWidget):
         drivers: DriverCatalog,
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
+        providers: TimingProviderRegistry,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -77,7 +79,7 @@ class RacesPage(QWidget):
         list_layout.addWidget(self.table, 1)
         list_layout.addWidget(self.status)
 
-        self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks)
+        self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks, providers)
         self.live = LiveRaceView(translator, controller)
         self.results = ResultsView(translator, service)
         self.stack = QStackedWidget()
