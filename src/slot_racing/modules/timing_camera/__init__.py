@@ -1,5 +1,5 @@
 """Camera timing.
 
-Detection turns a grayscale frame into lane crossings for configured positions.
-The package does not open a camera and does not publish race events.
+Detection turns a grayscale frame into lane crossings. The timing provider
+translates those crossings into sensor events. The package does not open a camera.
 """
