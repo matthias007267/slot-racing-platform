@@ -12,6 +12,7 @@ from carrera.core.clock import Clock, MonotonicClock
 from carrera.core.config import AppConfig, save_config
 from carrera.core.events import EventBus
 from carrera.core.i18n import Translator
+from carrera.core.messages import CORE_TRANSLATIONS
 from carrera.core.plugin import (
     ContributionRegistry,
     Plugin,
@@ -55,8 +56,9 @@ class Runtime:
         services = ServiceRegistry()
         contributions = ContributionRegistry()
         translator = Translator(config.language)
-        for language, messages in SHELL_TRANSLATIONS.items():
-            translator.add_catalog(language, messages)
+        for catalog in (SHELL_TRANSLATIONS, CORE_TRANSLATIONS):
+            for language, messages in catalog.items():
+                translator.add_catalog(language, messages)
 
         database = database or Database.from_path(config.resolved_database_path())
         database.migrate()
