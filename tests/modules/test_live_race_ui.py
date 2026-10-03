@@ -59,6 +59,8 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
 
     assert isinstance(page.current_view(), LiveRaceView)
     live = page.live
+    assert live.board.isHidden()
+    assert not live.stage.isHidden()
     runner = live.runner
     assert runner is not None and runner.status is RaceStatus.RUNNING
     assert live.name_label.text() == "Finale"

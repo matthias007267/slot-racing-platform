@@ -30,6 +30,8 @@ from slot_racing.modules.races.hud import (
     default_hud_configuration,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceController, RaceRunner, RaceSnapshot
+from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.races.time_trial_board import build_time_trial_board
 from slot_racing.modules.races.ui.formatting import (
     EMPTY_DISPLAY,
     format_lap_progress,
@@ -50,6 +52,7 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceMessageWidget,
     RaceStatusWidget,
 )
+from slot_racing.modules.races.ui.time_trial_board_view import TimeTrialBoardView
 from slot_racing.uikit import describe_error, fill_table, provider_label, selected_id
 from slot_racing.uikit.errors import is_expected
 from slot_racing.uikit.theme import configure_page, set_tone
@@ -82,11 +85,13 @@ class LiveRaceView(QWidget):
         translator: Translator,
         controller: RaceController,
         store: HudConfigurationStore | None = None,
+        service: RaceService | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
         self._controller = controller
         self._store = store
+        self._service = service
         self._runner: RaceRunner | None = None
         self._snapshot: RaceSnapshot | None = None
         self._announced_end = False
@@ -140,9 +145,13 @@ class LiveRaceView(QWidget):
         self.stage.bind(self.messages.widget_id, self.messages)
         self.stage.bind(self.controls.widget_id, self.controls)
 
+        self.board = TimeTrialBoardView(translator)
+        self.board.hide()
+
         layout = QVBoxLayout(self)
         configure_page(layout)
         layout.addWidget(self.stage, 1)
+        layout.addWidget(self.board, 1)
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
@@ -152,6 +161,11 @@ class LiveRaceView(QWidget):
         self.stop_button.clicked.connect(lambda: self.stop_race())
         self.results_button.clicked.connect(lambda: self._show_results())
         self.back_button.clicked.connect(self.back_requested.emit)
+        self.board.pause_button.clicked.connect(self.pause_race)
+        self.board.resume_button.clicked.connect(self.resume_race)
+        self.board.stop_button.clicked.connect(lambda: self.stop_race())
+        self.board.results_button.clicked.connect(lambda: self._show_results())
+        self.board.back_button.clicked.connect(self.back_requested.emit)
         self.table.itemSelectionChanged.connect(self._show_detail)
         self._subscriptions = [self._listen(event_type) for event_type in _RACE_EVENTS]
         self.destroyed.connect(lambda *_args: self._unsubscribe())
@@ -329,12 +343,48 @@ class LiveRaceView(QWidget):
                     "race.live.warning", detail="; ".join(snapshot.source_errors)
                 )
             )
+        time_trial = runner.race.mode is RaceMode.TIME_TRIAL
+        self.stage.setVisible(not time_trial)
+        self.board.setVisible(time_trial)
+        if time_trial:
+            self._show_time_trial(runner, snapshot, status_text, tone)
         self._update_buttons()
         if snapshot.status is RaceStatus.FINISHED:
             self._timer.stop()
             if not self._announced_end:
                 self._announced_end = True
                 self.race_over.emit(snapshot.race_id)
+
+    def _show_time_trial(
+        self, runner: RaceRunner, snapshot: RaceSnapshot, status_text: str, tone: str
+    ) -> None:
+        """Redraw the time-trial board from stored measurements. The lap HUD stays hidden."""
+        race = runner.race
+        measurements = (
+            []
+            if self._service is None or race.track_id is None
+            else self._service.list_time_measurements(track_id=race.track_id)
+        )
+        self.board.show_board(
+            build_time_trial_board(
+                lane_count=race.lane_count,
+                race_id=race.id,
+                measurements=measurements,
+                participants=race.participants,
+            )
+        )
+        warning = ""
+        if snapshot.source_errors:
+            warning = self.translator.format(
+                "race.live.warning", detail="; ".join(snapshot.source_errors)
+            )
+        self.board.show_status(
+            name=snapshot.name,
+            status=status_text,
+            tone=tone,
+            elapsed_ns=snapshot.elapsed_ns,
+            warning=warning,
+        )
 
     def _show_progress(self, snapshot: RaceSnapshot) -> None:
         leader = min(snapshot.rows, key=lambda row: row.position, default=None)
@@ -450,11 +500,16 @@ class LiveRaceView(QWidget):
     def _update_buttons(self) -> None:
         runner = self._runner
         status = None if runner is None else runner.status
-        self.pause_button.setEnabled(status is RaceStatus.RUNNING)
-        self.resume_button.setEnabled(status is RaceStatus.PAUSED)
-        self.stop_button.setEnabled(runner is not None and runner.is_active)
-        self.results_button.setEnabled(runner is not None and runner.is_finished)
+        running = status is RaceStatus.RUNNING
+        paused = status is RaceStatus.PAUSED
+        active = runner is not None and runner.is_active
+        finished = runner is not None and runner.is_finished
+        self.pause_button.setEnabled(running)
+        self.resume_button.setEnabled(paused)
+        self.stop_button.setEnabled(active)
+        self.results_button.setEnabled(finished)
         self.back_button.setEnabled(True)
+        self.board.set_controls(pause=running, resume=paused, stop=active, results=finished)
 
     def _guard(self, action: Callable[[], None]) -> None:
         try:
