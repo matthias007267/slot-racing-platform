@@ -1,1 +1,1 @@
-"""Statistics. Will listen to race, lap and sector events."""
+"""Statistics. Lane records follow the track and are calculated from stored measurements."""

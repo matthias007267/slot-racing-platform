@@ -4,6 +4,8 @@
 Those modules implement these interfaces and register them as services; consumers only depend on
 the interfaces and the plain data classes defined here. ``RaceCatalog`` is the other direction:
 the shell reads race counts and standings without importing the races module.
+``TimeMeasurementCatalog`` exposes stored time-trial measurements the same way. A best time is
+computed by the reader and is not stored again.
 """
 
 from __future__ import annotations
@@ -142,3 +144,24 @@ class RaceCatalog(ABC):
     @abstractmethod
     def latest_result(self) -> RaceSummary | None:
         """The newest finished or aborted race, with up to three stored standings."""
+
+
+@dataclass(frozen=True, slots=True)
+class TimeMeasurementView:
+    """One stored time-trial measurement. The lane is the lane that was driven."""
+
+    id: int
+    track_id: TrackId | None
+    lane: int
+    driver_label: str
+    vehicle_label: str
+    time_ns: int
+    recorded_at: datetime | None
+
+
+class TimeMeasurementCatalog(ABC):
+    """Stored time-trial measurements for one track. The races module registers this."""
+
+    @abstractmethod
+    def list_for_track(self, track_id: TrackId) -> list[TimeMeasurementView]:
+        """Measurements of this track, oldest first. Other tracks are not included."""
