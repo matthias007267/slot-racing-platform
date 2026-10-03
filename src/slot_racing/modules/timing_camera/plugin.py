@@ -8,15 +8,12 @@ from slot_racing.modules.timing_camera.lease import CameraLease
 from slot_racing.modules.timing_camera.preview import CameraPreview
 from slot_racing.modules.timing_camera.provider import CameraTimingFactory
 from slot_racing.modules.timing_camera.store import CameraConfigurationStore
-from slot_racing.core.plugin import Plugin, PluginContext, PluginManifest
-from slot_racing.modules.timing_camera.provider import CameraTimingFactory
 
 
 class CameraTimingPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="timing_camera",
         version="0.5.0",
-        version="0.2.0",
         title="Camera timing",
         enabled_by_default=False,
     )
@@ -57,7 +54,6 @@ class CameraTimingPlugin(Plugin):
             "camera.zone.number": "Zone {number}",
             "error.timing_provider.camera_not_connected": "Es ist keine Kamera angeschlossen.",
             "error.timing_provider.camera_in_use": "Die Kamera wird gerade verwendet.",
-            "error.timing_provider.camera_not_connected": "Es ist keine Kamera angeschlossen.",
             "error.timing_provider.camera_position_unknown": (
                 "Die Kamera überwacht die Position „{position}“, "
                 "die im Timing-Setup keinen aktiven Sensor hat."
@@ -96,4 +92,3 @@ class CameraTimingPlugin(Plugin):
                 page_factory=camera_page,
             )
         )
-        context.register_timing_provider(CameraTimingFactory())

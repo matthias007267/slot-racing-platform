@@ -377,7 +377,6 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
     root = Path("src/slot_racing/modules/timing_camera")
     forbidden = (
         "PySide6",
-        "cv2",
         "slot_racing.app",
         "slot_racing.uikit",
         "slot_racing.core.domain",
@@ -405,10 +404,6 @@ def test_detection_modules_do_not_know_races_events_or_ui() -> None:
         if path.name != "opencv_device.py":
             assert "VideoCapture" not in source
             assert "import cv2" not in source
-    detection_only = {"_checks.py", "detection.py", "frames.py", "geometry.py", "frame_source.py"}
-    for path in sorted(root.glob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        assert "VideoCapture" not in source
         tree = ast.parse(source)
         imported: list[str] = []
         for node in ast.walk(tree):
