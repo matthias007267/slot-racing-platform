@@ -35,6 +35,7 @@ class VehicleInput:
     notes: str | None = None
     start_number: int | str | None = None
     driver_id: DriverId | None = None
+    is_favorite: bool = False
 
 
 def _required(value: str, key: str, limit: int) -> str:
@@ -121,6 +122,7 @@ def _vehicle_info(vehicle: Vehicle) -> VehicleInfo:
         start_number=vehicle.start_number,
         is_active=vehicle.is_active,
         driver_id=None if vehicle.driver_id is None else DriverId(vehicle.driver_id),
+        is_favorite=vehicle.is_favorite,
         created_at=vehicle.created_at,
         updated_at=vehicle.updated_at,
     )
@@ -244,7 +246,10 @@ class VehicleService(VehicleCatalog):
         with self._database.session() as session:
             values = self._validate(data, session)
             self._check_driver(session, data.driver_id, current=None)
-            vehicle = Vehicle(driver_id=data.driver_id, **values)
+            favorite = self._favorite_for(data)
+            if favorite and data.driver_id is not None:
+                self._claim_favorite(session, data.driver_id, own_id=None)
+            vehicle = Vehicle(driver_id=data.driver_id, is_favorite=favorite, **values)
             session.add(vehicle)
             session.flush()
             return _vehicle_info(vehicle)
@@ -256,7 +261,11 @@ class VehicleService(VehicleCatalog):
             self._check_driver(session, data.driver_id, current=vehicle.driver_id)
             for field, value in values.items():
                 setattr(vehicle, field, value)
+            favorite = self._favorite_for(data)
+            if favorite and data.driver_id is not None:
+                self._claim_favorite(session, data.driver_id, own_id=vehicle.id)
             vehicle.driver_id = data.driver_id
+            vehicle.is_favorite = favorite
             session.flush()
             return _vehicle_info(vehicle)
 
@@ -265,6 +274,10 @@ class VehicleService(VehicleCatalog):
         with self._database.session() as session:
             vehicle = self._load(session, vehicle_id)
             self._check_driver(session, driver_id, current=vehicle.driver_id)
+            if driver_id is None:
+                vehicle.is_favorite = False
+            elif vehicle.is_favorite:
+                self._claim_favorite(session, driver_id, own_id=vehicle.id)
             vehicle.driver_id = driver_id
             session.flush()
             return _vehicle_info(vehicle)
@@ -299,6 +312,20 @@ class VehicleService(VehicleCatalog):
                 _defined_start_tokens(session),
             ),
         }
+
+    @staticmethod
+    def _favorite_for(data: VehicleInput) -> bool:
+        """A favorite needs an owner. Without a driver the flag is stored as false."""
+        return data.is_favorite and data.driver_id is not None
+
+    @staticmethod
+    def _claim_favorite(session: Session, driver_id: int, own_id: int | None) -> None:
+        """Leave this driver with a single favorite by clearing the flag on the other cars."""
+        query = select(Vehicle).where(Vehicle.driver_id == driver_id, Vehicle.is_favorite.is_(True))
+        if own_id is not None:
+            query = query.where(Vehicle.id != own_id)
+        for other in session.scalars(query):
+            other.is_favorite = False
 
     @staticmethod
     def _load(session: Session, vehicle_id: int) -> Vehicle:

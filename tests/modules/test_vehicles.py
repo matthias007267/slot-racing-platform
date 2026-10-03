@@ -107,6 +107,42 @@ def test_deactivate_and_delete_vehicle(env: Env) -> None:
     assert env.vehicles.get_vehicle(vehicle.id) is None
 
 
+def test_a_driver_keeps_one_favorite_and_loses_it_without_an_owner(env: Env) -> None:
+    anna = env.driver("Anna")
+    ben = env.driver("Ben")
+    porsche = env.vehicles.create_vehicle(
+        VehicleInput(name="Porsche", model="911", driver_id=anna.id, is_favorite=True)
+    )
+    assert porsche.is_favorite
+    alfa = env.vehicles.create_vehicle(
+        VehicleInput(name="Alfa", model="Giulia", driver_id=anna.id, is_favorite=True)
+    )
+    assert alfa.is_favorite
+    stored_porsche = env.vehicles.get_vehicle(porsche.id)
+    assert stored_porsche is not None and not stored_porsche.is_favorite
+
+    ferrari = env.vehicles.create_vehicle(
+        VehicleInput(name="Ferrari", model="911", driver_id=ben.id, is_favorite=True)
+    )
+    assert ferrari.is_favorite
+    still_alfa = env.vehicles.get_vehicle(alfa.id)
+    assert still_alfa is not None and still_alfa.is_favorite
+
+    loose = env.vehicles.create_vehicle(VehicleInput(name="Ersatz", model="GT", is_favorite=True))
+    assert loose.driver_id is None and not loose.is_favorite
+
+    cleared = env.vehicles.assign_driver(alfa.id, None)
+    assert cleared.driver_id is None and not cleared.is_favorite
+
+    moved = env.vehicles.update_vehicle(
+        porsche.id,
+        VehicleInput(name="Porsche", model="911", driver_id=ben.id, is_favorite=True),
+    )
+    assert moved.driver_id == ben.id and moved.is_favorite
+    stored_ferrari = env.vehicles.get_vehicle(ferrari.id)
+    assert stored_ferrari is not None and not stored_ferrari.is_favorite
+
+
 def test_vehicle_in_a_race_cannot_be_deleted(env: Env) -> None:
     driver_id, vehicle_id = env.pair(1)
     race = env.races.create_race("R", env.track_id(), 3)

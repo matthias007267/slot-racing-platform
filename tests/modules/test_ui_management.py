@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
-from PySide6.QtWidgets import QComboBox, QDialog, QPushButton, QSpinBox, QTableWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QPushButton, QSpinBox, QTableWidget
 from pytestqt.qtbot import QtBot
 from sqlalchemy.exc import OperationalError
 
@@ -284,13 +284,16 @@ def test_start_number_picker_offers_only_defined_numbers(qtbot: QtBot, env: Env)
     }
 
 
-def test_wizard_lists_only_the_drivers_own_and_unowned_vehicles(qtbot: QtBot, env: Env) -> None:
+def test_wizard_offers_every_vehicle_and_suggests_the_favorite(qtbot: QtBot, env: Env) -> None:
     track = env.track("Heimbahn", lanes=2)
     anna = env.driver("Anna")
     ben = env.driver("Ben")
     porsche = env.vehicle("Porsche", driver_id=anna.id)
     spare = env.vehicle("Ersatz")
     ferrari = env.vehicle("Ferrari", driver_id=ben.id)
+    alfa = env.vehicles.create_vehicle(
+        VehicleInput(name="Alfa", model="Giulia", driver_id=anna.id, is_favorite=True)
+    )
     _, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)
     page.new_race()
@@ -301,6 +304,7 @@ def test_wizard_lists_only_the_drivers_own_and_unowned_vehicles(qtbot: QtBot, en
     assert wizard.go_next()
     assert wizard.go_next()
     assert wizard.step == PARTICIPANTS
+    every = {porsche.id, spare.id, ferrari.id, alfa.id}
 
     def offered(driver_id: int) -> set[object]:
         wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(driver_id))
@@ -308,10 +312,45 @@ def test_wizard_lists_only_the_drivers_own_and_unowned_vehicles(qtbot: QtBot, en
             wizard.vehicle_combo.itemData(index) for index in range(wizard.vehicle_combo.count())
         }
 
-    assert offered(anna.id) == {porsche.id, spare.id}
-    assert wizard.vehicle_combo.currentData() == porsche.id
-    assert offered(ben.id) == {ferrari.id, spare.id}
+    assert offered(anna.id) == every
+    assert wizard.vehicle_combo.currentData() == alfa.id
+    wizard.vehicle_combo.setCurrentIndex(wizard.vehicle_combo.findData(ferrari.id))
+    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
+    assert wizard.add_participant()
+    assert wizard.race is not None
+    stored = env.races.require_race(wizard.race.id)
+    assert stored.participants[0].driver_id == anna.id
+    assert stored.participants[0].vehicle_id == ferrari.id
+
+    assert offered(ben.id) == every
     assert wizard.vehicle_combo.currentData() == ferrari.id
+
+
+def test_vehicle_dialog_saves_a_favorite_only_with_a_driver(qtbot: QtBot, env: Env) -> None:
+    driver = env.driver("Anna")
+    _, page = open_page(qtbot, env, "vehicles")
+    assert isinstance(page, VehiclesPage)
+
+    def fill(dialog: QDialog) -> None:
+        assert isinstance(dialog, VehicleDialog)
+        favorite = dialog.findChild(QCheckBox, "vehicle-favorite")
+        assert favorite is not None
+        assert not favorite.isEnabled()
+        dialog.name_edit.setText("Rennwagen")
+        dialog.model_edit.setText("Porsche 911")
+        dialog.driver_combo.setCurrentIndex(dialog.driver_combo.findData(driver.id))
+        assert favorite.isEnabled()
+        favorite.setChecked(True)
+        dialog.driver_combo.setCurrentIndex(0)
+        assert not favorite.isChecked()
+        dialog.driver_combo.setCurrentIndex(dialog.driver_combo.findData(driver.id))
+        favorite.setChecked(True)
+
+    page.dialog_runner = runner_for(fill)
+    page.add()
+    stored = env.vehicles.list_vehicles()[0]
+    assert stored.is_favorite and stored.driver_id == driver.id
+    assert cells(page.table, 0)[5] == "Ja"
 
 
 def test_vehicle_dialog_requires_a_model(qtbot: QtBot, env: Env) -> None:

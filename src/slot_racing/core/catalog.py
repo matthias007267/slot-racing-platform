@@ -41,6 +41,7 @@ class VehicleInfo:
     start_number: int | str | None
     is_active: bool
     driver_id: DriverId | None
+    is_favorite: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
