@@ -183,7 +183,7 @@ def _fill_narrow_ranking(ranking: LiveRankingWidget) -> list[str]:
             (
                 str(index + 1),
                 name,
-                "Porsche (911)",
+                "Porsche 911",
                 "7",
                 "1",
                 "0",
@@ -250,7 +250,7 @@ def test_short_highlight_keeps_the_driver_name(qtbot: QtBot) -> None:
     widget.show_driver(
         position="P1",
         name="Max Müller",
-        vehicle="Porsche (911)",
+        vehicle="Porsche 911",
         lap="1/8",
         last=EMPTY_DISPLAY,
         best=EMPTY_DISPLAY,

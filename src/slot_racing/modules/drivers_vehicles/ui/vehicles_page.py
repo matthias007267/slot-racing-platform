@@ -16,7 +16,6 @@ from slot_racing.core.catalog import VehicleInfo
 from slot_racing.core.domain import DriverId, VehicleId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.drivers_vehicles.service import DriverService, VehicleInput, VehicleService
-from slot_racing.modules.drivers_vehicles.ui.start_number_field import StartNumberPicker
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
 from slot_racing.uikit.theme import set_role
 
@@ -36,8 +35,6 @@ class VehicleDialog(FormDialog):
         )
         self._vehicles = vehicles
         self._vehicle = vehicle
-        self.name_edit = QLineEdit(vehicle.name if vehicle else "")
-        self.name_edit.setObjectName("vehicle-name")
         self.model_edit = QLineEdit(vehicle.model or "" if vehicle else "")
         self.model_edit.setObjectName("vehicle-model")
         self.manufacturer_edit = QLineEdit(vehicle.manufacturer or "" if vehicle else "")
@@ -47,13 +44,6 @@ class VehicleDialog(FormDialog):
         self.notes_edit = QPlainTextEdit(vehicle.notes or "" if vehicle else "")
         self.notes_edit.setObjectName("vehicle-notes")
         self.notes_edit.setFixedHeight(70)
-        current_number = None if vehicle is None else vehicle.start_number
-        self.start_number_edit = StartNumberPicker(
-            translator,
-            drivers.defined_start_numbers(),
-            current_number,
-            "vehicle-start-number",
-        )
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("vehicle-driver")
         self.driver_combo.addItem(tr("common.none"), None)
@@ -68,12 +58,10 @@ class VehicleDialog(FormDialog):
         self._sync_favorite()
         if vehicle is not None and vehicle.is_favorite and vehicle.driver_id is not None:
             self.favorite_check.setChecked(True)
-        self.form.addRow(tr("vehicle.field.name"), self.name_edit)
-        self.form.addRow(tr("vehicle.field.model"), self.model_edit)
         self.form.addRow(tr("vehicle.field.manufacturer"), self.manufacturer_edit)
+        self.form.addRow(tr("vehicle.field.model"), self.model_edit)
         self.form.addRow(tr("vehicle.field.scale"), self.scale_edit)
         self.form.addRow(tr("vehicle.field.notes"), self.notes_edit)
-        self.form.addRow(tr("vehicle.field.start_number"), self.start_number_edit)
         self.form.addRow(tr("vehicle.field.driver"), self.driver_combo)
         self.form.addRow(tr("vehicle.field.favorite"), self.favorite_check)
 
@@ -84,15 +72,27 @@ class VehicleDialog(FormDialog):
         if not has_driver:
             self.favorite_check.setChecked(False)
 
+    def _stored_name(self) -> str:
+        """Manufacturer and model form the name. An existing name stays without a manufacturer."""
+        manufacturer = self.manufacturer_edit.text().strip()
+        model = self.model_edit.text().strip()
+        if manufacturer and model:
+            composed = f"{manufacturer} {model}"
+            return composed if len(composed) <= 100 else model
+        if self._vehicle is not None and not manufacturer:
+            return self._vehicle.name
+        return model or manufacturer
+
     def submit(self) -> None:
         driver_id = self.driver_combo.currentData()
+        start_number = None if self._vehicle is None else self._vehicle.start_number
         data = VehicleInput(
-            name=self.name_edit.text(),
+            name=self._stored_name(),
             model=self.model_edit.text(),
             manufacturer=self.manufacturer_edit.text(),
             scale=self.scale_edit.text(),
             notes=self.notes_edit.toPlainText(),
-            start_number=self.start_number_edit.value(),
+            start_number=start_number,
             driver_id=None if driver_id is None else DriverId(driver_id),
             is_favorite=self.favorite_check.isChecked(),
         )
@@ -113,7 +113,6 @@ class VehiclesPage(EntityPage):
                 "vehicle.field.name",
                 "vehicle.field.model",
                 "vehicle.field.manufacturer",
-                "vehicle.field.start_number",
                 "vehicle.field.driver",
                 "vehicle.field.favorite",
                 "common.active",
@@ -145,10 +144,9 @@ class VehiclesPage(EntityPage):
             EntityRow(
                 id=vehicle.id,
                 cells=(
-                    vehicle.name,
+                    vehicle.label,
                     vehicle.model or "",
                     vehicle.manufacturer or "",
-                    "" if vehicle.start_number is None else str(vehicle.start_number),
                     "" if vehicle.driver_id is None else drivers.get(vehicle.driver_id, ""),
                     tr("common.yes" if vehicle.is_favorite else "common.no"),
                     tr("common.yes" if vehicle.is_active else "common.no"),

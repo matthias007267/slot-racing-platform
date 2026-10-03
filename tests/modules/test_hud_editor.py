@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDoubleSpinBox,
+    QPushButton,
+    QStyle,
+    QStyleOptionButton,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from slot_racing.app.main_window import MainWindow
@@ -80,17 +90,17 @@ def test_dragging_moves_and_the_corner_resizes(qtbot: QtBot) -> None:
     _mouse(box, QEvent.Type.MouseButtonRelease, (20, 16), (180, 145))
     moved = editor.configuration().widget(RACE_HEADER)
     assert moved is not None
-    assert moved.x == pytest.approx(0.125)
-    assert moved.y == pytest.approx(1 / 9)
-    assert moved.width == pytest.approx(0.625)
+    assert moved.x == pytest.approx(15 / 128)
+    assert moved.y == pytest.approx(9 / 72)
+    assert moved.width == pytest.approx(79 / 128)
 
     _mouse(box, QEvent.Type.MouseButtonPress, (box.width() - 2, box.height() - 2), (300, 200))
     _mouse(box, QEvent.Type.MouseMove, (box.width() - 2, box.height() - 2), (380, 245))
     _mouse(box, QEvent.Type.MouseButtonRelease, (box.width() - 2, box.height() - 2), (380, 245))
     resized = editor.configuration().widget(RACE_HEADER)
     assert resized is not None
-    assert resized.width == pytest.approx(0.75)
-    assert resized.height == pytest.approx(2 / 9)
+    assert resized.width == pytest.approx(92 / 128)
+    assert resized.height == pytest.approx(17 / 72)
     assert resized.x == moved.x
 
 
@@ -173,7 +183,7 @@ def test_fullscreen_preview_edits_at_screen_size_and_closes(qtbot: QtBot) -> Non
     window = editor.open_fullscreen_preview()
     qtbot.addWidget(window)
     assert window.objectName() == "hud-fullscreen-preview"
-    assert 0.8 < window.windowOpacity() < 1.0
+    assert window.windowOpacity() == 1.0
     assert window.preview.grid.isVisible() or window.preview.grid.objectName() == "hud-grid"
     window.resize(1600, 900)
     window.preview.relayout()
@@ -192,6 +202,44 @@ def test_fullscreen_preview_edits_at_screen_size_and_closes(qtbot: QtBot) -> Non
     window.close_button.click()
     assert editor.fullscreen is None
     assert QApplication.instance() is not None
+
+
+def test_editing_actions_live_in_the_fullscreen_preview(qtbot: QtBot) -> None:
+    editor = _editor(qtbot)
+    assert not editor.preview.isVisible()
+    assert editor.findChild(QPushButton, "hud-standard") is None
+    assert editor.findChild(QPushButton, "hud-open-preview") is not None
+    window = editor.open_fullscreen_preview()
+    qtbot.addWidget(window)
+    window.resize(1600, 900)
+    qtbot.waitUntil(lambda: window.standard_button.width() >= 36)
+    names = (
+        "hud-standard",
+        "hud-save",
+        "hud-revert",
+        "hud-forward",
+        "hud-backward",
+        "hud-preview-close",
+    )
+    buttons = []
+    for name in names:
+        button = window.findChild(QPushButton, name)
+        assert button is not None and button.isVisible()
+        assert button.property("role") != "ghost"
+        option = QStyleOptionButton()
+        button.initStyleOption(option)
+        room = button.style().subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, option, button
+        )
+        assert room.width() >= button.fontMetrics().horizontalAdvance(button.text())
+        assert button.height() >= 36
+        buttons.append(button)
+    for left, right in itertools.pairwise(buttons):
+        assert left.geometry().right() < right.geometry().left()
+    editor.set_widget_geometry(RACE_CLOCK, 0.3, 0.3, 0.2, 0.2)
+    window.standard_button.click()
+    restored = editor.configuration().widget(RACE_CLOCK)
+    assert restored == default_hud_configuration().widget(RACE_CLOCK)
 
 
 def test_settings_page_hosts_the_hud_editor(qtbot: QtBot, env: Env) -> None:

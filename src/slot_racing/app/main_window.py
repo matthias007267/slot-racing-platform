@@ -30,9 +30,19 @@ from slot_racing.uikit.theme import SPACE, apply_theme, set_role
 
 logger = logging.getLogger(__name__)
 
+_MIN_WINDOW_WIDTH = 640
+_MIN_WINDOW_HEIGHT = 400
+_DEFAULT_WINDOW_WIDTH = 1100
+_DEFAULT_WINDOW_HEIGHT = 700
+_MAX_WINDOW_EXTENT = 10000
+
 # Room past the measured text so the last letter is not flush with the clip edge.
 _DIALOG_TEXT_SPARE = 12
 _BUTTON_CHROME = 14 * 2 + 2
+
+
+def _valid_position(value: int) -> bool:
+    return abs(value) <= _MAX_WINDOW_EXTENT
 
 
 def _keep_dialog_text_visible(box: QMessageBox) -> None:
@@ -79,7 +89,8 @@ class MainWindow(QMainWindow):
         self._runtime = runtime
         self._tr = runtime.translator.translate
         self.setWindowTitle(self._tr("app.title"))
-        self.resize(1100, 700)
+        self.setMinimumSize(_MIN_WINDOW_WIDTH, _MIN_WINDOW_HEIGHT)
+        self._restore_window_geometry()
 
         self._sidebar = Sidebar(self._tr("shell.brand"))
         self._quit_button = QPushButton(self._tr("nav.quit"))
@@ -164,6 +175,13 @@ class MainWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._remember_window_geometry()
+        path = self._runtime.config_path
+        if path is not None:
+            try:
+                save_config(self._runtime.config, path)
+            except OSError:
+                logger.exception("Could not store the window size")
         self._remove_listener()
         for subscription in self._subscriptions:
             subscription.cancel()
@@ -197,8 +215,43 @@ class MainWindow(QMainWindow):
         _keep_dialog_text_visible(box)
         box.exec()
 
+    def _restore_window_geometry(self) -> None:
+        config = self._runtime.config
+        width = config.window_width
+        height = config.window_height
+        if (
+            isinstance(width, int)
+            and isinstance(height, int)
+            and _MIN_WINDOW_WIDTH <= width <= _MAX_WINDOW_EXTENT
+            and _MIN_WINDOW_HEIGHT <= height <= _MAX_WINDOW_EXTENT
+        ):
+            self.resize(width, height)
+        else:
+            self.resize(_DEFAULT_WINDOW_WIDTH, _DEFAULT_WINDOW_HEIGHT)
+        x = config.window_x
+        y = config.window_y
+        if isinstance(x, int) and isinstance(y, int) and _valid_position(x) and _valid_position(y):
+            self.move(x, y)
+
+    def _remember_window_geometry(self) -> None:
+        if self.isMinimized():
+            return
+        width = self.width()
+        height = self.height()
+        if not (
+            _MIN_WINDOW_WIDTH <= width <= _MAX_WINDOW_EXTENT
+            and _MIN_WINDOW_HEIGHT <= height <= _MAX_WINDOW_EXTENT
+        ):
+            return
+        config = self._runtime.config
+        config.window_width = width
+        config.window_height = height
+        config.window_x = self.x()
+        config.window_y = self.y()
+
     def _save_persistent_state(self) -> None:
         """Flush open editors and the application config. Unfinished races are left as they are."""
+        self._remember_window_geometry()
         for widget in self.findChildren(QWidget):
             save = getattr(widget, "save_persistent", None)
             if callable(save):

@@ -47,7 +47,7 @@ def test_add_participant_makes_race_ready(env: Env) -> None:
     assert (participant.lane, participant.driver_label, participant.vehicle_label) == (
         2,
         "Driver 1",
-        "Car 1 (911)",
+        "Car 1 911",
     )
     loaded = env.races.require_race(race.id)
     assert loaded.status is RaceStatus.READY

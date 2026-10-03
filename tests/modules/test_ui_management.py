@@ -7,7 +7,16 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QPushButton, QSpinBox, QTableWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 from sqlalchemy.exc import OperationalError
 
@@ -181,17 +190,19 @@ def test_vehicle_page_assigns_and_unassigns_a_driver(qtbot: QtBot, env: Env) -> 
 
     def fill(dialog: QDialog) -> None:
         assert isinstance(dialog, VehicleDialog)
-        dialog.name_edit.setText("Rennwagen")
-        dialog.model_edit.setText("Porsche 911")
+        assert dialog.findChild(QLineEdit, "vehicle-name") is None
+        assert dialog.findChild(QWidget, "vehicle-start-number") is None
+        dialog.manufacturer_edit.setText("Porsche")
+        dialog.model_edit.setText("911")
         dialog.driver_combo.setCurrentIndex(dialog.driver_combo.findData(driver.id))
 
     page.dialog_runner = runner_for(fill)
     page.add()
-    assert cells(page.table, 0)[:5] == ["Rennwagen", "Porsche 911", "", "", "Anna"]
+    assert cells(page.table, 0)[:4] == ["Porsche 911", "911", "Porsche", "Anna"]
 
     page.select_id(env.vehicles.list_vehicles()[0].id)
     page.unassign_selected()
-    assert cells(page.table, 0)[4] == ""
+    assert cells(page.table, 0)[3] == ""
     assert env.vehicles.list_vehicles()[0].driver_id is None
 
 
@@ -201,7 +212,6 @@ def test_vehicle_dialog_saves_and_clears_scale_and_notes(qtbot: QtBot, env: Env)
 
     def fill(dialog: QDialog) -> None:
         assert isinstance(dialog, VehicleDialog)
-        dialog.name_edit.setText("Rennwagen")
         dialog.model_edit.setText("911")
         dialog.scale_edit.setText("1:32")
         dialog.notes_edit.setPlainText("neue Reifen")
@@ -240,11 +250,11 @@ def test_driver_page_shows_the_selected_drivers_vehicles(qtbot: QtBot, env: Env)
     assert page.vehicles_empty.text() == "Wählen Sie einen Fahrer aus, um seine Fahrzeuge zu sehen."
 
     page.select_id(anna.id)
-    assert cells(page.vehicles_table, 0) == ["Porsche", "911"]
+    assert cells(page.vehicles_table, 0) == ["Porsche 911", "911"]
     assert page.vehicles_empty.text() == ""
 
     page.select_id(ben.id)
-    assert cells(page.vehicles_table, 0) == ["Ferrari", "911"]
+    assert cells(page.vehicles_table, 0) == ["Ferrari 911", "911"]
 
     page.select_id(solo.id)
     assert page.vehicles_table.rowCount() == 0
@@ -336,8 +346,8 @@ def test_vehicle_dialog_saves_a_favorite_only_with_a_driver(qtbot: QtBot, env: E
         favorite = dialog.findChild(QCheckBox, "vehicle-favorite")
         assert favorite is not None
         assert not favorite.isEnabled()
-        dialog.name_edit.setText("Rennwagen")
-        dialog.model_edit.setText("Porsche 911")
+        dialog.manufacturer_edit.setText("Porsche")
+        dialog.model_edit.setText("911")
         dialog.driver_combo.setCurrentIndex(dialog.driver_combo.findData(driver.id))
         assert favorite.isEnabled()
         favorite.setChecked(True)
@@ -350,13 +360,38 @@ def test_vehicle_dialog_saves_a_favorite_only_with_a_driver(qtbot: QtBot, env: E
     page.add()
     stored = env.vehicles.list_vehicles()[0]
     assert stored.is_favorite and stored.driver_id == driver.id
-    assert cells(page.table, 0)[5] == "Ja"
+    assert cells(page.table, 0)[4] == "Ja"
+
+
+def test_editing_a_vehicle_keeps_its_stored_start_number(qtbot: QtBot, env: Env) -> None:
+    created = env.vehicles.create_vehicle(
+        VehicleInput(name="Porsche", model="911", manufacturer="Porsche", start_number=7)
+    )
+    _, page = open_page(qtbot, env, "vehicles")
+    assert isinstance(page, VehiclesPage)
+    page.refresh()
+    page.select_id(created.id)
+
+    def edit(dialog: QDialog) -> None:
+        assert isinstance(dialog, VehicleDialog)
+        assert dialog.findChild(QWidget, "vehicle-start-number") is None
+        dialog.notes_edit.setPlainText("behalten")
+
+    page.dialog_runner = runner_for(edit)
+    page.edit_selected()
+    stored = env.vehicles.get_vehicle(created.id)
+    assert stored is not None
+    assert stored.start_number == 7
+    assert stored.notes == "behalten"
+    assert stored.label == "Porsche 911"
 
 
 def test_vehicle_dialog_requires_a_model(qtbot: QtBot, env: Env) -> None:
     _, page = open_page(qtbot, env, "vehicles")
     assert isinstance(page, VehiclesPage)
-    page.dialog_runner = runner_for(lambda d: cast(VehicleDialog, d).name_edit.setText("Auto"))
+    page.dialog_runner = runner_for(
+        lambda d: cast(VehicleDialog, d).manufacturer_edit.setText("Porsche")
+    )
     page.add()
     assert env.vehicles.list_vehicles() == []
 
@@ -428,7 +463,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert wizard.step == OVERVIEW
     overview = wizard.overview_label.text()
     assert "Finale" in overview and "Heimbahn" in overview
-    assert "Spur 1: Anna auf Porsche" in overview
+    assert "Spur 1: Anna auf Porsche 911" in overview
     assert wizard.go_next()
     assert wizard.step == START
     assert not wizard.next_button.isEnabled()
@@ -443,7 +478,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert live.laps_label.text().endswith("2")
     assert live.table.rowCount() == 2
     assert column_text(live.table, 0, "Fahrer") == "Anna"
-    assert column_text(live.table, 0, "Fahrzeug") == "Porsche (911)"
+    assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
 
     for _ in range(60):
         env.clock.advance(100_000_000)
@@ -469,7 +504,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert results.table.rowCount() == 2
     assert column_text(results.table, 0, "Platz") == "1"
     assert column_text(results.table, 0, "Fahrer") == "Anna"
-    assert column_text(results.table, 0, "Fahrzeug") == "Porsche (911)"
+    assert column_text(results.table, 0, "Fahrzeug") == "Porsche 911"
     assert column_text(results.table, 0, "Spur") == "1"
     assert column_text(results.table, 0, "Runden") == "2"
     assert column_text(results.table, 0, "Status") == "Fertig"

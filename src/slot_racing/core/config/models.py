@@ -22,6 +22,11 @@ class AppConfig(BaseModel):
     """Provider id preselected for new races. ``None`` uses the first available provider."""
     plugin_overrides: dict[str, bool] = Field(default_factory=dict)
     """Explicit user choice per plugin. Plugins without an entry use their manifest default."""
+    window_x: int | None = None
+    window_y: int | None = None
+    window_width: int | None = None
+    window_height: int | None = None
+    """Last window geometry. Missing values keep the built-in default size and position."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()
