@@ -19,6 +19,7 @@ from slot_racing.core.domain import TrackId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.tracks.service import MAX_LANES, MIN_LANES, TrackInput, TrackService
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
+from slot_racing.uikit.theme import set_role
 
 
 class TrackDialog(FormDialog):
@@ -47,6 +48,7 @@ class TrackDialog(FormDialog):
         self.image_edit = QLineEdit(track.image_path or "" if track else "")
         self.image_edit.setObjectName("track-image")
         browse = QPushButton(tr("track.browse"))
+        set_role(browse, "ghost")
         browse.clicked.connect(self._browse)
         image_row = QHBoxLayout()
         image_row.addWidget(self.image_edit, 1)
@@ -98,6 +100,7 @@ class TracksPage(EntityPage):
         self._service = service
         self.timing_button = QPushButton(translator.translate("track.timing"))
         self.timing_button.setObjectName("tracks-timing")
+        set_role(self.timing_button, "secondary")
         self.buttons.insertWidget(self.buttons.count() - 1, self.timing_button)
         self.timing_button.clicked.connect(lambda: self.open_timing_selected())
         self.table.itemSelectionChanged.connect(self._update_timing_button)

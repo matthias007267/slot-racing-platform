@@ -1,7 +1,11 @@
 """Plugin system: manifests, lifecycle, services and UI contributions."""
 
 from slot_racing.core.plugin.context import PluginContext, ScopedEventBus
-from slot_racing.core.plugin.contributions import ContributionRegistry, NavigationItem
+from slot_racing.core.plugin.contributions import (
+    ContributionRegistry,
+    NavigationItem,
+    SettingsSection,
+)
 from slot_racing.core.plugin.discovery import (
     PLUGIN_ENTRY_POINT_GROUP,
     DiscoveryResult,
@@ -34,5 +38,6 @@ __all__ = [
     "ScopedEventBus",
     "ServiceNotFoundError",
     "ServiceRegistry",
+    "SettingsSection",
     "discover_plugins",
 ]

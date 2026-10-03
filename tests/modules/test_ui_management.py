@@ -38,6 +38,15 @@ def cells(table: QTableWidget, row: int) -> list[str]:
     ]
 
 
+def column_text(table: QTableWidget, row: int, header: str) -> str:
+    for column in range(table.columnCount()):
+        header_item = table.horizontalHeaderItem(column)
+        if header_item is not None and header_item.text() == header:
+            item = table.item(row, column)
+            return "" if item is None else item.text()
+    raise AssertionError(f"missing column {header}")
+
+
 def runner_for(fill: Callable[[QDialog], None]) -> Callable[[QDialog], int]:
     def run(dialog: QDialog) -> int:
         fill(dialog)
@@ -372,16 +381,18 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert live.status_label.text().endswith("Läuft")
     assert live.name_label.text() == "Finale"
     assert live.track_label.text().endswith("Heimbahn")
+    assert live.provider_label.text().endswith("Simulation")
+    assert live.laps_label.text().endswith("2")
     assert live.table.rowCount() == 2
-    assert cells(live.table, 0)[2:4] == ["Anna", "Porsche (911)"]
+    assert column_text(live.table, 0, "Fahrer") == "Anna"
+    assert column_text(live.table, 0, "Fahrzeug") == "Porsche (911)"
 
     for _ in range(60):
         env.clock.advance(100_000_000)
         live.refresh()
-    first = cells(live.table, 0)
-    assert first[4] == "2/2"  # current lap, still lap 2 after 6 seconds
-    assert first[7] == "1"
-    assert first[5] != "-"
+    assert column_text(live.table, 0, "Aktuelle Runde") == "2/2"
+    assert column_text(live.table, 0, "Runden") == "1"
+    assert column_text(live.table, 0, "Letzte Runde") != "-"
 
     live.confirm = lambda _text: False
     live.stop_race()
@@ -398,9 +409,14 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert isinstance(page.current_view(), ResultsView)
     results = page.results
     assert results.table.rowCount() == 2
-    first_row = cells(results.table, 0)
-    assert first_row[:5] == ["1", "Anna", "Porsche (911)", "1", "2"]
-    assert all(value != "-" for value in first_row[5:])
+    assert column_text(results.table, 0, "Platz") == "1"
+    assert column_text(results.table, 0, "Fahrer") == "Anna"
+    assert column_text(results.table, 0, "Fahrzeug") == "Porsche (911)"
+    assert column_text(results.table, 0, "Spur") == "1"
+    assert column_text(results.table, 0, "Runden") == "2"
+    assert column_text(results.table, 0, "Status") == "Fertig"
+    for header in ("Gesamtzeit", "Beste Runde", "Letzte Runde", "Durchschnitt"):
+        assert column_text(results.table, 0, header) != "-"
     assert results.laps_table.rowCount() == 4
 
     results.back_button.click()

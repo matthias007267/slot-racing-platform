@@ -17,22 +17,27 @@ they communicate through standardized events and core interfaces.
 ## Status
 
 Implemented: core (events, plugin system, config, domain types, storage), timing abstraction with
-a simulator, a hardware independent race engine, database with migrations and a PySide6 shell with
-dynamic navigation. Usable in the application:
+a simulator, a hardware independent race engine, database with migrations and a dark PySide6
+shell with a sidebar and dynamic navigation. Usable in the application:
 
 - **Fahrer, Fahrzeuge, Strecken:** list, create, edit, deactivate and delete with validation
   (unique driver start numbers, lane count, driver assignment for vehicles).
 - **Rennen:** six step setup (name, track, mode with laps, participants with driver, vehicle and
-  lane, overview, start), live view with positions and lap times, and stored results that can be
-  reopened later. Timing comes from a selectable timing provider; the simulation is the only one so far.
-  New providers (camera, Raspberry Pi, ...) register themselves and then appear in the selection.
+  lane, overview, start), a live view of the engine standings (position, laps, lap times, the
+  selected driver) with pause, resume and abort, and stored results that can be reopened later.
+  The live view can return to the race list without stopping the race. Timing comes from a
+  selectable timing provider. The simulation is built in.
+  Camera timing is an optional module, off by default, and a camera race uses the saved camera
+  configuration. Further providers register themselves and then appear in the selection.
 - **Timing-Konfiguration (Strecken):** each track can have a timing layout of logical positions
   (start/finish plus any number of sectors) with a sensor assigned to every position. Editor,
-  six step wizard and a test mode with simulated events; the simulation and later timing
-  providers use the stored layout. Tracks without a configuration use a default layout.
+  six step wizard and a test mode with simulated events; the simulation and the camera provider
+  use the stored layout. Tracks without a configuration use a default layout.
+- **Kamera-Timing:** one global camera and its detection zones, edited on the live picture.
+  Saving that document is what the next camera race uses.
 
-**Not** implemented yet: camera detection, Raspberry Pi/GPIO, manufacturer-specific hardware, track planner,
-audio/animations, statistics, time limited races.
+**Not** implemented yet: automatic vehicle detection, Raspberry Pi/GPIO, manufacturer-specific
+hardware, track planner, audio/animations, statistics, time limited races.
 
 See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.md).
 
@@ -98,7 +103,40 @@ uv run pytest
 ```
 
 Tests need no hardware. Qt tests run headless (`QT_QPA_PLATFORM=offscreen` is set in
-`tests/conftest.py`).
+`tests/conftest.py`). The camera hardware test is not part of this run.
+
+## Kamera-Hardware-Test
+
+`uv run pytest` und die CI brauchen keine Kamera und führen den Hardware-Test nicht aus.
+Ohne Kamera ist auch der optionale Lauf kein Fehler: der Test wird übersprungen.
+
+```bash
+uv run pytest -m camera_hardware
+```
+
+Manuell, mit einem Fahrzeug auf der Bahn:
+
+1. Kamera anschließen
+2. Kamera-Timing öffnen
+3. Kamera auswählen
+4. Livebild prüfen
+5. Detection-Zonen konfigurieren
+6. Konfiguration speichern
+7. Rennen starten
+8. Fahrzeug durch die Zonen fahren
+9. Rundenzeiten prüfen
+
+Die gespeicherte Auflösung ist ein Wunsch an die Kamera. Solange nichts anderes gespeichert
+ist, gilt 640×480 bei 30 Bildern pro Sekunde. Der Treiber darf eine andere Bildgröße liefern.
+Die Zonen sind Anteile dieses Bildes und müssen im Kamerabild liegen. Ein Fahrzeug wird nur
+erkannt, wenn es durch die gezeichnete Zone fährt.
+
+Stelle die Kamera so auf, dass jede befahrene Spur ihre Zone im Bild durchquert, möglichst
+mit wenig Gegenlicht und ohne dass die Zone von der Bahnkante oder einem Schatten dauerhaft
+gefüllt ist. Es ist kein bestimmtes Kameramodell erforderlich.
+
+Der automatische Hardware-Test vergleicht das Livebild mit einem schwarzen Referenzbild.
+Die Kamera muss dafür eine beleuchtete Szene sehen, sonst entsteht keine Durchfahrt.
 
 ## Development commands
 
@@ -106,6 +144,7 @@ Tests need no hardware. Qt tests run headless (`QT_QPA_PLATFORM=offscreen` is se
 |---|---|
 | Install / update dependencies | `uv sync` |
 | Tests | `uv run pytest` |
+| Camera hardware test (optional, not in CI) | `uv run pytest -m camera_hardware` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
 | Type check | `uv run mypy src tests` |
@@ -128,7 +167,7 @@ src/slot_racing/uikit/     small Qt helpers shared by module pages (depends on t
 src/slot_racing/modules/   feature modules (plugins): drivers_vehicles, tracks, races, timing,
                        timing_camera, timing_sensor, track_planner, audio_animation, statistics
 pi_agent/              future Raspberry Pi agent (placeholder)
-tests/                 unit and integration tests, no hardware needed
+tests/                 unit and integration tests; a real camera is only the opt-in hardware test
 docs/                  architecture documentation and ADRs
 ```
 

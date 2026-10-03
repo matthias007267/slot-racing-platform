@@ -57,7 +57,9 @@ def test_config_override_enables_or_disables_modules() -> None:
         current = states(runtime)
         assert current["timing_camera"] is PluginState.ENABLED
         assert current["statistics"] is PluginState.REGISTERED
-        assert "statistics" not in nav_ids(runtime)
+        ids = nav_ids(runtime)
+        assert "statistics" not in ids
+        assert ids.index("camera_setup") == ids.index("timing") + 1
     finally:
         runtime.shutdown()
 

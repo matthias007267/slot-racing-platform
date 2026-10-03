@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
-from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
+from slot_racing.core.catalog import DriverCatalog, RaceCatalog, TrackCatalog, VehicleCatalog
+from slot_racing.core.plugin import (
+    NavigationItem,
+    Plugin,
+    PluginContext,
+    PluginManifest,
+    SettingsSection,
+)
 from slot_racing.core.storage import Database
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.hud import HudConfigurationStore
+from slot_racing.modules.races.overview import RaceOverview
 from slot_racing.modules.races.recorder import RaceRecorder
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
@@ -59,15 +67,40 @@ class RacesPlugin(Plugin):
         self._controller = controller
         context.register_service(RaceService, service)
         context.register_service(RaceController, controller)
+        context.register_service(RaceCatalog, RaceOverview(service, controller))
+        hud_store = HudConfigurationStore(context.get_service(Database))
+        context.register_service(HudConfigurationStore, hud_store)
         translator = context.translator
 
         def races_page() -> QWidget:
             from slot_racing.modules.races.ui.races_page import RacesPage
 
-            return RacesPage(translator, service, controller, drivers, vehicles, tracks, providers)
+            return RacesPage(
+                translator,
+                service,
+                controller,
+                drivers,
+                vehicles,
+                tracks,
+                providers,
+                hud_store,
+            )
+
+        def hud_settings() -> QWidget:
+            from slot_racing.modules.races.ui.hud_editor import HudEditor
+
+            return HudEditor(translator, hud_store)
 
         context.add_navigation(
             NavigationItem(id="races", title_key="nav.races", order=40, page_factory=races_page)
+        )
+        context.add_settings_section(
+            SettingsSection(
+                id="race_hud",
+                title_key="hud.settings.title",
+                order=10,
+                factory=hud_settings,
+            )
         )
 
     def deactivate(self) -> None:

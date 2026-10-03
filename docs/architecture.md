@@ -33,7 +33,7 @@ or GPIO libraries (enforced by import-linter).
 | `plugin` | Manifest, lifecycle, services, UI contributions, discovery, manager |
 | `timing` | `TimingSource`, `TimingSourceFactory` (provider), `ProviderCapabilities`, `ProviderAvailability`, `ManuallyTriggerable`, `TimingSessionSpec`, `TimingSetupService` |
 | `timing_registry` | `TimingProviderRegistry`, `TimingProviderInfo` |
-| `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog` and their read-only info types |
+| `catalog` | `DriverCatalog`, `VehicleCatalog`, `TrackCatalog`, `RaceCatalog` and their read-only info types |
 | `errors` | `ValidationError(key, **params)` for translatable user errors; `TimingProviderError`, `ProviderUnavailable`, `ProviderConfigurationError` |
 | `domain` | IDs, `Participant`, `ParticipantResult`, `RaceStatus`, `TimingLayout`, `TimingPosition`, `TimingSensor`, `TimingSetup` |
 | `messages` | German texts for the core's `ValidationError` keys (registered by the runtime) |
@@ -50,17 +50,20 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 |---|---|
 | `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
 | `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
-| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
+| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live HUD, results) and the saved race-HUD layout. Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
-| `timing_camera`, `timing_sensor`, `audio_animation` | Placeholder plugin only (camera/sensor off by default) |
+| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Timing** page that edits that document on the live picture. Zones are not stored per track |
+| `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
 
 ### Shared UI helpers (`slot_racing.uikit`)
 
 Small Qt helpers used by the pages of several modules: `EntityPage` (list with add / edit /
-(de)activate / delete), `FormDialog`, table helpers, `describe_error` and the common German texts.
-It depends on the core only; the core, the engine and the timing modules never import it
-(import-linter).
+(de)activate / delete), `FormDialog`, table helpers, cards, `describe_error` and the common German
+texts. The dark racing theme (color and spacing tokens, Fusion palette, stylesheet) lives in
+`uikit.theme` and is applied once by the shell. It depends on the core only. The core, the engine,
+the timing module and the camera timing logic never import it (import-linter). The camera setup
+page (`timing_camera.ui`) may.
 
 ## Master data and race flow
 
@@ -71,7 +74,9 @@ drivers_vehicles ──Driver/VehicleCatalog──▶ races (RaceService: config
 RaceController.start_race ─ validates ─▶ TimingSourceFactory.create_source ─▶ TimingSource
 TimingSource ─SensorTriggered─▶ EventBus ─▶ RaceEngine ─Sector/Lap/Race events─▶ EventBus
 EventBus ─▶ RaceRecorder ─▶ RaceService (database)          EventBus ─▶ RaceRunner (live standings)
-LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceService.get_results()
+EventBus ─ race events ─▶ LiveRaceView (redraw only)
+LiveRaceView ─ read only ─▶ RaceRunner.snapshot()
+ResultsView ─ read only ─▶ RaceService.get_results()
 ```
 
 - `races` never imports `drivers_vehicles` or `tracks`; it looks them up through the catalog
@@ -86,13 +91,19 @@ LiveRaceView / ResultsView ─ read only ─▶ RaceRunner.snapshot() / RaceServ
   reported in the wizard before the start. `RaceController.start_race` allows one running race
   at a time, re-validates the race, asks `TimingProviderRegistry.create_source(race.timing_provider,
   spec)` for a fresh source, builds the `RaceEngine` and starts it. The simulation is host driven: the live view calls
-  `RaceRunner.tick()` from a Qt timer, which polls the source.
+  `RaceRunner.tick()` from a Qt timer, which polls the source. The same timer keeps the race clock
+  moving. It is not a status poll: `RaceStarted`, pause/resume, lap, sector, `RaceFinished` and
+  `WinnerDetermined` redraw the live view immediately from the current snapshot. Leaving the live
+  view does not stop that poll, so a host-driven provider keeps timing while the race list is open.
 - `RaceRecorder` subscribes to the race events and stores lifecycle changes, laps with their
   sector times and the final standings (position, laps, total and best lap time, finish status).
   Storage problems are logged and shown as a warning; they never interrupt the race.
-- The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), stored
-  results are ordered by the position the engine determined. Last lap and average lap are
-  computed by `RaceService`, not by the UI.
+- The UI only displays. Live standings come from the engine (`RaceRunner.snapshot()`), in the
+  engine's order. The snapshot also carries the timing-provider id. Each row carries the driver's
+  start number and the lap times the runner collected from `LapCompleted`. Stored results are
+  ordered by the position the engine determined. Last lap and average lap are computed by
+  `RaceService`, not by the UI. Participant status (racing, waiting, finished, retired) is a
+  label over `finished` and the race status, not a second ranking.
 - Races still marked running or paused at startup (crash) are set to `ABORTED`. Their standings
   are rebuilt from the laps already stored; the open lap is not reconstructed.
 - Errors shown to the user are `ValidationError`s with translation keys; unexpected errors are
@@ -287,7 +298,7 @@ Race ─ track ─▶ TimingSetupService.get_setup(track)   (fallback: default_t
   races keep working. A stored setup with an inactive sensor stops the race start with a clear
   message.
 
-### Attaching camera and Raspberry Pi later
+### Attaching a timing provider
 
 A camera, Raspberry Pi or manufacturer-specific module implements `TimingSource` and a `TimingSourceFactory`
 with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
@@ -295,11 +306,38 @@ with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
 "not connected" and the like; the race wizard then lists it as unavailable, and as soon as it is
 available it can be selected, without any change to the engine, race module or UI. It adds its
 label as translation `timing.provider.<provider_id>`. In `create_source(spec)` it reads
-`spec.setup`: each active `TimingSensor` has a `hardware_id` that tells the provider which pin,
-camera zone or device channel belongs to that sensor, and `position_id` is what it must put into
-`SensorTriggered`. Nothing in the engine, the track UI or the database schema changes. The
-timing test mode uses the first available provider with `supports_test_mode` (a source that
-implements `ManuallyTriggerable`); real hardware providers do not declare it.
+`spec.setup`: each active `TimingSensor` supplies the `sensor_id` and `position_id` placed on
+`SensorTriggered`. `hardware_id` stays available for providers that need an opaque device address
+(for example a GPIO pin). The timing test mode uses the first available provider with
+`supports_test_mode` (a source that implements `ManuallyTriggerable`); real hardware providers do
+not declare it.
+
+The camera provider does not take its detection zones from `hardware_id` or from the track.
+Device index, requested resolution, frame rate and zones are one global document in the `settings`
+table (`timing_camera.configuration`, ADR 0011). Zones are fractions of the frame and name a
+`position_id` plus a lane. The factory loads that document when it creates a source and keeps the
+snapshot on the source; the capture thread does not read it again. No zones means the camera
+cannot start a race. Another track does not replace the saved zones. The engine stays
+provider-neutral.
+
+The same document is edited on the **Kamera-Timing** page (`timing_camera.ui`, ADR 0012).
+The page is its own navigation entry. It is not part of the track page. Zones are drawn,
+moved and resized on a preview picture and saved again as fractions of the frame. The
+preview opens the capture device only; it does not run the detector and it does not publish
+`SensorTriggered`. A shared lease keeps that preview from opening the camera while a race
+already holds it. `position_id` is typed as an identifier and `lane` is a number, because
+there is no global list of positions: those still belong to each track's timing setup.
+"Speichern" writes the existing settings row. "Abbrechen" reloads it. Closing the page
+releases the device.
+
+A race does not keep a second copy of that document and does not fall back to the device
+defaults when a document is stored. `RaceController` asks the registry for the `camera`
+provider. `CameraTimingFactory` reads the saved document once while it builds the source.
+The capture thread stamps each frame with `perf_counter_ns()` immediately after `read`,
+and the provider copies that value onto `SensorTriggered`. The race engine never sees the
+camera. The same path is covered by an integration test with a scripted capture. Opening a
+real camera is a separate test, `pytest -m camera_hardware`, and the default `pytest` run
+does not include it.
 
 ### Timing configuration UI (`tracks` module)
 
@@ -354,7 +392,7 @@ keys, offers `session()` (commit/rollback), `migrate()` and `in_memory()` for te
 
 | Owner | Tables |
 |---|---|
-| core | `plugins`, `settings` |
+| core | `plugins`, `settings` (the camera module stores its global configuration here, not in a track table) |
 | `drivers_vehicles` | `drivers` (unique `start_number`), `vehicles` (optional `driver_id`) |
 | `tracks` | `tracks`, `track_layouts` |
 | `races` | `races` (incl. `timing_provider`), `race_participants`, `laps`, `sectors` |
@@ -375,14 +413,60 @@ data can be deactivated but not deleted.
 
 - `Runtime.create(config)` builds bus, services, contributions, translator and plugin manager,
   migrates the database and enables the configured plugins. It is Qt-free and testable.
-- `MainWindow` shows a navigation list and a page stack. The navigation consists of the built-in
-  *Dashboard* and *Einstellungen* plus the `NavigationItem`s of enabled plugins, ordered by
-  `order`. It is rebuilt when contributions change. Pages are created lazily; a module without a
+- `MainWindow` is a shell: a sidebar, a header (current page and timing status) and a page stack.
+  The sidebar lists the built-in *Dashboard* and, pinned at the bottom, *Einstellungen*, plus the
+  `NavigationItem`s of enabled plugins, ordered by `order`. It is rebuilt when contributions
+  change. Pages do not own the navigation. Pages are created lazily; a module without a
   `page_factory` gets a placeholder page, and a failing factory yields an error page.
+- The dashboard reads driver, vehicle and track counts through the catalogs and race counts,
+  the active race and the latest stored result through `RaceCatalog` (implemented in `races` by
+  `RaceOverview`, which only calls the existing service and controller). A card is omitted when
+  its service is not registered. No race rules live in the shell.
 - *Einstellungen* lists the modules with checkboxes to enable/disable them at runtime; the
-  choice is saved in the config file.
+  choice is saved in the config file. Below the modules it hosts `SettingsSection`s contributed
+  by plugins. The races module adds **Renn-HUD** there. The shell does not import the module:
+  the section factory is registered at activation and returns a widget.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
-  Rennen 40, Zeitmessung 50, Statistiken 60, Streckenplaner 70, Einstellungen (shell).
+  Rennen 40, Zeitmessung 50, Kamera-Timing 55 (only when the camera plugin is enabled),
+  Statistiken 60, Streckenplaner 70, Einstellungen (shell).
+
+## Race HUD
+
+The live race page is a stage of independent panels (header, clock, lap progress, ranking,
+driver highlight, last lap, best lap, status, message, controls). What they show comes from
+`RaceSnapshot` and the race events the view already receives. The clock text is
+`snapshot.elapsed_ns` formatted with `format_duration`. Pause, resume and abort call the
+existing `RaceRunner`. The stage does not read sensors, open a camera or write race rows.
+
+Where each panel sits is a document, not code in the live widget (ADR 0013):
+
+```text
+settings['ui.race_hud.configuration']
+  version: 1
+  name: "standard"          # the one active layout; a later version can store several
+  canvas: {width, height}   # aspect reference, 16 by 9, not a pixel size
+  widgets[]:
+    id, visible, x, y, width, height, z_index
+```
+
+`x`, `y`, `width` and `height` are fractions of the display, from 0 to 1. A widget is at least
+0.06 on each side and stays inside the display. Pixels are computed when the stage (or the
+settings preview) is drawn, so the same document fits a small window and a large one. Overlap
+is allowed. `z_index` decides which panel is on top; the editor can move the selection forward
+or backward.
+
+A missing row, a broken document or an unknown `version` becomes the built-in 16:9 layout and
+does not crash. Unknown widget ids are kept, so a future panel survives a round trip. The
+editor's **Standardlayout** loads that built-in layout without writing it. **Speichern** writes
+the document. **Zurücksetzen** reloads the last saved document and drops unsaved edits.
+`HudConfigurationStore.reset()` writes the built-in layout; that is the stored reset.
+
+The live view keeps the previous labels, the ranking table and the race buttons, so the
+existing live and result flows stay in place. Inside a panel, type size follows the panel.
+The ranking keeps the race's row order, hides secondary columns when the panel is narrow,
+and scrolls vertically. Pause and resume are separate buttons and only call `RaceRunner`.
+A fullscreen window can host the same stage later; this step does not add one, and it does
+not add a library of named layouts.
 
 ## Dependency rules
 
@@ -394,9 +478,12 @@ data can be deactivated but not deleted.
 | `app` ↛ `modules` (plugins are discovered) | import-linter |
 | race engine, service, recorder, runner, types, models ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
 | `modules.races.ui` ↛ engine, recorder (no race logic in the UI) | import-linter |
+| `modules.races.hud` ↛ PySide6, `uikit`, engine, recorder, runner | import-linter |
 | `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
 | race engine ↛ timing modules, `app`, `uikit` (engine knows only the core) | import-linter |
-| `timing`, `timing_camera`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |
+| `timing`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |
+| camera timing logic (capture, detection, configuration, store, provider, preview) ↛ PySide6, `uikit` | import-linter |
+| `timing_camera.ui` ↛ cv2, `opencv_device`, `races` | import-linter |
 | `tracks.timing_editor`, `tracks.timing_test` ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
 | Adding a module: add entry point and add it to the independence contract | review |
 

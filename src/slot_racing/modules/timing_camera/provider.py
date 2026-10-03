@@ -1,14 +1,16 @@
 """Camera timing provider.
 
 Frames come from a :class:`~slot_racing.modules.timing_camera.frame_source.FrameSource`.
-The detector from the recognition step turns each frame into lane crossings, and
-this module translates those crossings into :class:`~slot_racing.core.events.SensorTriggered`
-events. The sensor id is taken from the session setup. No camera device is opened.
+A hardware camera is read on a capture thread; :meth:`CameraTimingProvider.poll`
+is the only place that runs detection and emits sensor events. The sensor id is
+taken from the session setup.
 """
 
 from __future__ import annotations
 
-from slot_racing.core.errors import ProviderConfigurationError
+from collections.abc import Callable
+
+from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
 from slot_racing.core.events import SensorTriggered
 from slot_racing.core.timing import (
     ProviderAvailability,
@@ -18,12 +20,31 @@ from slot_racing.core.timing import (
     TimingSource,
     TimingSourceFactory,
 )
+from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.capture import (
+    MAX_FRAMES_PER_POLL,
+    CameraFrameSource,
+    CameraOpenError,
+    CaptureDevice,
+)
+from slot_racing.modules.timing_camera.configuration import (
+    CameraConfiguration,
+    to_camera_config,
+    to_detector_settings,
+)
 from slot_racing.modules.timing_camera.detection import (
     DetectorSettings,
     LaneCrossingDetector,
 )
-from slot_racing.modules.timing_camera.frame_source import FrameSource, ManualFrameSource
+from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
+from slot_racing.modules.timing_camera.store import (
+    CameraConfigurationError,
+    CameraConfigurationSource,
+)
+
+DeviceFactory = Callable[[CameraConfig], CaptureDevice]
 
 PROVIDER_ID = "camera"
 _SOURCE_ID = "camera"
@@ -32,8 +53,9 @@ _SOURCE_ID = "camera"
 class CameraTimingProvider(TimingSource):
     """Reports a car entering a configured zone as a standardized sensor event.
 
-    The host calls :meth:`poll`. There is no capture thread. While paused, ``poll``
-    delivers nothing. ``stop`` can be called any number of times.
+    The host calls :meth:`poll`. While paused, ``poll`` delivers nothing. After a
+    camera resume the first new frame only resynchronizes detection. ``stop`` can
+    be called any number of times.
     """
 
     def __init__(
@@ -64,6 +86,7 @@ class CameraTimingProvider(TimingSource):
         self._detector: LaneCrossingDetector | None = None
         self._sink: SensorSink | None = None
         self._paused = False
+        self._resync = False
         self._reset_detector()
 
     @property
@@ -79,7 +102,18 @@ class CameraTimingProvider(TimingSource):
             raise RuntimeError("camera timing source is already running")
         self._reset_detector()
         self._paused = False
-        self._frames.start()
+        self._resync = False
+        try:
+            self._frames.start()
+        except CameraBusyError as error:
+            self._frames.stop()
+            raise ProviderUnavailable("error.timing_provider.camera_in_use") from error
+        except CameraOpenError as error:
+            self._frames.stop()
+            raise ProviderUnavailable("error.timing_provider.camera_not_connected") from error
+        except Exception:
+            self._frames.stop()
+            raise
         self._sink = sink
 
     def stop(self) -> None:
@@ -96,21 +130,30 @@ class CameraTimingProvider(TimingSource):
         if self._sink is None or not self._paused:
             return
         self._paused = False
-        self._frames.resume()
+        self._resync = self._frames.resume()
 
     def poll(self) -> None:
-        """Turn every frame that is due into sensor events.
+        """Turn due frames into sensor events, keeping each grab timestamp.
 
-        Crossings keep the order and the timestamp produced by the detector.
+        At most :data:`~slot_racing.modules.timing_camera.capture.MAX_FRAMES_PER_POLL`
+        frames are handled, so a backlog cannot block the host. The event
+        timestamp is the frame's own ``timestamp_ns``, never the time of this call.
         """
+        self._frames.check()
         if self._sink is None or self._paused:
             return
         detector = self._detector
-        while self._sink is not None and not self._paused:
+        processed = 0
+        while self._sink is not None and not self._paused and processed < MAX_FRAMES_PER_POLL:
             delivered = self._frames.poll_frame()
             if delivered is None:
                 return
+            processed += 1
             if detector is None:
+                continue
+            if self._resync:
+                detector.synchronize(delivered.frame)
+                self._resync = False
                 continue
             for crossing in detector.observe(delivered.frame, delivered.timestamp_ns):
                 sink = self._sink
@@ -138,14 +181,16 @@ class CameraTimingProvider(TimingSource):
 class CameraTimingFactory(TimingSourceFactory):
     """Creates a camera timing source for one race.
 
-    The provider is registered even though no camera is connected.
-    :meth:`availability` stays unavailable until a later step can see real hardware.
-    :meth:`create_source` still builds a source: tests pass a frame source and the
-    detection zones. The plugin registers a factory without either, so it never
-    opens a device.
+    :meth:`availability` opens the configured device only for the check and
+    closes it again. A missing camera is ``unavailable`` and does not crash the
+    application. Passing ``frames`` builds a source around that source instead
+    of a device, which is how tests run without hardware; that factory does not
+    claim a camera is connected.
 
-    ``frames`` and ``settings``, when given, are shared by every source this factory
-    creates. The plugin passes neither, and each race then gets its own idle frame source.
+    ``frames``, ``settings`` and ``camera``, when given, replace the saved
+    configuration for every source this factory creates. Without them, and when
+    ``configurations`` is set, the saved document is read once per session and
+    handed to the source. Nothing is read again while that source is running.
     """
 
     def __init__(
@@ -153,14 +198,30 @@ class CameraTimingFactory(TimingSourceFactory):
         frames: FrameSource | None = None,
         settings: DetectorSettings | None = None,
         background: GrayFrame | None = None,
+        camera: CameraConfig | None = None,
+        devices: DeviceFactory | None = None,
+        configurations: CameraConfigurationSource | None = None,
+        lease: CameraLease | None = None,
     ) -> None:
         if frames is not None and not isinstance(frames, FrameSource):
             raise TypeError("frames must be a FrameSource")
         if settings is not None and not isinstance(settings, DetectorSettings):
             raise TypeError("settings must be DetectorSettings")
+        if camera is not None and not isinstance(camera, CameraConfig):
+            raise TypeError("camera must be a CameraConfig")
+        if devices is not None and not callable(devices):
+            raise TypeError("devices must be a callable")
+        if configurations is not None and not callable(getattr(configurations, "load", None)):
+            raise TypeError("configurations must load a camera configuration")
+        if lease is not None and not isinstance(lease, CameraLease):
+            raise TypeError("lease must be a CameraLease")
         self._frames = frames
         self._settings = settings
         self._background = background
+        self._camera = camera
+        self._devices = devices
+        self._configurations = configurations
+        self._lease = lease
 
     @property
     def provider_id(self) -> str:
@@ -171,21 +232,110 @@ class CameraTimingFactory(TimingSourceFactory):
         return ProviderCapabilities(supports_multiple_lanes=True, supports_test_mode=False)
 
     def availability(self) -> ProviderAvailability:
-        """No camera device is opened or claimed here. Hardware comes later."""
+        """Probe the device, then close it. An injected frame source is not hardware."""
+        if self._frames is not None:
+            return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
+        if self._lease is not None and self._lease.holder() is not None:
+            return ProviderAvailability.unavailable("error.timing_provider.camera_in_use")
+        try:
+            device = self._make_device(self._session_camera())
+        except ProviderConfigurationError as error:
+            return ProviderAvailability.unavailable(error.key)
+        opened = False
+        try:
+            device.open()
+            opened = True
+        except Exception:
+            opened = False
+        finally:
+            try:
+                device.close()
+            except Exception:
+                opened = False
+        if opened:
+            return ProviderAvailability.ok()
         return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
 
     def validate(self, spec: TimingSessionSpec) -> None:
-        if len(set(spec.lanes)) != len(spec.lanes):
-            raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
-        _require_known_positions(
-            self._settings,
-            {sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active},
-        )
+        self._prepare(spec)
 
     def create_source(self, spec: TimingSessionSpec) -> TimingSource:
-        self.validate(spec)
-        frames = self._frames if self._frames is not None else ManualFrameSource()
-        return CameraTimingProvider(spec, frames, self._settings, self._background)
+        """Build a source from the configuration resolved for this call.
+
+        The returned source keeps that snapshot. Later reads of the saved
+        document do not affect it, and the capture thread does not load it.
+        """
+        camera, settings = self._prepare(spec)
+        if self._frames is not None:
+            frames = self._frames
+        else:
+            frames = CameraFrameSource(
+                self._make_device(camera),
+                lease=self._lease,
+                lease_owner=CameraLease.RACE,
+            )
+        return CameraTimingProvider(spec, frames, settings, self._background)
+
+    def _prepare(self, spec: TimingSessionSpec) -> tuple[CameraConfig, DetectorSettings | None]:
+        if len(set(spec.lanes)) != len(spec.lanes):
+            raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
+        stored = self._stored_configuration()
+        camera = self._camera if self._camera is not None else _camera_or_default(stored)
+        if self._settings is not None:
+            settings: DetectorSettings | None = self._settings
+        elif stored is not None:
+            settings = _zones_from_stored(stored)
+        else:
+            settings = None
+        _require_known_positions(
+            settings,
+            {sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active},
+        )
+        return camera, settings
+
+    def _stored_configuration(self) -> CameraConfiguration | None:
+        """The saved document when this factory still needs something from it."""
+        if self._configurations is None:
+            return None
+        if self._camera is not None and self._settings is not None:
+            return None
+        try:
+            return self._configurations.load()
+        except CameraConfigurationError as error:
+            raise ProviderConfigurationError(
+                "error.timing_provider.camera_configuration_invalid"
+            ) from error
+
+    def _session_camera(self) -> CameraConfig:
+        if self._camera is not None:
+            return self._camera
+        stored = self._stored_configuration()
+        return _camera_or_default(stored)
+
+    def _make_device(self, camera: CameraConfig) -> CaptureDevice:
+        if self._devices is not None:
+            return self._devices(camera)
+        from slot_racing.modules.timing_camera.opencv_device import OpenCVCapture
+
+        return OpenCVCapture(camera)
+
+
+def _camera_or_default(stored: CameraConfiguration | None) -> CameraConfig:
+    if stored is None:
+        return CameraConfig()
+    return to_camera_config(stored)
+
+
+def _zones_from_stored(stored: CameraConfiguration) -> DetectorSettings:
+    try:
+        settings = to_detector_settings(stored)
+    except ValueError as error:
+        raise ProviderConfigurationError(
+            "error.timing_provider.camera_configuration_invalid"
+        ) from error
+    if settings is None:
+        raise ProviderConfigurationError("error.timing_provider.camera_zones_missing")
+    return settings
 
 
 def _require_known_positions(settings: DetectorSettings | None, sensors: dict[str, str]) -> None:

@@ -1,0 +1,412 @@
+"""Camera setup page. The preview is a fake, so no device is opened."""
+
+from __future__ import annotations
+
+import pytest
+from PySide6.QtCore import QPoint, Qt
+from pytestqt.qtbot import QtBot
+
+from slot_racing.core.i18n import Translator
+from slot_racing.core.storage import Setting
+from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.capture import CameraOpenError
+from slot_racing.modules.timing_camera.configuration import (
+    CameraConfiguration,
+    NormalizedRoi,
+    StoredCamera,
+    StoredDetection,
+    StoredDetectionZone,
+    roi_to_pixels,
+)
+from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
+from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.geometry import DetectionRoi
+from slot_racing.modules.timing_camera.lease import CameraBusyError
+from slot_racing.modules.timing_camera.plugin import CameraTimingPlugin
+from slot_racing.modules.timing_camera.store import (
+    CAMERA_CONFIGURATION_KEY,
+    CameraConfigurationError,
+    CameraConfigurationStore,
+)
+from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+from slot_racing.modules.timing_camera.ui.stage import CameraStage
+from tests.modules.test_camera_configuration import database
+
+FRAME = (640, 480)
+
+
+class FakeFrames(FrameSource):
+    def __init__(self, frame: GrayFrame) -> None:
+        self.frame = frame
+        self.running = False
+        self.stops = 0
+
+    def start(self) -> None:
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+        self.stops += 1
+
+    def poll_frame(self) -> TimedFrame | None:
+        if not self.running:
+            return None
+        return TimedFrame(self.frame, 1)
+
+
+class FakeOpener:
+    def __init__(
+        self,
+        indices: tuple[int, ...] = (0,),
+        error: BaseException | None = None,
+    ) -> None:
+        self.indices = indices
+        self.error = error
+        self.opened: list[CameraConfig] = []
+        self.sources: list[FakeFrames] = []
+
+    def device_indices(self) -> tuple[int, ...]:
+        return self.indices
+
+    def open(self, config: CameraConfig) -> FrameSource:
+        self.opened.append(config)
+        if self.error is not None:
+            raise self.error
+        source = FakeFrames(GrayFrame.blank(config.width, config.height, 30))
+        source.start()
+        self.sources.append(source)
+        return source
+
+
+class RejectingStore:
+    def __init__(self, inner: CameraConfigurationStore) -> None:
+        self.inner = inner
+
+    def load(self) -> CameraConfiguration:
+        return self.inner.load()
+
+    def save(self, configuration: CameraConfiguration) -> None:
+        raise CameraConfigurationError("disk full")
+
+
+def translator() -> Translator:
+    result = Translator()
+    result.add_catalog("de", CameraTimingPlugin.translations["de"])
+    return result
+
+
+def saved_configuration() -> CameraConfiguration:
+    return CameraConfiguration(
+        camera=StoredCamera(device_index=1, width=640, height=480, fps=12),
+        detection=StoredDetection(
+            zones=(
+                StoredDetectionZone(
+                    position_id="start_finish",
+                    lane=2,
+                    roi=NormalizedRoi(x=0.1, y=0.25, width=0.2, height=0.1),
+                ),
+            )
+        ),
+    )
+
+
+def open_page(
+    qtbot: QtBot,
+    store: CameraConfigurationStore | RejectingStore,
+    opener: FakeOpener | None = None,
+) -> tuple[CameraSetupPage, FakeOpener]:
+    preview = opener if opener is not None else FakeOpener()
+    page = CameraSetupPage(translator(), store, preview)
+    page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    page.stage.setFixedSize(*FRAME)
+    page.show()
+    qtbot.addWidget(page)
+    qtbot.waitUntil(lambda: page.isVisible() and page.stage.width() == FRAME[0])
+    return page, preview
+
+
+def drag(qtbot: QtBot, stage: CameraStage, x0: int, y0: int, x1: int, y1: int) -> None:
+    start = stage.image_to_widget(x0, y0)
+    end = stage.image_to_widget(x1, y1)
+    assert stage.rect().contains(start)
+    assert stage.rect().contains(end)
+    qtbot.mousePress(stage, Qt.MouseButton.LeftButton, pos=start)  # type: ignore[no-untyped-call]
+    qtbot.mouseMove(stage, pos=end)  # type: ignore[no-untyped-call]
+    qtbot.mouseRelease(stage, Qt.MouseButton.LeftButton, pos=end)  # type: ignore[no-untyped-call]
+
+
+def pixels(page: CameraSetupPage, index: int = 0) -> DetectionRoi:
+    return roi_to_pixels(page.stage.zones()[index], *FRAME)
+
+
+def draw_sample(qtbot: QtBot, page: CameraSetupPage) -> None:
+    page.add_zone.click()
+    drag(qtbot, page.stage, 64, 120, 192, 168)
+
+
+def test_the_saved_configuration_and_its_zones_are_shown(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0,)))
+    assert page.device.currentData() == 1
+    assert page.device.currentText() == "Kamera 1"
+    assert page.device.count() == 2
+    assert page.resolution.currentText() == "640 × 480"  # noqa: RUF001
+    assert page.fps.currentData() == 12
+    assert page.status.text() == "Status: ● Live"
+    assert opener.opened[0].device_index == 1
+    assert len(page.stage.zones()) == 1
+    assert pixels(page) == DetectionRoi(64, 120, 128, 48)
+    assert page.zones.item(0) is not None
+    assert page.zones.item(0).text() == "Zone 1: start_finish – Lane 2"  # noqa: RUF001
+    assert page.position.text() == "start_finish"
+    assert page.lane.value() == 2
+
+
+def test_a_drawn_zone_is_stored_as_normalized_coordinates(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    draw_sample(qtbot, page)
+    roi = page.stage.zones()[0]
+    assert roi.x == pytest.approx(0.1)
+    assert roi.y == pytest.approx(0.25)
+    assert roi.width == pytest.approx(0.2)
+    assert roi.height == pytest.approx(0.1)
+    assert page.position.text() == ""
+    assert page.zones.item(0) is not None
+    assert "Neue Zone" in page.zones.item(0).text()
+    assert "Änderungen nicht gespeichert" in page.message.text()
+
+
+def test_a_zone_that_is_too_small_to_draw_is_rejected(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    page.add_zone.click()
+    drag(qtbot, page.stage, 10, 10, 14, 14)
+    assert page.stage.zones() == ()
+    assert "zu klein" in page.message.text()
+
+
+def test_a_zone_can_be_moved_and_stays_inside_the_picture(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    draw_sample(qtbot, page)
+    drag(qtbot, page.stage, 128, 144, 160, 160)
+    moved = pixels(page)
+    assert moved == DetectionRoi(96, 136, 128, 48)
+    drag(qtbot, page.stage, moved.x + 64, moved.y + 24, 0, moved.y + 24)
+    bounded = pixels(page)
+    assert bounded.x == 0
+    assert bounded.width == 128
+    assert bounded.height == 48
+    assert 0 <= bounded.y <= FRAME[1] - bounded.height
+
+
+def test_a_zone_can_be_resized_down_to_the_minimum_and_not_past_the_picture(
+    qtbot: QtBot,
+) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    draw_sample(qtbot, page)
+    drag(qtbot, page.stage, 192, 168, 256, 200)
+    grown = pixels(page)
+    assert grown == DetectionRoi(64, 120, 192, 80)
+    drag(qtbot, page.stage, 256, 200, 66, 122)
+    shrunk = pixels(page)
+    assert shrunk.width >= 8
+    assert shrunk.height >= 8
+    assert shrunk.x >= 0 and shrunk.y >= 0
+    drag(qtbot, page.stage, shrunk.x + shrunk.width, shrunk.y + shrunk.height, 639, 479)
+    inside = pixels(page)
+    assert inside.x >= 0 and inside.y >= 0
+    assert inside.x + inside.width <= FRAME[0]
+    assert inside.y + inside.height <= FRAME[1]
+    assert inside.width >= 8 and inside.height >= 8
+
+
+def test_position_and_lane_can_be_assigned_without_a_track(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    draw_sample(qtbot, page)
+    page.position.setText("sector_1")
+    page.lane.setValue(3)
+    assert page.zones.item(0) is not None
+    assert page.zones.item(0).text() == "Zone 1: sector_1 – Lane 3"  # noqa: RUF001
+
+
+def test_deleting_a_zone_is_kept_only_after_save(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    page.delete_zone.click()
+    assert page.stage.zones() == ()
+    assert len(CameraConfigurationStore(stored).load().detection.zones) == 1
+    page.save.click()
+    assert "Konfiguration gespeichert." in page.message.text()
+    assert CameraConfigurationStore(stored).load().detection.zones == ()
+    reopened, _preview = open_page(qtbot, CameraConfigurationStore(stored))
+    assert reopened.stage.zones() == ()
+
+
+def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
+    stored = database()
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
+    draw_sample(qtbot, page)
+    page.position.setText("start_finish")
+    page.lane.setValue(1)
+    page.device.setCurrentIndex(1)
+    page.fps.setCurrentIndex(page.fps.findData(30))
+    page.save.click()
+    assert "Konfiguration gespeichert." in page.message.text()
+    loaded = CameraConfigurationStore(stored).load()
+    assert loaded.camera.device_index == 1
+    assert loaded.camera.fps == 30
+    assert loaded.camera.width == 640
+    assert loaded.camera.height == 480
+    zone = loaded.detection.zones[0]
+    assert zone.position_id == "start_finish"
+    assert zone.lane == 1
+    assert zone.roi.x == pytest.approx(0.1)
+    assert zone.roi.y == pytest.approx(0.25)
+    assert zone.roi.width == pytest.approx(0.2)
+    assert zone.roi.height == pytest.approx(0.1)
+    again, _preview = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
+    assert again.device.currentData() == 1
+    assert again.position.text() == "start_finish"
+    assert pixels(again) == DetectionRoi(64, 120, 128, 48)
+
+
+def test_cancel_restores_the_saved_configuration(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    page.position.setText("sector_9")
+    page.lane.setValue(4)
+    page.cancel.click()
+    assert page.position.text() == "start_finish"
+    assert page.lane.value() == 2
+    assert "Änderungen nicht gespeichert" not in page.message.text()
+    fresh, _preview = open_page(qtbot, CameraConfigurationStore(stored))
+    assert fresh.position.text() == "start_finish"
+    assert fresh.lane.value() == 2
+    assert pixels(fresh) == DetectionRoi(64, 120, 128, 48)
+
+
+def test_a_missing_camera_keeps_the_saved_zones(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    opener = FakeOpener(indices=(), error=CameraOpenError("missing"))
+    page, _preview = open_page(qtbot, CameraConfigurationStore(stored), opener)
+    assert "Kamera nicht verfügbar" in page.status.text()
+    assert "nicht geöffnet" in page.message.text()
+    assert pixels(page) == DetectionRoi(64, 120, 128, 48)
+    assert page.device.currentData() == 1
+    assert CameraConfigurationStore(stored).load() == saved_configuration()
+
+
+def test_a_camera_used_by_a_race_is_not_opened_for_the_preview(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    opener = FakeOpener(error=CameraBusyError("race"))
+    page, _preview = open_page(qtbot, CameraConfigurationStore(stored), opener)
+    assert "Rennen" in page.message.text()
+    assert pixels(page) == DetectionRoi(64, 120, 128, 48)
+    assert opener.sources == []
+
+
+def test_a_broken_document_is_shown_and_not_overwritten(qtbot: QtBot) -> None:
+    stored = database()
+    with stored.session() as session:
+        session.add(Setting(key=CAMERA_CONFIGURATION_KEY, value={"version": 99}))
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    assert "nicht gelesen" in page.message.text()
+    assert page.device.currentData() == 0
+    assert page.stage.zones() == ()
+    with stored.session() as session:
+        row = session.get(Setting, CAMERA_CONFIGURATION_KEY)
+        assert row is not None
+        assert row.value == {"version": 99}
+    page.cancel.click()
+    assert "nicht gelesen" in page.message.text()
+    with pytest.raises(CameraConfigurationError):
+        CameraConfigurationStore(stored).load()
+
+
+def test_an_incomplete_zone_is_not_saved(qtbot: QtBot) -> None:
+    stored = database()
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    draw_sample(qtbot, page)
+    page.save.click()
+    assert "Position" in page.message.text()
+    assert CameraConfigurationStore(stored).load().detection.zones == ()
+
+
+def test_overlapping_zones_can_be_saved(qtbot: QtBot) -> None:
+    stored = database()
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    draw_sample(qtbot, page)
+    page.position.setText("start_finish")
+    page.add_zone.click()
+    drag(qtbot, page.stage, 80, 130, 210, 190)
+    page.position.setText("sector_1")
+    page.lane.setValue(2)
+    page.save.click()
+    loaded = CameraConfigurationStore(stored).load()
+    assert len(loaded.detection.zones) == 2
+    first, second = loaded.detection.zones
+    assert first.roi.x < second.roi.x + second.roi.width
+    assert second.roi.x < first.roi.x + first.roi.width
+    assert first.roi.y < second.roi.y + second.roi.height
+    assert second.roi.y < first.roi.y + first.roi.height
+
+
+def test_a_failing_save_leaves_the_stored_document_unchanged(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, RejectingStore(CameraConfigurationStore(stored)))
+    page.position.setText("sector_1")
+    page.save.click()
+    assert "konnte nicht gespeichert" in page.message.text()
+    assert CameraConfigurationStore(stored).load() == saved_configuration()
+
+
+def test_refresh_reopens_the_camera_without_dropping_zones(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, opener = open_page(qtbot, CameraConfigurationStore(stored))
+    assert len(opener.sources) == 1
+    page.refresh.click()
+    assert len(page.stage.zones()) == 1
+    assert len(opener.sources) == 2
+    assert opener.sources[0].stops == 1
+    assert opener.sources[1].running
+
+
+def test_leaving_the_page_stops_the_preview_and_returning_opens_it_again(qtbot: QtBot) -> None:
+    page, opener = open_page(qtbot, CameraConfigurationStore(database()))
+    draw_sample(qtbot, page)
+    page.hide()
+    assert opener.sources[0].stops == 1
+    assert not opener.sources[0].running
+    page.show()
+    assert len(opener.sources) == 2
+    assert opener.sources[1].running
+    assert len(page.stage.zones()) == 1
+    assert page.position.text() == ""
+
+
+def test_duplicate_position_and_lane_are_rejected_by_the_existing_rules(qtbot: QtBot) -> None:
+    stored = database()
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    draw_sample(qtbot, page)
+    page.position.setText("start_finish")
+    page.add_zone.click()
+    drag(qtbot, page.stage, 300, 40, 420, 100)
+    page.position.setText("start_finish")
+    page.lane.setValue(1)
+    page.save.click()
+    assert "ungültig" in page.message.text()
+    assert CameraConfigurationStore(stored).load().detection.zones == ()
+
+
+def test_image_points_round_trip_through_the_stage(qtbot: QtBot) -> None:
+    stage = CameraStage()
+    stage.setFixedSize(*FRAME)
+    qtbot.addWidget(stage)
+    assert stage.image_to_widget(64, 120) == QPoint(64, 120)
+    assert stage.image_to_widget(192, 168) == QPoint(192, 168)

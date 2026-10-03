@@ -251,6 +251,7 @@ class RaceService:
                         driver_label=info.driver_label,
                         vehicle_label=info.vehicle_label,
                         lane=participant.lane,
+                        start_number=info.start_number,
                         laps_completed=participant.laps_completed,
                         finished=participant.finished,
                         total_time_ns=participant.total_time_ns,

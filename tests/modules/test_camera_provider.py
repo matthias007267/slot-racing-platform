@@ -20,7 +20,7 @@ from slot_racing.core.domain import (
     TimingSensor,
     TimingSetup,
 )
-from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
+from slot_racing.core.errors import ProviderConfigurationError
 from slot_racing.core.events import Event, EventBus, LapCompleted, SensorTriggered
 from slot_racing.core.i18n import Translator
 from slot_racing.core.plugin import (
@@ -28,6 +28,7 @@ from slot_racing.core.plugin import (
     PluginManager,
     ServiceRegistry,
 )
+from slot_racing.core.storage import Database
 from slot_racing.core.timing import (
     ManuallyTriggerable,
     ProviderCapabilities,
@@ -37,6 +38,12 @@ from slot_racing.core.timing import (
 )
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.engine import RaceConfig, RaceEngine
+from slot_racing.modules.timing_camera.configuration import (
+    CameraConfiguration,
+    NormalizedRoi,
+    StoredDetection,
+    StoredDetectionZone,
+)
 from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
 from slot_racing.modules.timing_camera.frame_source import ManualFrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
@@ -47,6 +54,7 @@ from slot_racing.modules.timing_camera.provider import (
     CameraTimingFactory,
     CameraTimingProvider,
 )
+from slot_racing.modules.timing_camera.store import CameraConfigurationStore
 
 WIDTH = 80
 HEIGHT = 30
@@ -105,8 +113,11 @@ def running(
     return source, frames, received
 
 
-def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry]:
+def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry, Database]:
+    database = Database.in_memory()
+    database.migrate()
     services = ServiceRegistry()
+    services.register(Database, database, owner="core")
     manager = PluginManager(
         bus=EventBus(),
         services=services,
@@ -120,7 +131,7 @@ def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry]:
     def factories() -> list[TimingSourceFactory]:
         return services.find_all(TimingSourceFactory)
 
-    return manager, TimingProviderRegistry(factories)
+    return manager, TimingProviderRegistry(factories), database
 
 
 def test_factory_identity_and_capabilities() -> None:
@@ -130,13 +141,11 @@ def test_factory_identity_and_capabilities() -> None:
     assert factory.capabilities == ProviderCapabilities(
         supports_multiple_lanes=True, supports_test_mode=False
     )
-    assert not factory.availability().available
-    assert factory.availability().reason_key == "error.timing_provider.camera_not_connected"
 
 
 def test_factory_creates_a_source_without_a_camera() -> None:
     session = spec_for(("start_finish",), {"start_finish": "sensor-sf"})
-    source = CameraTimingFactory().create_source(session)
+    source = CameraTimingFactory(ManualFrameSource()).create_source(session)
     assert isinstance(source, TimingSource)
     assert not isinstance(source, ManuallyTriggerable)
     assert source.source_id == "camera"
@@ -150,23 +159,37 @@ def test_factory_creates_a_source_without_a_camera() -> None:
 
 
 def test_plugin_registers_the_camera_provider_once_and_opens_no_device() -> None:
-    assert "cv2" not in sys.modules
-    manager, registry = plugin_registry()
+    cv2_loaded = "cv2" in sys.modules
+    manager, registry, database = plugin_registry()
     manager.enable("timing_camera")
-    assert "cv2" not in sys.modules
+    assert ("cv2" in sys.modules) is cv2_loaded
     assert registry.provider_ids() == ["camera"]
-    info = registry.info("camera")
-    assert info.capabilities.supports_multiple_lanes
-    assert not info.capabilities.supports_test_mode
-    assert not info.available
-    assert info.availability.reason_key == "error.timing_provider.camera_not_connected"
-
+    factory = registry.factory("camera")
+    assert factory.capabilities.supports_multiple_lanes
+    assert not factory.capabilities.supports_test_mode
+    # Registration does not probe or open a camera. Availability is checked
+    # only when the registry is asked, and that path is covered without hardware.
     session = spec_for(("start_finish",), {"start_finish": "sensor-sf"})
-    with pytest.raises(ProviderUnavailable) as caught:
-        registry.create_source("camera", session)
-    assert caught.value.key == "error.timing_provider.camera_not_connected"
-    created = registry.factory("camera").create_source(session)
+    with pytest.raises(ProviderConfigurationError) as caught:
+        factory.create_source(session)
+    assert caught.value.key == "error.timing_provider.camera_zones_missing"
+
+    CameraConfigurationStore(database).save(
+        CameraConfiguration(
+            detection=StoredDetection(
+                zones=(
+                    StoredDetectionZone(
+                        position_id="start_finish",
+                        lane=1,
+                        roi=NormalizedRoi(x=0, y=0, width=1, height=1),
+                    ),
+                )
+            )
+        )
+    )
+    created = factory.create_source(session)
     assert isinstance(created, TimingSource)
+    assert not created.is_running
 
     manager.disable("timing_camera")
     assert registry.provider_ids() == []

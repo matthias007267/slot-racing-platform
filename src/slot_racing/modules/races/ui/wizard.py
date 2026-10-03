@@ -37,6 +37,7 @@ from slot_racing.uikit import (
     selected_id,
 )
 from slot_racing.uikit.errors import is_expected
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +125,22 @@ class RaceWizard(QWidget):
         self.next_button.setObjectName("wizard-next")
         self.cancel_button = QPushButton(tr("race.wizard.cancel"))
         self.cancel_button.setObjectName("wizard-cancel")
+        set_role(self.start_button, "primary")
+        set_role(self.next_button, "primary")
+        set_role(self.back_button, "secondary")
+        set_role(self.cancel_button, "ghost")
+        set_role(self.add_participant_button, "secondary")
+        set_role(self.remove_participant_button, "danger")
 
         self._build_pages()
         buttons = QHBoxLayout()
+        buttons.setSpacing(SPACE.sm)
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
         buttons.addWidget(self.back_button)
         buttons.addWidget(self.next_button)
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.title_label)
         layout.addWidget(self.step_label)
         layout.addWidget(self.stack, 1)

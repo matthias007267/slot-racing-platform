@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -14,20 +15,22 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
+from slot_racing.uikit.theme import set_role, set_tone
+
 ID_ROLE = Qt.ItemDataRole.UserRole
+_NUMERIC = re.compile(r"^[\d:./,\-\s/]+$")
+_ROW_HEIGHT = 34
 
 
 def heading(text: str) -> QLabel:
+    """Section title inside a page. The shell header already names the page itself."""
     label = QLabel(text)
-    font = label.font()
-    font.setPointSize(font.pointSize() + 6)
-    font.setBold(True)
-    label.setFont(font)
+    set_role(label, "page-title")
     return label
 
 
 class StatusLabel(QLabel):
-    """One line for feedback. Errors are red, information is neutral."""
+    """One line for feedback. Errors use the error tone, information stays neutral."""
 
     def __init__(self, object_name: str = "status-message") -> None:
         super().__init__()
@@ -35,16 +38,29 @@ class StatusLabel(QLabel):
         self.setWordWrap(True)
 
     def show_error(self, message: str) -> None:
-        self.setStyleSheet("color: #b00020;")
+        set_tone(self, "error")
         self.setText(message)
 
     def show_info(self, message: str) -> None:
-        self.setStyleSheet("")
+        set_tone(self, "")
         self.setText(message)
 
     def clear_message(self) -> None:
-        self.setStyleSheet("")
+        set_tone(self, "")
         self.setText("")
+
+
+class StatusPill(QLabel):
+    """Status that is readable from the word, with a tone for the color."""
+
+    def __init__(self, object_name: str = "status-pill") -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        set_role(self, "status")
+
+    def set_status(self, text: str, tone: str) -> None:
+        self.setText(f"● {text}")
+        set_tone(self, tone)
 
 
 def make_table(headers: Sequence[str], object_name: str) -> QTableWidget:
@@ -54,7 +70,10 @@ def make_table(headers: Sequence[str], object_name: str) -> QTableWidget:
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setAlternatingRowColors(True)
+    table.setShowGrid(False)
     table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(_ROW_HEIGHT)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
     return table
 
@@ -72,6 +91,7 @@ def fill_table(
     for row_index, cells in enumerate(rows):
         for column, text in enumerate(cells):
             item = QTableWidgetItem(text)
+            item.setTextAlignment(_alignment(text))
             if column == 0 and ids is not None:
                 item.setData(ID_ROLE, ids[row_index])
             table.setItem(row_index, column, item)
@@ -92,3 +112,17 @@ def selected_id(table: QTableWidget) -> int | None:
 
 def format_datetime(value: datetime | None) -> str:
     return "-" if value is None else value.strftime("%d.%m.%Y %H:%M")
+
+
+def _alignment(text: str) -> Qt.AlignmentFlag:
+    """Times, counts and plain numbers line up on the right. Names stay on the left."""
+    stripped = text.strip()
+    horizontal = Qt.AlignmentFlag.AlignLeft
+    numeric = stripped == "-" or (
+        bool(stripped)
+        and any(char.isdigit() for char in stripped)
+        and _NUMERIC.fullmatch(stripped) is not None
+    )
+    if numeric:
+        horizontal = Qt.AlignmentFlag.AlignRight
+    return horizontal | Qt.AlignmentFlag.AlignVCenter

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -18,6 +19,7 @@ from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from slot_racing.core.domain import RaceId
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.ui.live_view import LiveRaceView
@@ -27,11 +29,11 @@ from slot_racing.uikit import (
     StatusLabel,
     describe_error,
     fill_table,
-    heading,
     make_table,
     selected_id,
 )
 from slot_racing.uikit.errors import is_expected
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 from slot_racing.uikit.widgets import format_datetime
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ class RacesPage(QWidget):
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
         providers: TimingProviderRegistry,
+        hud_store: HudConfigurationStore | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -72,28 +75,43 @@ class RacesPage(QWidget):
         self.status = StatusLabel("races-status")
         self.buttons: dict[str, QPushButton] = {}
         button_row = QHBoxLayout()
+        button_row.setSpacing(SPACE.sm)
+        roles = {
+            "new": "primary",
+            "edit": "secondary",
+            "start": "primary",
+            "live": "secondary",
+            "results": "secondary",
+            "delete": "danger",
+        }
         for key in ("new", "edit", "start", "live", "results", "delete"):
             button = QPushButton(tr(f"race.list.{key}"))
             button.setObjectName(f"races-{key}")
+            set_role(button, roles[key])
             self.buttons[key] = button
             button_row.addWidget(button)
         button_row.addStretch(1)
 
         list_page = QWidget()
         list_layout = QVBoxLayout(list_page)
-        list_layout.addWidget(heading(tr("nav.races")))
+        configure_page(list_layout)
         list_layout.addLayout(button_row)
         list_layout.addWidget(self.table, 1)
         list_layout.addWidget(self.status)
 
         self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks, providers)
-        self.live = LiveRaceView(translator, controller)
+        self.live = LiveRaceView(translator, controller, hud_store)
         self.results = ResultsView(translator, service)
         self.stack = QStackedWidget()
+        # The list's preferred width must not stop the live race from using a small window.
+        shrink = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.stack.setSizePolicy(shrink)
+        self.setSizePolicy(shrink)
         self.list_page = list_page
         for page in (list_page, self.wizard, self.live, self.results):
             self.stack.addWidget(page)
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.stack)
 
         self.buttons["new"].clicked.connect(lambda: self.new_race())
@@ -105,6 +123,7 @@ class RacesPage(QWidget):
         self.wizard.closed.connect(self.show_list)
         self.wizard.start_requested.connect(lambda race_id: self.start_race(RaceId(race_id)))
         self.live.race_over.connect(lambda race_id: self.show_results(RaceId(race_id)))
+        self.live.back_requested.connect(self.show_list)
         self.results.back_requested.connect(self.show_list)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self._races: dict[int, str] = {}

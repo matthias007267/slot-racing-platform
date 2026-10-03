@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from typing import ClassVar
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QLabel, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.app.main import main
@@ -73,6 +73,28 @@ def test_navigation_follows_module_activation(qtbot: QtBot, runtime: Runtime) ->
     assert window.current_id() == "dashboard"
     runtime.plugins.enable("statistics")
     assert "statistics" in window.navigation_ids()
+
+
+def test_dashboard_uses_real_master_data(qtbot: QtBot, runtime: Runtime) -> None:
+    from slot_racing.modules.drivers_vehicles.service import DriverInput, DriverService
+    from slot_racing.modules.races.ui.races_page import RacesPage
+
+    runtime.services.get(DriverService).create_driver(DriverInput(name="Anna"))
+    window = make_window(qtbot, runtime)
+    assert window.findChild(QWidget, "sidebar") is not None
+    assert window.findChild(QWidget, "shell-header") is not None
+    title = window.findChild(QLabel, "shell-title")
+    assert title is not None and title.text() == "Dashboard"
+    metric = window.findChild(QLabel, "metric-drivers")
+    assert metric is not None and metric.text() == "1"
+    assert "registrierte Fahrer" in page_texts(window)
+    new_race = window.findChild(QPushButton, "dashboard-action-races")
+    assert new_race is not None
+    new_race.click()
+    assert window.current_id() == "races"
+    page = window.current_page()
+    assert isinstance(page, RacesPage)
+    assert page.current_view() is page.wizard
 
 
 def test_dashboard_lists_active_modules(qtbot: QtBot, runtime: Runtime) -> None:

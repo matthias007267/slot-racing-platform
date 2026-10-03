@@ -23,6 +23,7 @@ from slot_racing.modules.tracks.timing_editor import TimingDraft
 from slot_racing.modules.tracks.ui.common import entry_text, run_guarded, type_label, yes_no
 from slot_racing.modules.tracks.ui.timing_dialog import PositionDialog
 from slot_racing.uikit import StatusLabel, fill_table, heading, make_table, selected_id
+from slot_racing.uikit.theme import SPACE, configure_page, set_role
 
 COLUMN_KEYS = (
     "timing.column.number",
@@ -113,6 +114,18 @@ class TimingConfigView(QWidget):
             self.wizard_button,
         )
 
+        set_role(self.add_button, "secondary")
+        set_role(self.remove_button, "danger")
+        set_role(self.up_button, "ghost")
+        set_role(self.down_button, "ghost")
+        set_role(self.edit_button, "secondary")
+        set_role(self.toggle_button, "ghost")
+        set_role(self.save_button, "primary")
+        set_role(self.reset_button, "ghost")
+        set_role(self.test_button, "secondary")
+        set_role(self.wizard_button, "secondary")
+        set_role(self.back_button, "ghost")
+
         edit_row = QHBoxLayout()
         for widget in (
             self.add_button,
@@ -124,13 +137,16 @@ class TimingConfigView(QWidget):
         ):
             edit_row.addWidget(widget)
         edit_row.addStretch(1)
+        edit_row.setSpacing(SPACE.sm)
         action_row = QHBoxLayout()
+        action_row.setSpacing(SPACE.sm)
         for widget in (self.save_button, self.reset_button, self.test_button, self.wizard_button):
             action_row.addWidget(widget)
         action_row.addStretch(1)
         action_row.addWidget(self.back_button)
 
         layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.title)
         layout.addWidget(self.hint)
         layout.addLayout(edit_row)
