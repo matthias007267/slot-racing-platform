@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from slot_racing.core.catalog import DriverCatalog, RaceCatalog, TrackCatalog, VehicleCatalog
+from slot_racing.core.catalog import (
+    DriverCatalog,
+    RaceCatalog,
+    TimeMeasurementCatalog,
+    TrackCatalog,
+    VehicleCatalog,
+)
 from slot_racing.core.plugin import (
     NavigationItem,
     Plugin,
@@ -14,6 +20,7 @@ from slot_racing.core.storage import Database
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
+from slot_racing.modules.races.measurement_catalog import StoredTimeMeasurements
 from slot_racing.modules.races.overview import RaceOverview
 from slot_racing.modules.races.recorder import RaceRecorder
 from slot_racing.modules.races.runner import RaceController
@@ -68,6 +75,7 @@ class RacesPlugin(Plugin):
         context.register_service(RaceService, service)
         context.register_service(RaceController, controller)
         context.register_service(RaceCatalog, RaceOverview(service, controller))
+        context.register_service(TimeMeasurementCatalog, StoredTimeMeasurements(service))
         hud_store = HudConfigurationStore(context.get_service(Database))
         context.register_service(HudConfigurationStore, hud_store)
         translator = context.translator
