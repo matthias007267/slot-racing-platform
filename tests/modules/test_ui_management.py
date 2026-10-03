@@ -7,12 +7,14 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
-from PySide6.QtWidgets import QComboBox, QDialog, QTableWidget
+from PySide6.QtWidgets import QComboBox, QDialog, QPushButton, QSpinBox, QTableWidget
 from pytestqt.qtbot import QtBot
 from sqlalchemy.exc import OperationalError
 
 from slot_racing.app.main_window import MainWindow
 from slot_racing.core.domain import RaceStatus
+from slot_racing.modules.drivers_vehicles.models import Driver
+from slot_racing.modules.drivers_vehicles.service import VehicleInput
 from slot_racing.modules.drivers_vehicles.ui.drivers_page import DriverDialog, DriversPage
 from slot_racing.modules.drivers_vehicles.ui.vehicles_page import VehicleDialog, VehiclesPage
 from slot_racing.modules.races.ui.live_view import LiveRaceView
@@ -74,6 +76,7 @@ def test_pages_open_from_the_navigation(
 
 
 def test_driver_page_add_edit_deactivate_delete(qtbot: QtBot, env: Env) -> None:
+    env.vehicles.create_vehicle(VehicleInput(name="Start", model="Nr", start_number=7))
     _, page = open_page(qtbot, env, "drivers")
     assert isinstance(page, DriversPage)
     page.refresh()
@@ -248,21 +251,37 @@ def test_driver_page_shows_the_selected_drivers_vehicles(qtbot: QtBot, env: Env)
     assert page.vehicles_empty.text() == "Diesem Fahrer ist kein Fahrzeug zugeordnet."
 
 
-def test_driver_start_number_cannot_exceed_the_service_limit(qtbot: QtBot, env: Env) -> None:
+def test_start_number_picker_offers_only_defined_numbers(qtbot: QtBot, env: Env) -> None:
+    with env.runtime.database.session() as session:
+        session.add(Driver(name="Bee", start_number="B", is_active=True))
+    env.vehicles.create_vehicle(VehicleInput(name="Wagen", model="GT", start_number=7))
     _, page = open_page(qtbot, env, "drivers")
     assert isinstance(page, DriversPage)
-    seen: list[int] = []
+    seen: dict[str, object] = {}
 
     def inspect(dialog: QDialog) -> int:
         assert isinstance(dialog, DriverDialog)
-        assert dialog.start_number_edit.maximum() == 999
-        dialog.start_number_edit.setValue(5000)
-        seen.append(dialog.start_number_edit.value())
+        picker = dialog.start_number_edit
+        assert dialog.findChild(QSpinBox) is None
+        seen["choices"] = picker.choices()
+        picker.setValue(5000)
+        seen["blocked"] = picker.value()
+        picker.setValue("B")
+        seen["selected"] = picker.value()
+        down = dialog.findChild(QPushButton, "driver-start-number-down")
+        assert down is not None
+        down.click()
+        seen["after_down"] = picker.value()
         return int(QDialog.DialogCode.Rejected)
 
     page.dialog_runner = inspect
     page.add()
-    assert seen == [999]
+    assert seen == {
+        "choices": ["7", "B"],
+        "blocked": None,
+        "selected": "B",
+        "after_down": 7,
+    }
 
 
 def test_wizard_lists_only_the_drivers_own_and_unowned_vehicles(qtbot: QtBot, env: Env) -> None:
@@ -422,6 +441,29 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     results.back_button.click()
     assert page.current_view() is page.list_page
     assert cells(page.table, 0)[:3] == ["Finale", "Heimbahn", "Beendet"]
+
+
+def test_wizard_updates_vehicle_and_lane_on_the_same_participant(qtbot: QtBot, env: Env) -> None:
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    configure_race(page, env)
+    spare = env.vehicle("Ersatz")
+    wizard = page.wizard
+    assert wizard.race is not None
+    original = wizard.race.participants[0]
+    wizard.participant_table.selectRow(0)
+    assert wizard.edit_selected_participant()
+    assert wizard.edit_participant_button.text() == "Teilnehmer aktualisieren"
+    wizard.vehicle_combo.setCurrentIndex(wizard.vehicle_combo.findData(spare.id))
+    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(original.lane))
+    assert wizard.edit_selected_participant()
+    stored = env.races.require_race(wizard.race.id)
+    updated = next(item for item in stored.participants if item.id == original.id)
+    assert updated.vehicle_id == spare.id
+    assert updated.lane == original.lane
+    assert updated.driver_id == original.driver_id
+    assert len(stored.participants) == 2
+    assert wizard.edit_participant_button.text() == "Teilnehmer bearbeiten"
 
 
 def test_wizard_reports_rule_violations_and_keeps_going(qtbot: QtBot, env: Env) -> None:

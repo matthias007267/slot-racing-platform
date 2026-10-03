@@ -24,6 +24,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Der Anzeigename darf höchstens {limit} Zeichen lang sein."
         ),
         "error.driver.start_number.range": "Die Startnummer muss zwischen 1 und {maximum} liegen.",
+        "error.driver.start_number.unknown": "Die Startnummer {number} ist nicht vorhanden.",
         "error.driver.start_number_taken": "Die Startnummer {number} ist bereits vergeben.",
         "error.driver.not_found": "Der Fahrer existiert nicht mehr.",
         "error.driver.in_use": (
@@ -52,6 +53,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.vehicle.start_number.range": (
             "Die Startnummer muss zwischen 1 und {maximum} liegen."
         ),
+        "error.vehicle.start_number.unknown": "Die Startnummer {number} ist nicht vorhanden.",
         "error.vehicle.not_found": "Das Fahrzeug existiert nicht mehr.",
         "error.vehicle.driver_inactive": "Der Fahrer „{driver}“ ist deaktiviert.",
         "error.vehicle.in_use": (

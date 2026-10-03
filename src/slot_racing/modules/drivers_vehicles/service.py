@@ -23,7 +23,7 @@ MAX_NOTES_LENGTH = 2000
 class DriverInput:
     name: str
     display_name: str | None = None
-    start_number: int | None = None
+    start_number: int | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ class VehicleInput:
     manufacturer: str | None = None
     scale: str | None = None
     notes: str | None = None
-    start_number: int | None = None
+    start_number: int | str | None = None
     driver_id: DriverId | None = None
 
 
@@ -53,10 +53,49 @@ def _optional(value: str | None, key: str, limit: int) -> str | None:
     return text or None
 
 
-def _start_number(value: int | None, key: str) -> int | None:
-    if value is not None and not 1 <= value <= MAX_START_NUMBER:
+def _defined_start_tokens(session: Session) -> set[str]:
+    """Text form of every start number already stored on a driver or a vehicle."""
+    tokens: set[str] = set()
+    for column in (Driver.start_number, Vehicle.start_number):
+        for value in session.scalars(select(column).where(column.is_not(None))):
+            if value is not None:
+                tokens.add(str(value))
+    return tokens
+
+
+def ordered_start_numbers(session: Session) -> list[str]:
+    """Defined start numbers, numeric ones first, then any other stored token."""
+
+    def order(token: str) -> tuple[int, int | str]:
+        if token.isdigit():
+            return (0, int(token))
+        return (1, token.casefold())
+
+    return sorted(_defined_start_tokens(session), key=order)
+
+
+def _coerce_start_number(value: int | str | None, key: str, defined: set[str]) -> int | str | None:
+    """Keep a stored token as it is. A new numeric number still has to fit the existing range."""
+    if value is None:
+        return None
+    token = str(value).strip()
+    if not token:
+        return None
+    if token in defined:
+        return int(token) if token.isdigit() else token
+    number = _integer_token(token)
+    if number is not None:
+        if 1 <= number <= MAX_START_NUMBER:
+            return number
         raise ValidationError(f"{key}.range", maximum=MAX_START_NUMBER)
-    return value
+    raise ValidationError(f"{key}.unknown", number=token)
+
+
+def _integer_token(token: str) -> int | None:
+    digits = token[1:] if token.startswith("-") else token
+    if digits.isdigit():
+        return int(token)
+    return None
 
 
 def _driver_info(driver: Driver) -> DriverInfo:
@@ -103,9 +142,14 @@ class DriverService(DriverCatalog):
             driver = session.get(Driver, driver_id)
             return None if driver is None else _driver_info(driver)
 
-    def create_driver(self, data: DriverInput) -> DriverInfo:
-        name, display_name, start_number = self._validate(data)
+    def defined_start_numbers(self) -> list[str]:
+        """Start numbers that already exist. The selection offers only these."""
         with self._database.session() as session:
+            return ordered_start_numbers(session)
+
+    def create_driver(self, data: DriverInput) -> DriverInfo:
+        with self._database.session() as session:
+            name, display_name, start_number = self._validate(data, session)
             self._check_start_number_free(session, start_number, own_id=None)
             driver = Driver(name=name, display_name=display_name, start_number=start_number)
             session.add(driver)
@@ -113,8 +157,8 @@ class DriverService(DriverCatalog):
             return _driver_info(driver)
 
     def update_driver(self, driver_id: DriverId, data: DriverInput) -> DriverInfo:
-        name, display_name, start_number = self._validate(data)
         with self._database.session() as session:
+            name, display_name, start_number = self._validate(data, session)
             driver = self._load(session, driver_id)
             self._check_start_number_free(session, start_number, own_id=driver.id)
             driver.name = name
@@ -140,11 +184,15 @@ class DriverService(DriverCatalog):
             raise ValidationError("error.driver.in_use") from error
 
     @staticmethod
-    def _validate(data: DriverInput) -> tuple[str, str | None, int | None]:
+    def _validate(data: DriverInput, session: Session) -> tuple[str, str | None, int | str | None]:
         return (
             _required(data.name, "error.driver.name", 100),
             _optional(data.display_name, "error.driver.display_name", 50),
-            _start_number(data.start_number, "error.driver.start_number"),
+            _coerce_start_number(
+                data.start_number,
+                "error.driver.start_number",
+                _defined_start_tokens(session),
+            ),
         )
 
     @staticmethod
@@ -155,7 +203,9 @@ class DriverService(DriverCatalog):
         return driver
 
     @staticmethod
-    def _check_start_number_free(session: Session, number: int | None, own_id: int | None) -> None:
+    def _check_start_number_free(
+        session: Session, number: int | str | None, own_id: int | None
+    ) -> None:
         if number is None:
             return
         owner = session.scalar(select(Driver).where(Driver.start_number == number))
@@ -163,7 +213,7 @@ class DriverService(DriverCatalog):
             raise ValidationError("error.driver.start_number_taken", number=number)
 
     @staticmethod
-    def _flush(session: Session, start_number: int | None) -> None:
+    def _flush(session: Session, start_number: int | str | None) -> None:
         try:
             session.flush()
         except IntegrityError as error:
@@ -191,8 +241,8 @@ class VehicleService(VehicleCatalog):
             return None if vehicle is None else _vehicle_info(vehicle)
 
     def create_vehicle(self, data: VehicleInput) -> VehicleInfo:
-        values = self._validate(data)
         with self._database.session() as session:
+            values = self._validate(data, session)
             self._check_driver(session, data.driver_id, current=None)
             vehicle = Vehicle(driver_id=data.driver_id, **values)
             session.add(vehicle)
@@ -200,8 +250,8 @@ class VehicleService(VehicleCatalog):
             return _vehicle_info(vehicle)
 
     def update_vehicle(self, vehicle_id: VehicleId, data: VehicleInput) -> VehicleInfo:
-        values = self._validate(data)
         with self._database.session() as session:
+            values = self._validate(data, session)
             vehicle = self._load(session, vehicle_id)
             self._check_driver(session, data.driver_id, current=vehicle.driver_id)
             for field, value in values.items():
@@ -236,14 +286,18 @@ class VehicleService(VehicleCatalog):
             raise ValidationError("error.vehicle.in_use") from error
 
     @staticmethod
-    def _validate(data: VehicleInput) -> dict[str, str | int | None]:
+    def _validate(data: VehicleInput, session: Session) -> dict[str, str | int | None]:
         return {
             "name": _required(data.name, "error.vehicle.name", 100),
             "model": _required(data.model, "error.vehicle.model", 100),
             "manufacturer": _optional(data.manufacturer, "error.vehicle.manufacturer", 100),
             "scale": _optional(data.scale, "error.vehicle.scale", MAX_SCALE_LENGTH),
             "notes": _optional(data.notes, "error.vehicle.notes", MAX_NOTES_LENGTH),
-            "start_number": _start_number(data.start_number, "error.vehicle.start_number"),
+            "start_number": _coerce_start_number(
+                data.start_number,
+                "error.vehicle.start_number",
+                _defined_start_tokens(session),
+            ),
         }
 
     @staticmethod

@@ -2,7 +2,8 @@ from collections.abc import Iterator
 from typing import ClassVar
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QWidget
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QMessageBox, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.app.main import main
@@ -169,6 +170,101 @@ def test_closing_the_window_detaches_it_from_the_runtime(qtbot: QtBot, runtime: 
     window.close()
     runtime.plugins.disable("statistics")
     runtime.plugins.enable("statistics")
+
+
+def _click_when_shown(object_name: str) -> None:
+    def click() -> None:
+        box = QApplication.activeModalWidget()
+        if not isinstance(box, QMessageBox):
+            QTimer.singleShot(0, click)
+            return
+        button = box.findChild(QPushButton, object_name)
+        if button is None:
+            QTimer.singleShot(0, click)
+            return
+        button.click()
+
+    QTimer.singleShot(0, click)
+
+
+def test_quit_button_sits_above_settings_and_cancel_keeps_the_app_open(
+    qtbot: QtBot, runtime: Runtime
+) -> None:
+    window = make_window(qtbot, runtime)
+    window.show()
+    quit_button = window.findChild(QPushButton, "app-quit")
+    settings = window.findChild(QPushButton, "nav-settings")
+    assert quit_button is not None and settings is not None
+    assert quit_button.text() == "Beenden"
+    qtbot.waitUntil(lambda: settings.y() > quit_button.y())
+
+    def cancel() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        assert box.text() == "Möchtest du das Programm wirklich beenden?"
+        button = box.findChild(QPushButton, "quit-cancel")
+        assert button is not None
+        button.click()
+
+    QTimer.singleShot(0, cancel)
+    quit_button.click()
+    assert window.isVisible()
+
+
+def test_quit_saves_the_open_hud_and_closes(
+    qtbot: QtBot, runtime: Runtime, tmp_path: object
+) -> None:
+    from pathlib import Path
+
+    from slot_racing.modules.races.hud import HudConfigurationStore
+    from slot_racing.modules.races.ui.hud_editor import HudEditor
+
+    runtime.config_path = Path(str(tmp_path)) / "config.json"
+    window = make_window(qtbot, runtime)
+    window.show()
+    window.select("settings")
+    editor = window.findChild(HudEditor)
+    assert editor is not None
+    editor.set_widget_geometry("race_clock", 0.25, 0.25, 0.25, 0.25)
+    _click_when_shown("quit-confirm")
+    confirm_quit = window.findChild(QPushButton, "app-quit")
+    assert confirm_quit is not None
+    confirm_quit.click()
+    assert not window.isVisible()
+    saved = HudConfigurationStore(runtime.database).load().widget("race_clock")
+    assert saved is not None and saved.x == 0.25
+    assert runtime.config_path.is_file()
+
+
+def test_quit_stays_open_when_saving_fails(
+    qtbot: QtBot, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = make_window(qtbot, runtime)
+    window.show()
+
+    def broken() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(window, "_save_persistent_state", broken)
+
+    def answer() -> None:
+        box = QApplication.activeModalWidget()
+        if not isinstance(box, QMessageBox):
+            QTimer.singleShot(0, answer)
+            return
+        confirm = box.findChild(QPushButton, "quit-confirm")
+        if confirm is not None:
+            confirm.click()
+            QTimer.singleShot(0, answer)
+            return
+        assert "disk full" in box.text()
+        box.accept()
+
+    QTimer.singleShot(0, answer)
+    confirm_quit = window.findChild(QPushButton, "app-quit")
+    assert confirm_quit is not None
+    confirm_quit.click()
+    assert window.isVisible()
 
 
 def test_application_starts_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:

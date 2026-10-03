@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
+    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -20,8 +22,10 @@ from slot_racing.app.dashboard import DashboardPage
 from slot_racing.app.pages import MessagePage, SettingsPage
 from slot_racing.app.runtime import Runtime
 from slot_racing.app.shell import ShellHeader, Sidebar, timing_state
+from slot_racing.core.config import save_config
 from slot_racing.core.events import PluginDisabled, PluginEnabled
-from slot_racing.uikit.theme import SPACE, apply_theme
+from slot_racing.uikit.errors import describe_error
+from slot_racing.uikit.theme import SPACE, apply_theme, set_role
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,11 @@ class MainWindow(QMainWindow):
         self.resize(1100, 700)
 
         self._sidebar = Sidebar(self._tr("shell.brand"))
+        self._quit_button = QPushButton(self._tr("nav.quit"))
+        self._quit_button.setObjectName("app-quit")
+        set_role(self._quit_button, "nav")
+        self._quit_button.clicked.connect(self.confirm_quit)
+        self._sidebar.set_quit_button(self._quit_button)
         self._header = ShellHeader()
         self._stack = QStackedWidget()
         self._stack.setObjectName("page-host")
@@ -118,11 +127,59 @@ class MainWindow(QMainWindow):
         target = previous if previous in ids else self.DASHBOARD_ID
         self.select(target)
 
+    def confirm_quit(self) -> None:
+        """Ask, save durable settings, and close only after that save succeeds."""
+        if not self._ask_quit():
+            return
+        try:
+            self._save_persistent_state()
+        except Exception as error:
+            logger.exception("Could not save before quitting")
+            self._report_quit_error(error)
+            return
+        self.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._remove_listener()
         for subscription in self._subscriptions:
             subscription.cancel()
         super().closeEvent(event)
+
+    def _ask_quit(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(self._tr("nav.quit"))
+        box.setText(self._tr("app.quit.confirm"))
+        accept = box.addButton(
+            self._tr("app.quit.confirm_button"), QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = box.addButton(
+            self._tr("app.quit.cancel_button"), QMessageBox.ButtonRole.RejectRole
+        )
+        accept.setObjectName("quit-confirm")
+        cancel.setObjectName("quit-cancel")
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is accept
+
+    def _report_quit_error(self, error: BaseException) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setObjectName("quit-error")
+        box.setWindowTitle(self._tr("nav.quit"))
+        detail = describe_error(self._runtime.translator, error)
+        box.setText(f"{self._tr('app.quit.failed')}\n\n{detail}")
+        box.exec()
+
+    def _save_persistent_state(self) -> None:
+        """Flush open editors and the application config. Unfinished races are left as they are."""
+        for widget in self.findChildren(QWidget):
+            save = getattr(widget, "save_persistent", None)
+            if callable(save):
+                save()
+        path = self._runtime.config_path
+        if path is not None:
+            save_config(self._runtime.config, path)
 
     def _entries(self) -> list[_Entry]:
         entries = [_Entry(self.DASHBOARD_ID, self._tr("nav.dashboard"), lambda: self._dashboard)]

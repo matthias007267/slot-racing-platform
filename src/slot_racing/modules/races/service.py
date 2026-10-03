@@ -164,6 +164,58 @@ class RaceService:
             self._update_readiness(session, race)
             return self._participant_info(participant)
 
+    def update_participant(
+        self,
+        race_id: RaceId,
+        participant_id: int,
+        driver_id: DriverId,
+        vehicle_id: VehicleId,
+        lane: int,
+    ) -> ParticipantInfo:
+        """Correct driver, vehicle or lane on the existing participant row."""
+        driver = self._drivers.get_driver(driver_id)
+        if driver is None:
+            raise ValidationError("error.race.driver_unknown")
+        if not driver.is_active:
+            raise ValidationError("error.race.driver_inactive", driver=driver.label)
+        vehicle = self._vehicles.get_vehicle(vehicle_id)
+        if vehicle is None:
+            raise ValidationError("error.race.vehicle_unknown")
+        if not vehicle.is_active:
+            raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+        if vehicle.driver_id not in (None, driver_id):
+            raise ValidationError("error.race.vehicle_wrong_driver", vehicle=vehicle.label)
+
+        with self._database.session() as session:
+            race = self._load_editable(session, race_id)
+            participant = session.get(RaceParticipant, participant_id)
+            if participant is None or participant.race_id != race.id:
+                raise ValidationError("error.race.participant_unknown")
+            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+            if track is None:
+                raise ValidationError("error.race.no_track")
+            others = [
+                other
+                for other in session.scalars(
+                    select(RaceParticipant).where(RaceParticipant.race_id == race.id)
+                )
+                if other.id != participant.id
+            ]
+            if not 1 <= lane <= track.lane_count:
+                raise ValidationError("error.race.lane_invalid", maximum=track.lane_count)
+            if any(other.lane == lane for other in others):
+                raise ValidationError("error.race.lane_taken", lane=lane)
+            if any(other.driver_id == driver_id for other in others):
+                raise ValidationError("error.race.driver_duplicate", driver=driver.label)
+            if any(other.vehicle_id == vehicle_id for other in others):
+                raise ValidationError("error.race.vehicle_duplicate", vehicle=vehicle.label)
+            participant.driver_id = driver_id
+            participant.vehicle_id = vehicle_id
+            participant.lane = lane
+            session.flush()
+            self._update_readiness(session, race)
+            return self._participant_info(participant)
+
     def remove_participant(self, race_id: RaceId, participant_id: int) -> None:
         with self._database.session() as session:
             race = self._load_editable(session, race_id)

@@ -34,6 +34,7 @@ class Sidebar(QWidget):
         self._buttons: dict[str, QPushButton] = {}
         self._order: list[str] = []
         self._current: str | None = None
+        self._quit_button: QPushButton | None = None
 
         self._nav_layout = QVBoxLayout()
         self._nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -65,12 +66,19 @@ class Sidebar(QWidget):
         layout.addWidget(self._divider)
         layout.addLayout(self._footer_layout)
 
+    def set_quit_button(self, button: QPushButton) -> None:
+        """Pin a quit button above the footer entry. Navigation rebuilds keep it."""
+        self._quit_button = button
+        button.setParent(self)
+
     def set_entries(self, entries: list[tuple[str, str]], *, footer_id: str) -> None:
         self._clear(self._nav_layout)
         self._clear(self._footer_layout)
         self._buttons.clear()
         self._order = []
         self._current = None
+        if self._quit_button is not None:
+            self._footer_layout.addWidget(self._quit_button)
         for entry_id, title in entries:
             button = self._make_button(entry_id, title)
             self._buttons[entry_id] = button
@@ -114,9 +122,10 @@ class Sidebar(QWidget):
     def _clear(self, layout: QVBoxLayout) -> None:
         while (item := layout.takeAt(0)) is not None:
             widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+            if widget is None or widget is self._quit_button:
+                continue
+            widget.setParent(None)
+            widget.deleteLater()
 
 
 class ShellHeader(QWidget):

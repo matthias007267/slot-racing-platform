@@ -1,14 +1,14 @@
-"""Settings editor for the race HUD. Drag, resize and numbers all write the same configuration."""
+"""Settings editor for the race HUD. Drag and resize write the same configuration."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QMouseEvent, QResizeEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDoubleSpinBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -32,7 +32,44 @@ from slot_racing.modules.races.hud import (
 from slot_racing.uikit.theme import SPACE, configure_page, polish, set_role
 
 _HANDLE = 12
-_SPIN_KEYS = ("x", "y", "width", "height")
+_GRID_X = 16
+_GRID_Y = 9
+_PREVIEW_OPACITY = 0.9
+
+
+def snap_axis(value: float, parts: int) -> float:
+    """Nearest grid line. ``parts`` is the number of cells along that axis."""
+    return round(value * parts) / parts
+
+
+def _paint_grid(
+    painter: QPainter,
+    canvas_width: int,
+    canvas_height: int,
+    origin_x: int,
+    origin_y: int,
+    view_width: int,
+    view_height: int,
+) -> None:
+    """Draw the canvas grid through one rectangle. ``origin`` is that rectangle's top left."""
+    if canvas_width <= 1 or canvas_height <= 1 or view_width <= 0 or view_height <= 0:
+        return
+    minor = QPen(QColor(255, 255, 255, 90))
+    major = QPen(QColor(255, 196, 64, 220))
+    for index in range(_GRID_X + 1):
+        x = round(index * canvas_width / _GRID_X) - origin_x
+        if 0 <= x <= view_width:
+            painter.setPen(major if index in (0, _GRID_X // 2, _GRID_X) else minor)
+            painter.drawLine(x, 0, x, view_height)
+    for index in range(_GRID_Y + 1):
+        y = round(index * canvas_height / _GRID_Y) - origin_y
+        if 0 <= y <= view_height:
+            painter.setPen(major if index in (0, _GRID_Y) else minor)
+            painter.drawLine(0, y, view_width, y)
+    center_y = canvas_height // 2 - origin_y
+    if 0 <= center_y <= view_height:
+        painter.setPen(major)
+        painter.drawLine(0, center_y, view_width, center_y)
 
 
 class HudEditor(QWidget):
@@ -46,12 +83,11 @@ class HudEditor(QWidget):
         self._config = store.load()
         self._selected: str | None = LIVE_RANKING_DEFAULT
         self._checks: dict[str, QCheckBox] = {}
+        self._fullscreen: HudPreviewWindow | None = None
         tr = translator.translate
 
         self.preview = HudPreview(translator, self)
-        self._spins = {key: _spin(key) for key in _SPIN_KEYS}
-        for spin in self._spins.values():
-            spin.valueChanged.connect(self._on_spin)
+        self._previews: list[HudPreview] = [self.preview]
 
         layout = QVBoxLayout(self)
         configure_page(layout)
@@ -66,7 +102,6 @@ class HudEditor(QWidget):
         for widget_id in WIDGET_IDS:
             layout.addWidget(self._element_row(widget_id))
 
-        layout.addWidget(self._geometry_row())
         layout.addLayout(self._actions())
         self._set_config(self._config)
 
@@ -77,6 +112,10 @@ class HudEditor(QWidget):
     def selected_id(self) -> str | None:
         return self._selected
 
+    @property
+    def fullscreen(self) -> HudPreviewWindow | None:
+        return self._fullscreen
+
     def box(self, widget_id: str) -> HudBox | None:
         return self.preview.box(widget_id)
 
@@ -84,8 +123,7 @@ class HudEditor(QWidget):
         if self._config.widget(widget_id) is None:
             return
         self._selected = widget_id
-        self.preview.set_selected(widget_id)
-        self._sync_spins()
+        self._show_selection()
 
     def set_visible(self, widget_id: str, visible: bool) -> None:
         current = self._require(widget_id)
@@ -124,6 +162,34 @@ class HudEditor(QWidget):
         self._set_config(stored)
         return stored
 
+    def save_persistent(self) -> None:
+        """Write the layout that is on screen, including edits that were not saved yet."""
+        self.save()
+
+    def open_fullscreen_preview(self) -> HudPreviewWindow:
+        """Open the layout in its own fullscreen view, at the screen's aspect ratio."""
+        if self._fullscreen is not None:
+            self._fullscreen.raise_()
+            self._fullscreen.activateWindow()
+            return self._fullscreen
+        window = HudPreviewWindow(self._translator, self)
+        self._fullscreen = window
+        self.add_preview(window.preview)
+        window.showFullScreen()
+        return window
+
+    def add_preview(self, preview: HudPreview) -> None:
+        if preview not in self._previews:
+            self._previews.append(preview)
+        preview.apply(self._config)
+        preview.set_selected(self._selected)
+
+    def note_preview_closed(self, window: HudPreviewWindow) -> None:
+        if window.preview in self._previews and window.preview is not self.preview:
+            self._previews.remove(window.preview)
+        if self._fullscreen is window:
+            self._fullscreen = None
+
     def _element_row(self, widget_id: str) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -140,50 +206,23 @@ class HudEditor(QWidget):
         self._checks[widget_id] = checkbox
         return row
 
-    def _geometry_row(self) -> QWidget:
-        translate = self._translator.translate
-        frame = QFrame()
-        frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        set_role(frame, "card")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(SPACE.md, SPACE.md, SPACE.md, SPACE.md)
-        position = QLabel(translate("hud.position"))
-        set_role(position, "card-title")
-        layout.addWidget(position)
-        layout.addLayout(self._spin_line(("x", "X"), ("y", "Y")))
-        size = QLabel(translate("hud.size"))
-        set_role(size, "card-title")
-        layout.addWidget(size)
-        layout.addLayout(
-            self._spin_line(("width", translate("hud.width")), ("height", translate("hud.height")))
-        )
-        return frame
-
-    def _spin_line(self, left: tuple[str, str], right: tuple[str, str]) -> QHBoxLayout:
-        line = QHBoxLayout()
-        line.setSpacing(SPACE.sm)
-        for key, label in (left, right):
-            caption = QLabel(label)
-            set_role(caption, "caption")
-            line.addWidget(caption)
-            line.addWidget(self._spins[key], 1)
-        return line
-
     def _actions(self) -> QHBoxLayout:
         translate = self._translator.translate
         buttons = QHBoxLayout()
         buttons.setSpacing(SPACE.sm)
+        preview = _action("hud-open-preview", translate("hud.open_preview"), "primary")
         standard = _action("hud-standard", translate("hud.standard"), "secondary")
         save = _action("hud-save", translate("hud.save"), "primary")
         revert = _action("hud-revert", translate("hud.revert"), "ghost")
         forward = _action("hud-forward", translate("hud.forward"), "secondary")
         backward = _action("hud-backward", translate("hud.backward"), "secondary")
+        preview.clicked.connect(self.open_fullscreen_preview)
         standard.clicked.connect(self.apply_standard_layout)
         save.clicked.connect(self.save)
         revert.clicked.connect(self.revert)
         forward.clicked.connect(self.bring_forward)
         backward.clicked.connect(self.send_backward)
-        for button in (standard, save, revert, forward, backward):
+        for button in (preview, standard, save, revert, forward, backward):
             buttons.addWidget(button)
         buttons.addStretch(1)
         return buttons
@@ -205,19 +244,23 @@ class HudEditor(QWidget):
     def _replace(self, widget: HudWidgetConfig) -> None:
         self._config = with_widget(self._config, widget)
         self._refresh_checks()
-        self.preview.apply(self._config)
-        self.preview.set_selected(self._selected)
-        if self._selected == widget.id:
-            self._sync_spins()
+        self._show_config()
 
     def _set_config(self, config: HudConfiguration) -> None:
         self._config = config
         if self._selected is None or config.widget(self._selected) is None:
             self._selected = config.widgets[0].id if config.widgets else None
         self._refresh_checks()
-        self.preview.apply(config)
-        self.preview.set_selected(self._selected)
-        self._sync_spins()
+        self._show_config()
+
+    def _show_config(self) -> None:
+        for preview in self._previews:
+            preview.apply(self._config)
+            preview.set_selected(self._selected)
+
+    def _show_selection(self) -> None:
+        for preview in self._previews:
+            preview.set_selected(self._selected)
 
     def _refresh_checks(self) -> None:
         for widget_id, checkbox in self._checks.items():
@@ -226,36 +269,45 @@ class HudEditor(QWidget):
             checkbox.setChecked(bool(item and item.visible))
             checkbox.blockSignals(False)
 
-    def _sync_spins(self) -> None:
-        widget = self._selected_widget()
-        for spin in self._spins.values():
-            spin.setEnabled(widget is not None)
-        if widget is None:
-            return
-        values = {
-            "x": widget.x,
-            "y": widget.y,
-            "width": widget.width,
-            "height": widget.height,
-        }
-        for key, spin in self._spins.items():
-            spin.blockSignals(True)
-            spin.setValue(values[key])
-            spin.blockSignals(False)
-
-    def _on_spin(self, _value: float) -> None:
-        if self._selected is None:
-            return
-        self.set_widget_geometry(
-            self._selected,
-            self._spins["x"].value(),
-            self._spins["y"].value(),
-            self._spins["width"].value(),
-            self._spins["height"].value(),
-        )
-
 
 LIVE_RANKING_DEFAULT = "live_ranking"
+
+
+class HudPreviewWindow(QDialog):
+    """Fullscreen editing view at the screen resolution. It is not the live race."""
+
+    def __init__(self, translator: Translator, editor: HudEditor) -> None:
+        super().__init__(editor)
+        self.setObjectName("hud-fullscreen-preview")
+        self.setWindowTitle(translator.translate("hud.preview"))
+        self.setModal(False)
+        self.setWindowOpacity(_PREVIEW_OPACITY)
+        self._editor = editor
+        self.preview = HudPreview(translator, editor)
+        self.preview.setObjectName("hud-fullscreen-canvas")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.preview)
+        self.caption = QLabel(translator.translate("hud.preview_hint"), self)
+        self.caption.setObjectName("hud-preview-hint")
+        set_role(self.caption, "caption")
+        self.close_button = QPushButton(translator.translate("hud.preview_close"), self)
+        self.close_button.setObjectName("hud-preview-close")
+        set_role(self.close_button, "secondary")
+        self.close_button.clicked.connect(self.close)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.caption.adjustSize()
+        self.close_button.adjustSize()
+        self.caption.move(16, 12)
+        self.close_button.move(max(16, self.width() - self.close_button.width() - 16), 8)
+        self.caption.raise_()
+        self.close_button.raise_()
+
+    def done(self, result: int) -> None:
+        self._editor.note_preview_closed(self)
+        super().done(result)
 
 
 class HudPreview(QWidget):
@@ -273,6 +325,7 @@ class HudPreview(QWidget):
         self._translator = translator
         self._boxes: dict[str, HudBox] = {}
         self._config = default_hud_configuration()
+        self.grid = HudGrid(self)
 
     def hasHeightForWidth(self) -> bool:  # noqa: N802
         return True
@@ -318,12 +371,40 @@ class HudPreview(QWidget):
             rect = to_pixels(item, width, height)
             box.setGeometry(rect.x, rect.y, rect.width, rect.height)
             box.raise_()
+        self.grid.setGeometry(0, 0, max(width, 0), max(height, 0))
+        self.grid.lower()
+        self.grid.update()
 
     def move_widget(self, widget_id: str, x: float, y: float, width: float, height: float) -> None:
-        self._editor.set_widget_geometry(widget_id, x, y, width, height)
+        self._editor.set_widget_geometry(
+            widget_id,
+            snap_axis(x, _GRID_X),
+            snap_axis(y, _GRID_Y),
+            snap_axis(width, _GRID_X),
+            snap_axis(height, _GRID_Y),
+        )
 
     def select_widget(self, widget_id: str) -> None:
         self._editor.select(widget_id)
+
+
+class HudGrid(QWidget):
+    """Alignment grid. Mouse events pass through to the elements underneath."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("hud-grid")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
+        painter = QPainter(self)
+        parent = self.parentWidget()
+        canvas_width = parent.width() if parent is not None else self.width()
+        canvas_height = parent.height() if parent is not None else self.height()
+        _paint_grid(
+            painter, canvas_width, canvas_height, self.x(), self.y(), self.width(), self.height()
+        )
 
 
 class HudBox(QFrame):
@@ -349,6 +430,19 @@ class HudBox(QFrame):
         self._press: tuple[float, float] | None = None
         self._origin: tuple[float, float, float, float] | None = None
         self._resizing = False
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        _paint_grid(
+            painter,
+            self._preview.width(),
+            self._preview.height(),
+            self.x(),
+            self.y(),
+            self.width(),
+            self.height(),
+        )
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -390,15 +484,6 @@ class HudBox(QFrame):
         self._origin = None
         self._resizing = False
         event.accept()
-
-
-def _spin(key: str) -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
-    spin.setObjectName(f"hud-{key}")
-    spin.setDecimals(2)
-    spin.setSingleStep(0.01)
-    spin.setRange(0.0, 1.0)
-    return spin
 
 
 def _action(object_name: str, text: str, role: str) -> QPushButton:

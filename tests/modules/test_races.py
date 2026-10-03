@@ -55,6 +55,18 @@ def test_add_participant_makes_race_ready(env: Env) -> None:
     assert env.races.require_race(race.id).status is RaceStatus.CREATED
 
 
+def test_update_participant_rewrites_the_same_row(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=2), 3)
+    driver_id, vehicle_id = env.pair(1)
+    other_vehicle = env.pair(2)[1]
+    added = env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    updated = env.races.update_participant(race.id, added.id, driver_id, other_vehicle, 2)
+    assert updated.id == added.id
+    assert (updated.vehicle_id, updated.lane, updated.driver_id) == (other_vehicle, 2, driver_id)
+    stored = env.races.require_race(race.id)
+    assert [item.id for item in stored.participants] == [added.id]
+
+
 def test_duplicate_lane_is_rejected(env: Env) -> None:
     race = env.races.create_race("R", env.track_id(), 3)
     d1, v1 = env.pair(1)
