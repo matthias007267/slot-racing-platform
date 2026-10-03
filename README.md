@@ -88,6 +88,12 @@ uv run python -m slot_racing.app     # equivalent
 uv run slot-racing --smoke-test      # start, show the window briefly, exit (headless friendly)
 ```
 
+On Windows, double-click `Start.bat` in the project folder. A desktop shortcut to that file
+works as well: the script switches to the project directory and runs `uv run slot-racing`.
+The project environment does not have to be activated by hand. If `uv` is not available but
+`.venv` already exists, the script uses that environment's Python with the same entry point
+(`python -m slot_racing.app`). When the start fails, the window stays open and shows the error.
+
 Data location: `%APPDATA%\SlotRacingPlatform` on Windows, `~/.local/share/SlotRacingPlatform`
 elsewhere. Set `SLOT_RACING_HOME` to use another directory. It contains `config.json` and
 `slot_racing.db`. Installations created before the project was renamed keep working: an existing
