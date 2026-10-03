@@ -47,7 +47,21 @@ class VehicleInfo:
 
     @property
     def label(self) -> str:
-        return f"{self.name} ({self.model})" if self.model else self.name
+        return vehicle_display_name(self.name, self.model, self.manufacturer)
+
+
+def vehicle_display_name(name: str, model: str | None, manufacturer: str | None) -> str:
+    """One visible name: manufacturer and model, without repeating either in parentheses."""
+    manufacturer_text = (manufacturer or "").strip()
+    model_text = (model or "").strip()
+    if manufacturer_text and model_text:
+        return f"{manufacturer_text} {model_text}"
+    if manufacturer_text:
+        return manufacturer_text
+    stored = name.strip()
+    if model_text and model_text.casefold() not in stored.casefold():
+        return f"{stored} {model_text}".strip()
+    return stored
 
 
 @dataclass(frozen=True, slots=True)

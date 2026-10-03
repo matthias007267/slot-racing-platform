@@ -222,6 +222,10 @@ def stylesheet(checkmark: str = "") -> str:
     QFrame[role="hud-panel"][tone="warn"] {{
         border: 1px solid {c.warning};
     }}
+    QWidget#hud-preview-toolbar {{
+        background: {c.surface};
+        border-bottom: 1px solid {c.border};
+    }}
     QWidget#hud-preview, QWidget#hud-fullscreen-canvas, QWidget#hud-stage {{
         background: {c.background};
         border: 1px solid {c.border};

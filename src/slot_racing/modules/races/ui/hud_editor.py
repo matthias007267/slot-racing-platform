@@ -32,9 +32,11 @@ from slot_racing.modules.races.hud import (
 from slot_racing.uikit.theme import SPACE, configure_page, polish, set_role
 
 _HANDLE = 12
-_GRID_X = 16
-_GRID_Y = 9
-_PREVIEW_OPACITY = 0.9
+_GRID_X = 16 * 8
+_GRID_Y = 9 * 8
+_GRID_MAJOR = 8
+_BUTTON_CHROME = 14 * 2 + 2
+_BUTTON_SPARE = 8
 
 
 def snap_axis(value: float, parts: int) -> float:
@@ -54,17 +56,17 @@ def _paint_grid(
     """Draw the canvas grid through one rectangle. ``origin`` is that rectangle's top left."""
     if canvas_width <= 1 or canvas_height <= 1 or view_width <= 0 or view_height <= 0:
         return
-    minor = QPen(QColor(255, 255, 255, 90))
+    minor = QPen(QColor(255, 255, 255, 55))
     major = QPen(QColor(255, 196, 64, 220))
     for index in range(_GRID_X + 1):
         x = round(index * canvas_width / _GRID_X) - origin_x
         if 0 <= x <= view_width:
-            painter.setPen(major if index in (0, _GRID_X // 2, _GRID_X) else minor)
+            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
             painter.drawLine(x, 0, x, view_height)
     for index in range(_GRID_Y + 1):
         y = round(index * canvas_height / _GRID_Y) - origin_y
         if 0 <= y <= view_height:
-            painter.setPen(major if index in (0, _GRID_Y) else minor)
+            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
             painter.drawLine(0, y, view_width, y)
     center_y = canvas_height // 2 - origin_y
     if 0 <= center_y <= view_height:
@@ -87,15 +89,11 @@ class HudEditor(QWidget):
         tr = translator.translate
 
         self.preview = HudPreview(translator, self)
+        self.preview.hide()
         self._previews: list[HudPreview] = [self.preview]
 
         layout = QVBoxLayout(self)
         configure_page(layout)
-        preview_title = QLabel(tr("hud.preview"))
-        set_role(preview_title, "card-title")
-        layout.addWidget(preview_title)
-        layout.addWidget(self.preview)
-
         elements = QLabel(tr("hud.elements"))
         set_role(elements, "section")
         layout.addWidget(elements)
@@ -210,20 +208,9 @@ class HudEditor(QWidget):
         translate = self._translator.translate
         buttons = QHBoxLayout()
         buttons.setSpacing(SPACE.sm)
-        preview = _action("hud-open-preview", translate("hud.open_preview"), "primary")
-        standard = _action("hud-standard", translate("hud.standard"), "secondary")
-        save = _action("hud-save", translate("hud.save"), "primary")
-        revert = _action("hud-revert", translate("hud.revert"), "ghost")
-        forward = _action("hud-forward", translate("hud.forward"), "secondary")
-        backward = _action("hud-backward", translate("hud.backward"), "secondary")
+        preview = _solid_button("hud-open-preview", translate("hud.open_preview"), "primary")
         preview.clicked.connect(self.open_fullscreen_preview)
-        standard.clicked.connect(self.apply_standard_layout)
-        save.clicked.connect(self.save)
-        revert.clicked.connect(self.revert)
-        forward.clicked.connect(self.bring_forward)
-        backward.clicked.connect(self.send_backward)
-        for button in (preview, standard, save, revert, forward, backward):
-            buttons.addWidget(button)
+        buttons.addWidget(preview)
         buttons.addStretch(1)
         return buttons
 
@@ -281,29 +268,50 @@ class HudPreviewWindow(QDialog):
         self.setObjectName("hud-fullscreen-preview")
         self.setWindowTitle(translator.translate("hud.preview"))
         self.setModal(False)
-        self.setWindowOpacity(_PREVIEW_OPACITY)
+        self.setWindowOpacity(1.0)
         self._editor = editor
         self.preview = HudPreview(translator, editor)
         self.preview.setObjectName("hud-fullscreen-canvas")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.preview)
-        self.caption = QLabel(translator.translate("hud.preview_hint"), self)
+        translate = translator.translate
+        self.standard_button = _solid_button("hud-standard", translate("hud.standard"), "secondary")
+        self.save_button = _solid_button("hud-save", translate("hud.save"), "primary")
+        self.revert_button = _solid_button("hud-revert", translate("hud.revert"), "secondary")
+        self.forward_button = _solid_button("hud-forward", translate("hud.forward"), "secondary")
+        self.backward_button = _solid_button("hud-backward", translate("hud.backward"), "secondary")
+        self.close_button = _solid_button(
+            "hud-preview-close", translate("hud.preview_close"), "secondary"
+        )
+        self.standard_button.clicked.connect(editor.apply_standard_layout)
+        self.save_button.clicked.connect(editor.save)
+        self.revert_button.clicked.connect(editor.revert)
+        self.forward_button.clicked.connect(editor.bring_forward)
+        self.backward_button.clicked.connect(editor.send_backward)
+        self.close_button.clicked.connect(self.close)
+        toolbar = QWidget()
+        toolbar.setObjectName("hud-preview-toolbar")
+        toolbar.setAutoFillBackground(True)
+        actions = QHBoxLayout(toolbar)
+        actions.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
+        actions.setSpacing(SPACE.sm)
+        for button in (
+            self.standard_button,
+            self.save_button,
+            self.revert_button,
+            self.forward_button,
+            self.backward_button,
+            self.close_button,
+        ):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        self.caption = QLabel(translate("hud.preview_hint"))
         self.caption.setObjectName("hud-preview-hint")
         set_role(self.caption, "caption")
-        self.close_button = QPushButton(translator.translate("hud.preview_close"), self)
-        self.close_button.setObjectName("hud-preview-close")
-        set_role(self.close_button, "secondary")
-        self.close_button.clicked.connect(self.close)
-
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self.caption.adjustSize()
-        self.close_button.adjustSize()
-        self.caption.move(16, 12)
-        self.close_button.move(max(16, self.width() - self.close_button.width() - 16), 8)
-        self.caption.raise_()
-        self.close_button.raise_()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(toolbar)
+        layout.addWidget(self.caption)
+        layout.addWidget(self.preview, 1)
 
     def done(self, result: int) -> None:
         self._editor.note_preview_closed(self)
@@ -486,8 +494,14 @@ class HudBox(QFrame):
         event.accept()
 
 
-def _action(object_name: str, text: str, role: str) -> QPushButton:
+def _solid_button(object_name: str, text: str, role: str) -> QPushButton:
+    """Opaque button wide enough for its full label."""
     button = QPushButton(text)
     button.setObjectName(object_name)
+    button.setAutoFillBackground(True)
     set_role(button, role)
+    button.ensurePolished()
+    advance = button.fontMetrics().horizontalAdvance(text)
+    button.setMinimumWidth(advance + _BUTTON_CHROME + _BUTTON_SPARE)
+    button.setMinimumHeight(36)
     return button

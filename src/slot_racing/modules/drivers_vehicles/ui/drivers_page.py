@@ -105,7 +105,7 @@ class DriversPage(EntityPage):
             return
         fill_table(
             self.vehicles_table,
-            [(vehicle.name, vehicle.model or "") for vehicle in owned],
+            [(vehicle.label, vehicle.model or "") for vehicle in owned],
             keep_selection=False,
         )
         self.vehicles_empty.setText("")

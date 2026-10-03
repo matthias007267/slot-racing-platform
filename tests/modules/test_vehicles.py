@@ -16,7 +16,7 @@ def test_create_vehicle(env: Env) -> None:
     assert vehicle.manufacturer == "ExampleBrand"
     assert vehicle.driver_id is None
     assert vehicle.is_active
-    assert vehicle.label == "Rennwagen (Porsche 911)"
+    assert vehicle.label == "ExampleBrand Porsche 911"
 
 
 def test_scale_and_notes_are_stored_and_can_be_cleared(env: Env) -> None:

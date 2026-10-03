@@ -18,7 +18,7 @@ from pytestqt.qtbot import QtBot
 from slot_racing.app.main import main
 from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
-from slot_racing.core.config import AppConfig
+from slot_racing.core.config import AppConfig, load_config
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from slot_racing.core.storage import Database
 
@@ -311,6 +311,34 @@ def test_quit_stays_open_when_saving_fails(
     assert confirm_quit is not None
     confirm_quit.click()
     assert window.isVisible()
+
+
+def test_the_window_restores_and_stores_its_size(
+    qtbot: QtBot, runtime: Runtime, tmp_path: object
+) -> None:
+    from pathlib import Path
+
+    runtime.config_path = Path(str(tmp_path)) / "config.json"
+    runtime.config.window_width = 1200
+    runtime.config.window_height = 800
+    runtime.config.window_x = 40
+    runtime.config.window_y = 30
+    window = make_window(qtbot, runtime)
+    assert (window.width(), window.height(), window.x(), window.y()) == (1200, 800, 40, 30)
+
+    window.show()
+    window.resize(1024, 768)
+    window.move(15, 25)
+    qtbot.waitUntil(lambda: (window.width(), window.height()) == (1024, 768))
+    window.close()
+    stored = load_config(runtime.config_path)
+    assert (stored.window_width, stored.window_height) == (1024, 768)
+    assert (stored.window_x, stored.window_y) == (15, 25)
+
+    runtime.config.window_width = 10
+    runtime.config.window_height = 10
+    fallback = make_window(qtbot, runtime)
+    assert (fallback.width(), fallback.height()) == (1100, 700)
 
 
 def test_application_starts_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:

@@ -68,7 +68,7 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert live.laps_label.text().endswith("2")
     assert live.table.rowCount() == 2
     assert column_text(live.table, 0, "Fahrer") == "Zoe"
-    assert column_text(live.table, 0, "Fahrzeug") == "Porsche (911)"
+    assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
     assert column_text(live.table, 0, "Startnummer") == "7"
     assert column_text(live.table, 0, "Spur") == "1"
     assert column_text(live.table, 0, "Runden") == "0"
@@ -136,7 +136,7 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert results.table.rowCount() == 2
     assert column_text(results.table, 0, "Platz") == "1"
     assert column_text(results.table, 0, "Fahrer") == "Zoe"
-    assert column_text(results.table, 0, "Fahrzeug") == "Porsche (911)"
+    assert column_text(results.table, 0, "Fahrzeug") == "Porsche 911"
     assert column_text(results.table, 0, "Startnummer") == "7"
     assert column_text(results.table, 0, "Runden") == "2"
     assert column_text(results.table, 0, "Status") == "Fertig"

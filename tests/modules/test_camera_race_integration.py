@@ -816,7 +816,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         assert column_text(live.table, 0, "Platz") == "1"
         assert column_text(live.table, 0, "Spur") == "1"
         assert column_text(live.table, 0, "Fahrer") == "Anna"
-        assert column_text(live.table, 0, "Fahrzeug") == "Porsche (911)"
+        assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
         assert column_text(live.table, 0, "Aktuelle Runde") == "1/1"
         assert column_text(live.table, 0, "Runden") == "0"
         names = [child.objectName() for child in live.findChildren(QWidget)]
