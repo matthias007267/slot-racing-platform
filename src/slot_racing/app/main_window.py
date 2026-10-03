@@ -10,6 +10,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -28,6 +29,29 @@ from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import SPACE, apply_theme, set_role
 
 logger = logging.getLogger(__name__)
+
+# Room past the measured text so the last letter is not flush with the clip edge.
+_DIALOG_TEXT_SPARE = 12
+_BUTTON_CHROME = 14 * 2 + 2
+
+
+def _keep_dialog_text_visible(box: QMessageBox) -> None:
+    """Widen the message and its buttons. Stylesheet padding otherwise clips the last letters."""
+    label = box.findChild(QLabel, "qt_msgbox_label")
+    if label is not None and label.text():
+        label.ensurePolished()
+        widest = max(
+            label.fontMetrics().horizontalAdvance(line) for line in label.text().splitlines()
+        )
+        label.setMinimumWidth(widest + _DIALOG_TEXT_SPARE)
+    for button in box.buttons():
+        if not isinstance(button, QPushButton) or not button.text():
+            continue
+        button.ensurePolished()
+        advance = button.fontMetrics().horizontalAdvance(button.text())
+        button.setMinimumWidth(
+            max(button.sizeHint().width(), advance + _BUTTON_CHROME) + _DIALOG_TEXT_SPARE
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +183,7 @@ class MainWindow(QMainWindow):
         accept.setObjectName("quit-confirm")
         cancel.setObjectName("quit-cancel")
         box.setDefaultButton(cancel)
+        _keep_dialog_text_visible(box)
         box.exec()
         return box.clickedButton() is accept
 
@@ -169,6 +194,7 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(self._tr("nav.quit"))
         detail = describe_error(self._runtime.translator, error)
         box.setText(f"{self._tr('app.quit.failed')}\n\n{detail}")
+        _keep_dialog_text_visible(box)
         box.exec()
 
     def _save_persistent_state(self) -> None:

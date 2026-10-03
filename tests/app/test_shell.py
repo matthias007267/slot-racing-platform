@@ -3,7 +3,16 @@ from typing import ClassVar
 
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QMessageBox, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QStyle,
+    QStyleOptionButton,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from slot_racing.app.main import main
@@ -185,6 +194,43 @@ def _click_when_shown(object_name: str) -> None:
         button.click()
 
     QTimer.singleShot(0, click)
+
+
+def _button_text_spare(button: QPushButton) -> int:
+    option = QStyleOptionButton()
+    button.initStyleOption(option)
+    room = button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button)
+    return room.width() - button.fontMetrics().horizontalAdvance(button.text())
+
+
+def test_quit_dialog_keeps_the_question_and_buttons_fully_visible(
+    qtbot: QtBot, runtime: Runtime
+) -> None:
+    window = make_window(qtbot, runtime)
+    window.show()
+    spare: dict[str, int] = {}
+
+    def inspect() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        label = box.findChild(QLabel, "qt_msgbox_label")
+        assert label is not None
+        assert label.text() == "Möchtest du das Programm wirklich beenden?"
+        spare["question"] = label.width() - label.fontMetrics().horizontalAdvance(label.text())
+        for name in ("quit-confirm", "quit-cancel"):
+            button = box.findChild(QPushButton, name)
+            assert button is not None
+            spare[name] = _button_text_spare(button)
+        box.reject()
+
+    QTimer.singleShot(0, inspect)
+    quit_button = window.findChild(QPushButton, "app-quit")
+    assert quit_button is not None
+    assert _button_text_spare(quit_button) >= 8
+    quit_button.click()
+    assert spare["question"] >= 8
+    assert spare["quit-confirm"] >= 8
+    assert spare["quit-cancel"] >= 8
 
 
 def test_quit_button_sits_above_settings_and_cancel_keeps_the_app_open(
