@@ -43,7 +43,6 @@ class RaceParticipant(Base):
     __table_args__ = (
         UniqueConstraint("race_id", "lane"),
         UniqueConstraint("race_id", "driver_id"),
-        UniqueConstraint("race_id", "vehicle_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

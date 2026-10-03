@@ -336,6 +336,37 @@ def test_wizard_offers_every_vehicle_and_suggests_the_favorite(qtbot: QtBot, env
     assert wizard.vehicle_combo.currentData() == ferrari.id
 
 
+def test_wizard_lets_two_drivers_select_the_same_vehicle(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heimbahn", lanes=2)
+    anna = env.driver("Anna")
+    ben = env.driver("Ben")
+    porsche = env.vehicle("Porsche")
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Finale")
+    assert wizard.go_next()
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(track.id))
+    assert wizard.go_next()
+    assert wizard.go_next()
+    assert wizard.step == PARTICIPANTS
+
+    for lane, driver in ((1, anna), (2, ben)):
+        wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(driver.id))
+        wizard.vehicle_combo.setCurrentIndex(wizard.vehicle_combo.findData(porsche.id))
+        wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(lane))
+        assert wizard.vehicle_combo.currentData() == porsche.id
+        assert wizard.add_participant(), wizard.status.text()
+
+    assert wizard.participant_table.rowCount() == 2
+    assert wizard.race is not None
+    stored = env.races.require_race(wizard.race.id)
+    assert [item.driver_id for item in stored.participants] == [anna.id, ben.id]
+    assert [item.vehicle_id for item in stored.participants] == [porsche.id, porsche.id]
+    assert len(env.vehicles.list_vehicles()) == 1
+
+
 def test_vehicle_dialog_saves_a_favorite_only_with_a_driver(qtbot: QtBot, env: Env) -> None:
     driver = env.driver("Anna")
     _, page = open_page(qtbot, env, "vehicles")

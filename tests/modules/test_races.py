@@ -148,17 +148,20 @@ def test_any_driver_may_use_a_vehicle_owned_by_someone_else(env: Env) -> None:
     assert len(env.races.require_race(race.id).participants) == 3
 
 
-def test_participants_must_be_unique(env: Env) -> None:
-    race = env.races.create_race("R", env.track_id(), 3)
-    d1, v1 = env.pair(1)
-    d2, v2 = env.pair(2)
-    env.races.add_participant(race.id, d1, v1, 1)
+def test_two_drivers_may_share_one_vehicle(env: Env) -> None:
+    race = env.races.create_race("R", env.track_id(lanes=4), 3)
+    d1, shared = env.pair(1)
+    d2, other = env.pair(2)
+    first = env.races.add_participant(race.id, d1, shared, 1)
+    second = env.races.add_participant(race.id, d2, shared, 2)
+    assert first.vehicle_id == second.vehicle_id == shared
+    switched = env.races.update_participant(race.id, second.id, d2, other, 2)
+    assert switched.vehicle_id == other
+    back = env.races.update_participant(race.id, second.id, d2, shared, 2)
+    assert back.id == second.id and back.vehicle_id == shared
     with pytest.raises(ValidationError) as caught:
-        env.races.add_participant(race.id, d1, v2, 2)
+        env.races.add_participant(race.id, d1, other, 3)
     assert key_of(caught) == "error.race.driver_duplicate"
-    with pytest.raises(ValidationError) as caught:
-        env.races.add_participant(race.id, d2, v1, 2)
-    assert key_of(caught) == "error.race.vehicle_duplicate"
 
 
 def test_changing_to_a_smaller_track_requires_matching_participants(env: Env) -> None:

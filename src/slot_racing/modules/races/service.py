@@ -152,8 +152,6 @@ class RaceService:
                 raise ValidationError("error.race.lane_taken", lane=lane)
             if any(p.driver_id == driver_id for p in existing):
                 raise ValidationError("error.race.driver_duplicate", driver=driver.label)
-            if any(p.vehicle_id == vehicle_id for p in existing):
-                raise ValidationError("error.race.vehicle_duplicate", vehicle=vehicle.label)
             participant = RaceParticipant(
                 race_id=race.id, driver_id=driver_id, vehicle_id=vehicle_id, lane=lane
             )
@@ -203,8 +201,6 @@ class RaceService:
                 raise ValidationError("error.race.lane_taken", lane=lane)
             if any(other.driver_id == driver_id for other in others):
                 raise ValidationError("error.race.driver_duplicate", driver=driver.label)
-            if any(other.vehicle_id == vehicle_id for other in others):
-                raise ValidationError("error.race.vehicle_duplicate", vehicle=vehicle.label)
             participant.driver_id = driver_id
             participant.vehicle_id = vehicle_id
             participant.lane = lane
