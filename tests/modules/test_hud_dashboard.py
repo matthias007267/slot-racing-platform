@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -131,9 +132,13 @@ def test_the_ranking_scrolls_vertically_and_keeps_the_given_order(qtbot: QtBot) 
     _assert_children_inside(ranking)
 
 
-def test_narrow_header_keeps_status_track_field_and_timing_source(qtbot: QtBot) -> None:
+def _show_narrow_header(qtbot: QtBot, pixel_size: int | None) -> RaceHeaderWidget:
     header = RaceHeaderWidget(_translator())
     qtbot.addWidget(header)
+    if pixel_size is not None:
+        font = header.font()
+        font.setPixelSize(pixel_size)
+        header.setFont(font)
     header.name_label.setText("Finale")
     header.header_status.setText("Läuft")
     header.track_label.setText("Heimbahn")
@@ -142,7 +147,13 @@ def test_narrow_header_keeps_status_track_field_and_timing_source(qtbot: QtBot) 
     header.show()
     header.resize(226, 47)
     QApplication.processEvents()
+    return header
+
+
+def _assert_header_facts_fit(header: RaceHeaderWidget) -> None:
+    """The stage's rectangle sticks, and every fact is fully visible inside it."""
     assert header.width() == 226
+    assert header.height() == 47
     for label in (
         header.header_status,
         header.track_label,
@@ -152,11 +163,19 @@ def test_narrow_header_keeps_status_track_field_and_timing_source(qtbot: QtBot) 
         assert label.isVisible()
         assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
         assert label.height() + 1 >= label.fontMetrics().height()
+        assert label.x() >= -1
+        assert label.y() >= -1
+        assert label.x() + label.width() <= header.width() + 1
+        assert label.y() + label.height() <= header.height() + 1
 
 
-def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
-    ranking = LiveRankingWidget(_translator())
-    qtbot.addWidget(ranking)
+def test_narrow_header_keeps_status_track_field_and_timing_source(qtbot: QtBot) -> None:
+    _assert_header_facts_fit(_show_narrow_header(qtbot, None))
+    # A face as wide as a typical Windows UI font must use the same rectangle.
+    _assert_header_facts_fit(_show_narrow_header(qtbot, 18))
+
+
+def _fill_narrow_ranking(ranking: LiveRankingWidget) -> list[str]:
     names = ["Max Müller", "Anna Berger", "Peter Schmidt", "Thomas Weber", "Lisa König", "Zoe"]
     fill_table(
         ranking.table,
@@ -179,18 +198,49 @@ def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
         ],
         list(range(1, 7)),
     )
+    return names
+
+
+def _assert_names_and_lap_counts_fit(ranking: LiveRankingWidget, names: list[str]) -> None:
+    """Names and lap counts stay whole. The panel keeps the narrow rectangle."""
+    assert ranking.width() == 226
+    assert ranking.height() == 155
+    table = ranking.table
+    assert table.horizontalScrollBar().maximum() == 0
+    bold = table.font()
+    bold.setBold(True)
+    name_need = max(QFontMetrics(bold).horizontalAdvance(name) for name in names) + 16
+    assert table.columnWidth(COLUMN_DRIVER) >= name_need - 2
+    assert not table.isColumnHidden(COLUMN_LAPS)
+    lap_need = max(
+        table.fontMetrics().horizontalAdvance(table.item(row, COLUMN_LAPS).text())
+        for row in range(table.rowCount())
+    )
+    assert table.columnWidth(COLUMN_LAPS) >= lap_need + 16
+    assert table.isColumnHidden(COLUMN_BEST) or table.columnWidth(COLUMN_BEST) >= 64
+
+
+def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
+    ranking = LiveRankingWidget(_translator())
+    qtbot.addWidget(ranking)
+    names = _fill_narrow_ranking(ranking)
     ranking.show()
     ranking.resize(226, 155)
     QApplication.processEvents()
     ranking.present()
-    table = ranking.table
-    assert table.horizontalScrollBar().maximum() == 0
-    metrics = table.fontMetrics()
-    name_need = max(metrics.horizontalAdvance(name) for name in names) + 16
-    assert table.columnWidth(COLUMN_DRIVER) >= name_need - 2
-    assert not table.isColumnHidden(COLUMN_LAPS)
-    assert table.columnWidth(COLUMN_LAPS) >= metrics.horizontalAdvance("Runden") - 8
-    assert table.isColumnHidden(COLUMN_BEST) or table.columnWidth(COLUMN_BEST) >= 64
+    _assert_names_and_lap_counts_fit(ranking, names)
+
+    wide = LiveRankingWidget(_translator())
+    qtbot.addWidget(wide)
+    font = wide.table.font()
+    font.setPixelSize(18)
+    wide.table.setFont(font)
+    wide_names = _fill_narrow_ranking(wide)
+    wide.show()
+    wide.resize(226, 155)
+    QApplication.processEvents()
+    wide.present()
+    _assert_names_and_lap_counts_fit(wide, wide_names)
 
 
 def test_short_highlight_keeps_the_driver_name(qtbot: QtBot) -> None:
