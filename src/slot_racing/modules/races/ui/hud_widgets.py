@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
-    QStyleOptionButton,
     QStyleOptionViewItem,
     QTableWidget,
     QVBoxLayout,
@@ -42,7 +41,6 @@ from slot_racing.uikit.widgets import StatusLabel, make_table
 _MIN_FONT = 12
 _MAX_FONT = 64
 _MIN_TEXT_FONT = 6
-_BUTTON_FIT_SLACK = 2
 _CELL_PAD = 16
 _TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -782,11 +780,15 @@ class RaceControlsWidget(HudWidget):
         self.stop_button = _button(tr("hud.control.abort"), "live-stop", "danger")
         self.results_button = _button(tr("hud.control.results"), "live-results", "primary")
         self.back_button = _button(tr("hud.control.back"), "live-back", "ghost")
-        self.body.addLayout(_button_row(self.pause_button, self.resume_button))
-        self.body.addLayout(_button_row(self.stop_button, self.results_button, self.back_button))
+        self._rows = (
+            _button_row(self.pause_button, self.resume_button),
+            _button_row(self.stop_button, self.results_button, self.back_button),
+        )
+        for row in self._rows:
+            self.body.addLayout(row)
         self._fitting = False
         self._fit_px: int | None = None
-        self._fit_signature: tuple[int, ...] | None = None
+        self._fit_signature: tuple[int, int] | None = None
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -822,40 +824,85 @@ class RaceControlsWidget(HudWidget):
             self._fitting = False
 
     def _fit_labels(self) -> None:
-        """Shrink every label until it fits inside the button, with two pixels to spare.
+        """Shrink the type, then give every button at least its own text width.
 
-        The advance is read from ``button.fontMetrics()`` after the font is applied.
-        A detached metrics object underestimates Segoe UI, and the same face can
-        still grow by a pixel once the style sheet settles. The spare keeps that
-        rounding inside the button. The theme's style sheet ignores ``setFont``,
-        so a rule on the button itself is used when a style sheet is active.
+        Equal stretch rounds a long label down by a pixel. "Ergebnisse" then
+        measures 60 px inside a 59 px button. The row budget is the panel width,
+        and the buttons are fixed to shares that cannot fall below the advance.
         """
-        buttons = self._buttons()
-        if any(button.width() <= 0 for button in buttons):
+        if self.width() <= 0 or self.height() <= 0:
             return
-        signature = tuple(button.width() for button in buttons)
-        if (
-            signature == self._fit_signature
-            and self._fit_px is not None
-            and self._labels_fit(buttons)
-        ):
+        signature = (self.width(), self.height())
+        if signature == self._fit_signature and self._widths_hold():
             return
         start = max(_pixel_size(self.font()), _MIN_TEXT_FONT)
         winner = _MIN_TEXT_FONT
         for size in range(start, _MIN_TEXT_FONT - 1, -1):
             self._apply_size(size)
-            self.body.activate()
-            if self._labels_fit(buttons):
+            if self._rows_hold():
                 winner = size
                 break
+        while winner > _MIN_TEXT_FONT:
+            self._apply_size(winner)
+            self._assign_widths()
+            if self._widths_hold():
+                break
+            winner -= 1
+        else:
+            self._apply_size(winner)
+            self._assign_widths()
         self._fit_px = winner
-        self._fit_signature = tuple(button.width() for button in buttons)
+        self._fit_signature = signature
 
-    def _labels_fit(self, buttons: tuple[QPushButton, ...]) -> bool:
-        return all(
-            button.fontMetrics().horizontalAdvance(button.text()) <= self._label_limit(button)
-            for button in buttons
+    def _row_groups(self) -> tuple[tuple[QPushButton, ...], ...]:
+        return (
+            (self.pause_button, self.resume_button),
+            (self.stop_button, self.results_button, self.back_button),
         )
+
+    def _row_budget(self) -> int:
+        margins = self.body.contentsMargins()
+        return max(self.width() - margins.left() - margins.right(), 1)
+
+    def _row_need(self, buttons: tuple[QPushButton, ...]) -> int:
+        gaps = SPACE.xs * max(len(buttons) - 1, 0)
+        return (
+            sum(button.fontMetrics().horizontalAdvance(button.text()) for button in buttons) + gaps
+        )
+
+    def _rows_hold(self) -> bool:
+        budget = self._row_budget()
+        return all(self._row_need(buttons) <= budget for buttons in self._row_groups())
+
+    def _widths_hold(self) -> bool:
+        return all(
+            button.width() >= button.fontMetrics().horizontalAdvance(button.text())
+            for button in self._buttons()
+        )
+
+    def _assign_widths(self) -> None:
+        """Split each row so every button is at least as wide as its text."""
+        budget = self._row_budget()
+        for buttons in self._row_groups():
+            gaps = SPACE.xs * max(len(buttons) - 1, 0)
+            avail = max(budget - gaps, len(buttons))
+            needs = [button.fontMetrics().horizontalAdvance(button.text()) for button in buttons]
+            extra = max(avail - sum(needs), 0)
+            share, leftover = divmod(extra, len(buttons))
+            widths = [
+                need + share + (1 if index < leftover else 0) for index, need in enumerate(needs)
+            ]
+            overflow = sum(widths) - avail
+            for index, need in enumerate(needs):
+                if overflow <= 0:
+                    break
+                spare = widths[index] - need
+                take = min(max(spare, 0), overflow)
+                widths[index] -= take
+                overflow -= take
+            for button, width in zip(buttons, widths, strict=True):
+                button.setFixedWidth(max(width, 1))
+        self.body.activate()
 
     def _apply_size(self, size: int) -> None:
         for button in self._buttons():
@@ -872,20 +919,6 @@ class RaceControlsWidget(HudWidget):
             ):
                 button.setProperty("fontLocked", True)
                 self._set_pixel(button, size)
-
-    def _label_limit(self, button: QPushButton) -> int:
-        """Inner width the label may use. Two pixels stay free for hinting and rounding."""
-        if button.width() <= 0:
-            return 0
-        option = QStyleOptionButton()
-        button.initStyleOption(option)
-        inner = button.style().subElementRect(
-            QStyle.SubElement.SE_PushButtonContents, option, button
-        )
-        available = button.width()
-        if 0 < inner.width() < available:
-            available = inner.width()
-        return max(available - _BUTTON_FIT_SLACK, 1)
 
     def _set_pixel(self, button: QPushButton, size: int) -> None:
         use_rule = self._stylesheet_fonts() or bool(button.property("fontLocked"))
