@@ -176,7 +176,7 @@ class LiveRaceView(QWidget):
         self._lap_notice = None
         self._announced_finishers = set()
         self._message = ""
-        self.warning.clear_message()
+        self.messages.clear_warning()
         self.refresh()
         if runner.is_active:
             self._timer.start()
@@ -285,13 +285,13 @@ class LiveRaceView(QWidget):
         if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
             status_text = tr("race.status.aborted")
         self.name_label.setText(snapshot.name)
-        self.track_label.setText(f"{tr('race.live.track')}: {snapshot.track_name}")
-        self.header.header_status.setText(f"{tr('race.live.status')}: {status_text}")
+        self.track_label.setText(snapshot.track_name)
+        self.header.header_status.setText(status_text)
         self.header.participants_label.setText(
             self.translator.format("hud.header.participants", count=len(snapshot.rows))
         )
         provider = provider_label(self.translator, snapshot.timing_provider)
-        self.provider_label.setText(f"{tr('race.live.provider')}: {provider}")
+        self.provider_label.setText(provider)
         self.status_label.setText(f"● {status_text}")
         tone = _status_tone(snapshot)
         set_tone(self.status_label, tone)
@@ -318,7 +318,7 @@ class LiveRaceView(QWidget):
             self._message = _status_message(tr, snapshot)
         self.messages.message_label.setText(self._message or EMPTY_DISPLAY)
         if snapshot.source_errors:
-            self.warning.show_error(
+            self.messages.show_warning(
                 self.translator.format(
                     "race.live.warning", detail="; ".join(snapshot.source_errors)
                 )
@@ -455,7 +455,7 @@ class LiveRaceView(QWidget):
         except Exception as error:
             if not is_expected(error):
                 logger.exception("Live race action failed")
-            self.warning.show_error(describe_error(self.translator, error))
+            self.messages.show_warning(describe_error(self.translator, error))
 
     def _unsubscribe(self) -> None:
         for subscription in self._subscriptions:

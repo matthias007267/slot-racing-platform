@@ -279,6 +279,10 @@ def stylesheet(checkmark: str = "") -> str:
         padding: 2px 6px;
         font-size: 12px;
     }}
+    QPushButton[compact="true"][fit="small"] {{
+        padding: 0px 2px;
+        font-size: 10px;
+    }}
     QPushButton:default, QPushButton[role="primary"] {{
         background: {c.accent};
         color: {c.accent_text};

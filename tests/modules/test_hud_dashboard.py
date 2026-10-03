@@ -17,11 +17,14 @@ from slot_racing.modules.races.ui.hud_widgets import (
     COLUMN_VEHICLE,
     LEADER_ROLE,
     BestLapWidget,
+    DriverHighlightWidget,
     LapProgressWidget,
     LastLapWidget,
     LiveRankingWidget,
     RaceControlsWidget,
+    RaceHeaderWidget,
     RaceMessageWidget,
+    RaceStatusWidget,
 )
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -126,6 +129,129 @@ def test_the_ranking_scrolls_vertically_and_keeps_the_given_order(qtbot: QtBot) 
     assert not ranking.table.isColumnHidden(3)
     assert not ranking.table.isColumnHidden(COLUMN_BEST)
     _assert_children_inside(ranking)
+
+
+def test_narrow_header_keeps_status_track_field_and_timing_source(qtbot: QtBot) -> None:
+    header = RaceHeaderWidget(_translator())
+    qtbot.addWidget(header)
+    header.name_label.setText("Finale")
+    header.header_status.setText("Läuft")
+    header.track_label.setText("Heimbahn")
+    header.participants_label.setText("6 Teilnehmer")
+    header.provider_label.setText("Simulation")
+    header.show()
+    header.resize(226, 47)
+    QApplication.processEvents()
+    assert header.width() == 226
+    for label in (
+        header.header_status,
+        header.track_label,
+        header.participants_label,
+        header.provider_label,
+    ):
+        assert label.isVisible()
+        assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
+        assert label.height() + 1 >= label.fontMetrics().height()
+
+
+def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
+    ranking = LiveRankingWidget(_translator())
+    qtbot.addWidget(ranking)
+    names = ["Max Müller", "Anna Berger", "Peter Schmidt", "Thomas Weber", "Lisa König", "Zoe"]
+    fill_table(
+        ranking.table,
+        [
+            (
+                str(index + 1),
+                name,
+                "Porsche (911)",
+                "7",
+                "1",
+                "0",
+                "1/8",
+                "-",
+                "-",
+                "-",
+                "0/8",
+                "Fährt",
+            )
+            for index, name in enumerate(names)
+        ],
+        list(range(1, 7)),
+    )
+    ranking.show()
+    ranking.resize(226, 155)
+    QApplication.processEvents()
+    ranking.present()
+    table = ranking.table
+    assert table.horizontalScrollBar().maximum() == 0
+    metrics = table.fontMetrics()
+    name_need = max(metrics.horizontalAdvance(name) for name in names) + 16
+    assert table.columnWidth(COLUMN_DRIVER) >= name_need - 2
+    assert not table.isColumnHidden(COLUMN_LAPS)
+    assert table.columnWidth(COLUMN_LAPS) >= metrics.horizontalAdvance("Runden") - 8
+    assert table.isColumnHidden(COLUMN_BEST) or table.columnWidth(COLUMN_BEST) >= 64
+
+
+def test_short_highlight_keeps_the_driver_name(qtbot: QtBot) -> None:
+    widget = DriverHighlightWidget(_translator())
+    qtbot.addWidget(widget)
+    widget.show_driver(
+        position="P1",
+        name="Max Müller",
+        vehicle="Porsche (911)",
+        lap="1/8",
+        last=EMPTY_DISPLAY,
+        best=EMPTY_DISPLAY,
+    )
+    widget.show()
+    widget.setFixedSize(116, 87)
+    QApplication.processEvents()
+    assert widget.height() == 87
+    assert widget.name_label.text() == "MAX MÜLLER"
+    assert widget.name_label.height() >= 16
+    assert not widget.last_label.isVisible()
+    assert not widget.best_label.isVisible()
+    widget.setFixedSize(155, 180)
+    QApplication.processEvents()
+    assert widget.last_label.isVisible()
+    assert widget.last_label.text().startswith("Letzte\n")
+    assert widget.detail.text()
+
+
+def test_short_status_and_message_keep_a_readable_line(qtbot: QtBot) -> None:
+    translator = _translator()
+    status = RaceStatusWidget(translator)
+    message = RaceMessageWidget(translator)
+    qtbot.addWidget(status)
+    qtbot.addWidget(message)
+    status.status_label.setText("● Läuft")
+    message.message_label.setText("Rennen gestartet")
+    status.show()
+    message.show()
+    status.resize(116, 40)
+    message.resize(167, 54)
+    QApplication.processEvents()
+    assert status.status_label.height() + 1 >= status.status_label.fontMetrics().height()
+    assert message.message_label.height() + 1 >= message.message_label.fontMetrics().height()
+    assert not message.warning.isVisible()
+
+
+def test_narrow_controls_keep_full_labels_on_two_rows(qtbot: QtBot) -> None:
+    controls = RaceControlsWidget(_translator())
+    qtbot.addWidget(controls)
+    controls.show()
+    controls.resize(175, 54)
+    QApplication.processEvents()
+    _assert_two_rows(controls)
+    for button in (
+        controls.pause_button,
+        controls.resume_button,
+        controls.stop_button,
+        controls.results_button,
+        controls.back_button,
+    ):
+        assert button.fontMetrics().horizontalAdvance(button.text()) <= button.width()
 
 
 def test_controls_stay_on_two_rows_when_the_panel_is_small_or_large(qtbot: QtBot) -> None:
@@ -264,6 +390,8 @@ def test_panels_keep_their_content_inside_at_several_sizes(qtbot: QtBot, env: En
         QApplication.processEvents()
         live.stage.relayout()
         QApplication.processEvents()
+        assert window.width() == width
+        assert window.height() == height
         runner = live.runner
         assert runner is not None
         assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -102,6 +103,10 @@ class RacesPage(QWidget):
         self.live = LiveRaceView(translator, controller, hud_store)
         self.results = ResultsView(translator, service)
         self.stack = QStackedWidget()
+        # The list's preferred width must not stop the live race from using a small window.
+        shrink = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.stack.setSizePolicy(shrink)
+        self.setSizePolicy(shrink)
         self.list_page = list_page
         for page in (list_page, self.wizard, self.live, self.results):
             self.stack.addWidget(page)
