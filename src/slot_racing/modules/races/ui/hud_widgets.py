@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QSize, Qt
+from collections.abc import Callable
+
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSize, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -11,10 +13,11 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionButton,
     QStyleOptionViewItem,
     QTableWidget,
     QVBoxLayout,
@@ -37,8 +41,9 @@ from slot_racing.uikit.widgets import StatusLabel, make_table
 
 _MIN_FONT = 12
 _MAX_FONT = 64
-_MIN_TEXT_FONT = 11
+_MIN_TEXT_FONT = 6
 _CELL_PAD = 16
+_TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
 
 COLUMN_POSITION = 0
@@ -46,9 +51,35 @@ COLUMN_DRIVER = 1
 COLUMN_VEHICLE = 2
 COLUMN_LAPS = 5
 COLUMN_BEST = 8
+_PRIMARY_COLUMNS = frozenset({COLUMN_POSITION, COLUMN_DRIVER, COLUMN_LAPS})
 _OPTIONAL_COLUMNS = frozenset({3, 4, 6, 7, 9, 10, 11})
 _VEHICLE_MIN_WIDTH = 460
 _FULL_TABLE_WIDTH = 980
+
+
+def _wrap_rows(
+    items: list[tuple[QLabel, int]], avail_w: int, gap: int
+) -> list[list[tuple[QLabel, int]]]:
+    rows: list[list[tuple[QLabel, int]]] = []
+    current: list[tuple[QLabel, int]] = []
+    used = 0
+    for label, width in items:
+        extra = width if not current else width + gap
+        if current and used + extra > avail_w:
+            rows.append(current)
+            current = [(label, width)]
+            used = width
+        else:
+            current.append((label, width))
+            used += extra
+    if current:
+        rows.append(current)
+    return rows
+
+
+def _row_space(row: list[tuple[QLabel, int]], avail_w: int, gap: int) -> int:
+    used = sum(width for _label, width in row) + gap * max(len(row) - 1, 0)
+    return avail_w - used
 
 
 def _pixel_size(font: QFont) -> int:
@@ -155,99 +186,55 @@ class FitLabel(QLabel):
 class RaceHeaderWidget(HudWidget):
     def __init__(self, translator: Translator) -> None:
         super().__init__("race_header")
-        self.name_label = ElidingLabel(
-            "live-name", translator.translate("race.live.title"), color=COLORS.text, bold=True
-        )
-        self.track_label = _meta("live-track")
-        self.provider_label = _meta("live-provider")
-        self.header_status = _meta("hud-header-status")
-        self.participants_label = _meta("hud-participants")
+        self._fitting = False
+        self.name_label = _TrackingLabel("live-name", color=COLORS.text, bold=True)
+        self.name_label.setText(translator.translate("race.live.title"))
+        self.track_label = _TrackingLabel("live-track", color=COLORS.text_secondary)
+        self.provider_label = _TrackingLabel("live-provider", color=COLORS.text_secondary)
+        self.header_status = _TrackingLabel("hud-header-status", color=COLORS.text_secondary)
+        self.participants_label = _TrackingLabel("hud-participants", color=COLORS.text_secondary)
         self._meta_labels = (
             self.header_status,
             self.track_label,
             self.participants_label,
             self.provider_label,
         )
-        self._meta = QGridLayout()
-        self._meta.setSpacing(SPACE.xs)
-        self._title = QHBoxLayout()
-        self._title.setSpacing(SPACE.xs)
-        self._title.addWidget(self.name_label, 1)
-        self._meta_columns = 0
-        self._provider_on_title = False
-        self._meta_signature: tuple[int, bool] | None = None
-        self.body.addLayout(self._title)
-        self.body.addLayout(self._meta)
-        self._arrange_meta(4)
+        # Facts are placed by hand. A grid would squeeze them below the width reported
+        # by the label's own font metrics, which is what Windows resolves after DPI.
+        for label in (self.name_label, *self._meta_labels):
+            label.setParent(self)
+            label._after_text = self._fit_header
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._fit_header()
 
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._fit_header()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self._fit_header()
+
     def _fit_header(self) -> None:
-        """Fit status, track, field and timing source inside the rectangle the stage assigned.
-
-        Wider fonts, such as the Windows UI font, must not push the panel back out. The type
-        size steps down until every fact fits on a line that is still at least one em tall.
-        """
-        for label in (*self._meta_labels, self.name_label):
-            label.setMinimumWidth(0)
-        size, on_title, columns = self._choose_header_layout()
-        self._apply_meta_font(size)
-        self._move_provider(on_title)
-        self._hold_fact_widths(size, on_title)
-        self._arrange_meta(columns)
-
-    def _choose_header_layout(self) -> tuple[int | None, bool, int]:
-        inner_w, inner_h = self._inner_box()
-        two_rows = self.width() < 560 and self.height() >= 72
-        current = QFontMetrics(self.font())
-        if two_rows and self._two_rows_fit(current, inner_w, inner_h):
-            return None, False, 2
-        if self._facts_fit(current, inner_w, inner_h, on_title=False):
-            return None, False, 4
-        if self._facts_fit(current, inner_w, inner_h, on_title=True):
-            return None, True, 4
-        # The face in use does not fit this rectangle. Step the pixel size down and apply
-        # that exact face, so the measurement and the painted text stay the same.
-        for size in range(_pixel_size(self.font()) - 1, _MIN_TEXT_FONT - 1, -1):
-            metrics = _metrics_at(self.font(), size)
-            if two_rows and self._two_rows_fit(metrics, inner_w, inner_h):
-                return size, False, 2
-            if self._facts_fit(metrics, inner_w, inner_h, on_title=False):
-                return size, False, 4
-            if self._facts_fit(metrics, inner_w, inner_h, on_title=True):
-                return size, True, 4
-        return _MIN_TEXT_FONT, True, 4
-
-    def _two_rows_fit(self, metrics: QFontMetrics, inner_w: int, inner_h: int) -> bool:
-        line = metrics.height()
-        if line * 3 + self.body.spacing() + self._meta.spacing() > inner_h:
-            return False
-        left = max(
-            self._text_width(metrics, self.header_status),
-            self._text_width(metrics, self.participants_label),
-        )
-        right = max(
-            self._text_width(metrics, self.track_label),
-            self._text_width(metrics, self.provider_label),
-        )
-        return left + right + self._meta.spacing() <= inner_w
-
-    def _facts_fit(
-        self, metrics: QFontMetrics, inner_w: int, inner_h: int, *, on_title: bool
-    ) -> bool:
-        line = metrics.height()
-        if line * 2 + self.body.spacing() > inner_h:
-            return False
-        facts = (self.header_status, self.track_label, self.participants_label)
-        row = sum(self._text_width(metrics, label) for label in facts)
-        row += self._meta.spacing() * (len(facts) - 1)
-        if on_title:
-            provider = self._text_width(metrics, self.provider_label)
-            return row <= inner_w and provider + self._title.spacing() <= inner_w
-        row += self._meta.spacing() + self._text_width(metrics, self.provider_label)
-        return row <= inner_w
+        """Fit status, track, field and timing source inside the rectangle the stage assigned."""
+        if self._fitting or self.width() < 8 or self.height() < 8:
+            return
+        self._fitting = True
+        try:
+            self._apply_meta_font(None)
+            if self._place_facts():
+                return
+            for size in range(_pixel_size(self.font()) - 1, _MIN_TEXT_FONT - 1, -1):
+                self._apply_meta_font(size)
+                if self._place_facts():
+                    return
+            self._apply_meta_font(_MIN_TEXT_FONT)
+            self._place_facts()
+        finally:
+            self._fitting = False
 
     def _apply_meta_font(self, size: int | None) -> None:
         for label in self._meta_labels:
@@ -261,63 +248,48 @@ class RaceHeaderWidget(HudWidget):
             name.setPixelSize(size)
         self.name_label.setFont(name)
 
-    def _move_provider(self, on_title: bool) -> None:
-        if on_title == self._provider_on_title:
-            return
-        self._provider_on_title = on_title
-        self.provider_label.setParent(None)
-        if on_title:
-            self._title.addWidget(self.provider_label, 0)
-
-    def _hold_fact_widths(self, size: int | None, on_title: bool) -> None:
-        """Keep a fitted fact from being squeezed. Never ask for more than the panel has."""
-        metrics = _metrics_at(self.font(), size) if size is not None else QFontMetrics(self.font())
-        inner_w, _inner_h = self._inner_box()
-        facts = [self.header_status, self.track_label, self.participants_label]
-        if not on_title:
-            facts.append(self.provider_label)
-        widths = [self._text_width(metrics, label) for label in facts]
-        gaps = self._meta.spacing() * max(len(facts) - 1, 0)
-        if sum(widths) + gaps > inner_w:
-            return
-        for label, width in zip(facts, widths, strict=True):
-            label.setMinimumWidth(width)
-        if on_title:
-            provider = self._text_width(metrics, self.provider_label)
-            if provider + self._title.spacing() <= inner_w:
-                self.provider_label.setMinimumWidth(provider)
-
-    def _inner_box(self) -> tuple[int, int]:
-        margins = self.body.contentsMargins()
-        return (
-            max(self.width() - margins.left() - margins.right(), 0),
-            max(self.height() - margins.top() - margins.bottom(), 0),
-        )
-
-    @staticmethod
-    def _text_width(metrics: QFontMetrics, label: QLabel) -> int:
-        return metrics.horizontalAdvance(label.text()) + 4
-
-    def _arrange_meta(self, columns: int) -> None:
-        """Two rows when the panel is narrow and tall enough for them."""
-        signature = (columns, self._provider_on_title)
-        if signature == self._meta_signature:
-            return
-        self._meta_signature = signature
-        self._meta_columns = columns
-        labels = [
-            label
-            for label in self._meta_labels
-            if label is not self.provider_label or not self._provider_on_title
+    def _place_facts(self) -> bool:
+        """Give every fact its own text width. The name uses whatever space is left."""
+        margin = SPACE.xs
+        gap = SPACE.xs
+        avail_w = self.width() - 2 * margin
+        avail_h = self.height() - 2 * margin
+        if avail_w <= 0 or avail_h <= 0:
+            return False
+        facts = list(self._meta_labels)
+        # The label paints with a 2px inset. The width has to cover that, or the
+        # last letters are ellipsized even though the advance itself would fit.
+        widths = [
+            label.fontMetrics().horizontalAdvance(label.text()) + _TEXT_INSET for label in facts
         ]
-        for label in self._meta_labels:
-            self._meta.removeWidget(label)
-        for index, label in enumerate(labels):
-            if columns == 2:
-                row, column = divmod(index, 2)
-            else:
-                row, column = 0, index
-            self._meta.addWidget(label, row, column)
+        if any(width > avail_w for width in widths):
+            return False
+        line = max(label.fontMetrics().height() for label in (self.name_label, *facts))
+        rows = _wrap_rows(list(zip(facts, widths, strict=True)), avail_w, gap)
+        gaps = max(len(rows) - 1, 0)
+        if len(rows) * line + gaps * gap > avail_h:
+            return False
+        own_name_row = (len(rows) + 1) * line + len(rows) * gap <= avail_h
+        y = margin
+        if own_name_row:
+            self.name_label.setGeometry(margin, y, avail_w, line)
+            y += line + gap
+            name_row = -1
+        else:
+            name_row = max(
+                range(len(rows)),
+                key=lambda index: _row_space(rows[index], avail_w, gap),
+            )
+        for index, row in enumerate(rows):
+            x = margin
+            for label, width in row:
+                label.setGeometry(x, y, width, line)
+                x += width + gap
+            if index == name_row:
+                leftover = margin + avail_w - x
+                self.name_label.setGeometry(x, y, max(leftover, 0), line)
+            y += line + gap
+        return True
 
 
 class RaceClockWidget(HudWidget):
@@ -379,7 +351,8 @@ class LiveRankingWidget(HudWidget):
         header.setSectionResizeMode(COLUMN_DRIVER, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(COLUMN_VEHICLE, QHeaderView.ResizeMode.Stretch)
         header.setStretchLastSection(False)
-        header.setMinimumSectionSize(12)
+        # The style's default minimum would force a section wider than the lap text.
+        header.setMinimumSectionSize(1)
         self._base_font: QFont | None = None
         header.setTextElideMode(Qt.TextElideMode.ElideRight)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -406,63 +379,97 @@ class LiveRankingWidget(HudWidget):
             return
         self._fitting = True
         try:
+            self._fit_rows()
+            self._reserve_vertical_bar()
             self._fit_table_font()
             self._apply_columns()
             mark_leader(self.table)
-            self._fit_rows()
         finally:
             self._fitting = False
 
     def _fit_table_font(self) -> None:
-        """Shrink the table font until the driver name and the lap count share the viewport.
+        """Shrink the table font until place, name and lap count share the viewport.
 
-        The first font seen is the application font. Later calls start from that font again,
-        so a wider panel can grow the type back up.
+        The check uses the table's own font metrics after ``setFont``. A detached
+        ``QFontMetrics`` is narrower than that on Windows, so it used to keep a font
+        whose lap column could no longer hold the digits. The first font seen stays
+        the baseline, so a wider panel can grow the type back up.
         """
         if self._base_font is None:
             self._base_font = QFont(self.table.font())
-        viewport = self.table.viewport().width() or self.width()
-        if viewport < 40:
+        if self._column_budget() < 40:
             return
-        if self._names_and_laps_fit(QFont(self._base_font), viewport):
-            self.table.setFont(QFont(self._base_font))
-            return
-        chosen = _MIN_TEXT_FONT
-        for size in range(_pixel_size(self._base_font) - 1, _MIN_TEXT_FONT - 1, -1):
-            trial = QFont(self._base_font)
-            trial.setPixelSize(size)
-            if self._names_and_laps_fit(trial, viewport):
-                chosen = size
-                break
-        font = QFont(self._base_font)
-        font.setPixelSize(chosen)
-        self.table.setFont(font)
+        # Prefer a size that also keeps the best-lap column. Only when that cannot
+        # fit does the column disappear, and the names and lap counts stay whole.
+        if not self._apply_fitting_font(keep_best=True):
+            self._apply_fitting_font(keep_best=False)
 
-    def _names_and_laps_fit(self, font: QFont, viewport: int) -> bool:
-        regular = QFontMetrics(font)
-        bold_font = QFont(font)
-        bold_font.setBold(True)
-        strong = QFontMetrics(bold_font)
-        name = laps = position = 0
+    def _apply_fitting_font(self, *, keep_best: bool) -> bool:
+        base = self._base_font
+        if base is None:
+            return False
+        sizes: list[int | None] = [None]
+        sizes.extend(range(_pixel_size(base) - 1, _MIN_TEXT_FONT - 1, -1))
+        for size in sizes:
+            font = QFont(base)
+            if size is not None:
+                font.setPixelSize(size)
+            self.table.setFont(font)
+            self._reserve_vertical_bar()
+            extra = 64 if keep_best else 0
+            if self._primary_width() + extra <= self._column_budget():
+                return True
+        return False
+
+    def _primary_width(self) -> int:
+        return sum(self._cell_need(column) for column in _PRIMARY_COLUMNS)
+
+    def _cell_need(self, column: int) -> int:
+        """Text advance plus the padding the narrow-panel checks require."""
+        if column in (COLUMN_POSITION, COLUMN_DRIVER):
+            font = QFont(self.table.font())
+            font.setBold(True)
+            metrics = QFontMetrics(font)
+        else:
+            metrics = self.table.fontMetrics()
+        widest = 0
         for row in range(self.table.rowCount()):
-            driver = self.table.item(row, COLUMN_DRIVER)
-            if driver is not None and driver.text():
-                name = max(name, strong.horizontalAdvance(driver.text()))
-            lap = self.table.item(row, COLUMN_LAPS)
-            if lap is not None and lap.text():
-                laps = max(laps, regular.horizontalAdvance(lap.text()))
-            place = self.table.item(row, COLUMN_POSITION)
-            if place is not None and place.text():
-                position = max(position, strong.horizontalAdvance(place.text()))
-        return name + laps + position + _CELL_PAD * 3 <= viewport - 2
+            item = self.table.item(row, column)
+            if item is not None and item.text():
+                widest = max(widest, metrics.horizontalAdvance(item.text()))
+        if widest <= 0:
+            return _CELL_PAD
+        return widest + _CELL_PAD
+
+    def _column_budget(self) -> int:
+        self.table.updateGeometries()
+        width = self.table.viewport().width()
+        if width <= 0:
+            width = self.table.width() or self.width()
+        return max(width - 2, 1)
+
+    def _reserve_vertical_bar(self) -> None:
+        """Keep the vertical bar's width out of the column budget before columns are set."""
+        rows = self.table.rowCount()
+        row_height = self.table.verticalHeader().defaultSectionSize()
+        if rows > 0 and self.table.rowHeight(0) > 0:
+            row_height = self.table.rowHeight(0)
+        overflows = rows > 0 and row_height * rows > self.table.viewport().height()
+        policy = (
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+            if overflows
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        if self.table.verticalScrollBarPolicy() != policy:
+            self.table.setVerticalScrollBarPolicy(policy)
+        self.table.updateGeometries()
 
     def _apply_columns(self) -> None:
-        width = self.table.viewport().width() or self.width()
+        width = self._column_budget()
         if width < 40:
             return
         show_vehicle = width >= _VEHICLE_MIN_WIDTH
         show_rest = width >= _FULL_TABLE_WIDTH
-        header = self.table.horizontalHeader()
         for column in range(self.table.columnCount()):
             if column == COLUMN_VEHICLE:
                 hidden = not show_vehicle
@@ -471,70 +478,82 @@ class LiveRankingWidget(HudWidget):
             else:
                 hidden = False
             self.table.setColumnHidden(column, hidden)
-        self._assign_widths(width, header, allow_drop=True)
+        self._assign_widths(width)
 
-    def _assign_widths(self, viewport: int, header: QHeaderView, *, allow_drop: bool) -> None:
-        """Give driver names the room, then lap columns. Headers ellipsize before names do."""
+    def _assign_widths(self, viewport: int) -> None:
+        """Keep place, driver and lap count whole. Drop the best lap when it no longer fits."""
         visible = [
             column
             for column in range(self.table.columnCount())
             if not self.table.isColumnHidden(column)
         ]
-        metrics = self.table.fontMetrics()
-        bold_font = QFont(self.table.font())
-        bold_font.setBold(True)
-        strong = QFontMetrics(bold_font)
-        header_width: dict[int, int] = {}
-        value_width: dict[int, int] = {}
-        for column in visible:
-            header_item = self.table.horizontalHeaderItem(column)
-            label = "" if header_item is None else header_item.text()
-            header_width[column] = max(16, metrics.horizontalAdvance(label) + _CELL_PAD)
-            cell_font = strong if column in (COLUMN_DRIVER, COLUMN_POSITION) else metrics
-            widest = 16
-            for row in range(self.table.rowCount()):
-                item = self.table.item(row, column)
-                if item is not None and item.text():
-                    widest = max(widest, cell_font.horizontalAdvance(item.text()) + _CELL_PAD)
-            value_width[column] = widest
-        flex = {COLUMN_DRIVER, COLUMN_VEHICLE}
-        fixed = [column for column in visible if column not in flex]
-        flex_need = value_width.get(COLUMN_DRIVER, 28)
-        if COLUMN_VEHICLE in visible:
-            flex_need += value_width.get(COLUMN_VEHICLE, 28)
-        limit = max(viewport - 2, 40)
-        if sum(header_width[column] for column in fixed) + flex_need <= limit:
-            chosen = {column: header_width[column] for column in fixed}
-        else:
-            chosen = {column: min(header_width[column], value_width[column]) for column in fixed}
-            spare = limit - flex_need - sum(chosen.values())
-            if spare > 0:
-                for column in fixed:
-                    room = max(0, header_width[column] - chosen[column])
-                    take = min(room, spare)
-                    chosen[column] += take
-                    spare -= take
-            elif spare < 0:
-                overflow = -spare
-                for column in reversed(fixed):
-                    floor = 16
-                    cut = min(max(0, chosen[column] - floor), overflow)
-                    chosen[column] -= cut
-                    overflow -= cut
-                    if overflow <= 0:
-                        break
-        # A best-lap column that cannot show its header is dropped. The lap count and the
-        # driver names stay. Wider tables keep the column.
-        if allow_drop and chosen.get(COLUMN_BEST, 64) < 64:
+        floors = {
+            column: self._cell_need(column) for column in visible if column in _PRIMARY_COLUMNS
+        }
+        remaining = viewport - sum(floors.values())
+        secondary = [column for column in visible if column not in _PRIMARY_COLUMNS]
+        if COLUMN_BEST in secondary and remaining < 64:
             self.table.setColumnHidden(COLUMN_BEST, True)
-            self._assign_widths(viewport, header, allow_drop=False)
-            return
-        for column in visible:
-            if column in chosen:
-                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-                self.table.setColumnWidth(column, chosen[column])
+            secondary = [column for column in secondary if column != COLUMN_BEST]
+            visible = [column for column in visible if column != COLUMN_BEST]
+        chosen: dict[int, int] = dict(floors)
+        if COLUMN_BEST in secondary:
+            chosen[COLUMN_BEST] = 64
+            remaining -= 64
+        for column in secondary:
+            if column == COLUMN_BEST:
+                continue
+            need = self._cell_need(column)
+            take = need if need <= max(remaining, 0) else max(remaining, 1)
+            chosen[column] = take
+            remaining -= take
+        if remaining > 0 and COLUMN_DRIVER in chosen:
+            if COLUMN_VEHICLE in chosen:
+                half = remaining // 2
+                chosen[COLUMN_VEHICLE] += half
+                chosen[COLUMN_DRIVER] += remaining - half
             else:
-                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+                chosen[COLUMN_DRIVER] += remaining
+        overflow = sum(chosen.values()) - viewport
+        if overflow > 0:
+            for column in reversed(secondary):
+                if column == COLUMN_BEST or column not in chosen:
+                    continue
+                cut = min(max(0, chosen[column] - 1), overflow)
+                chosen[column] -= cut
+                overflow -= cut
+            if overflow > 0 and COLUMN_BEST in chosen:
+                self.table.setColumnHidden(COLUMN_BEST, True)
+                del chosen[COLUMN_BEST]
+        self._lock_columns(chosen, floors)
+
+    def _lock_columns(self, chosen: dict[int, int], floors: dict[int, int]) -> None:
+        """Fixed widths so a stretch section cannot steal pixels from the lap count."""
+        header = self.table.horizontalHeader()
+        header.setMinimumSectionSize(1)
+        for column, width in chosen.items():
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(column, max(width, 1))
+        self.table.updateGeometries()
+        overflow = self.table.horizontalScrollBar().maximum()
+        guard = 0
+        while overflow > 0 and guard < 8:
+            guard += 1
+            donor = None
+            for column in (COLUMN_DRIVER, COLUMN_VEHICLE, *chosen):
+                if column not in chosen:
+                    continue
+                floor = floors.get(column, 1)
+                if chosen[column] > floor:
+                    donor = column
+                    break
+            if donor is None:
+                break
+            cut = min(chosen[donor] - floors.get(donor, 1), overflow)
+            chosen[donor] -= max(cut, 1)
+            self.table.setColumnWidth(donor, chosen[donor])
+            self.table.updateGeometries()
+            overflow = self.table.horizontalScrollBar().maximum()
 
     def _fit_rows(self) -> None:
         count = self.table.rowCount()
@@ -579,7 +598,15 @@ class RankingDelegate(QStyledItemDelegate):
         if column == COLUMN_POSITION or (leader and column == COLUMN_DRIVER):
             font.setBold(True)
         if column == COLUMN_POSITION:
-            font.setPixelSize(max(13, min(22, rect.height() - 10)))
+            fitted = option.font.pixelSize()
+            if fitted <= 0:
+                fitted = QFontInfo(option.font).pixelSize()
+            # A narrow panel already shrank the table font. Do not paint the place
+            # larger than that font, or the digit is clipped by the column.
+            if fitted >= 13:
+                font.setPixelSize(max(fitted, min(22, rect.height() - 10)))
+            elif fitted > 0:
+                font.setPixelSize(fitted)
         color = COLORS.text_secondary if column == COLUMN_VEHICLE else COLORS.text
         painter.setFont(font)
         painter.setPen(QColor(color))
@@ -757,9 +784,33 @@ class RaceControlsWidget(HudWidget):
         self.body.addLayout(_button_row(self.pause_button, self.resume_button))
         self.body.addLayout(_button_row(self.stop_button, self.results_button, self.back_button))
         self._fitting = False
+        self._fit_px: int | None = None
+        self._advance_cache: dict[tuple[str, str, int, bool], int] = {}
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._refit()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._refit()
+
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self._refit()
+        return handled
+
+    def _buttons(self) -> tuple[QPushButton, ...]:
+        return (
+            self.pause_button,
+            self.resume_button,
+            self.stop_button,
+            self.results_button,
+            self.back_button,
+        )
+
+    def _refit(self) -> None:
         if self._fitting:
             return
         self._fitting = True
@@ -770,43 +821,74 @@ class RaceControlsWidget(HudWidget):
             self._fitting = False
 
     def _fit_labels(self) -> None:
-        """Shrink the type only when the German labels would otherwise be clipped.
+        """Shrink every label until it fits the button the layout actually assigned.
 
-        The theme also switches a compact style. ``setFont`` covers tests and platforms
-        where that style sheet is not what resolves the font.
+        The advance is read from ``button.fontMetrics()`` after the font is applied.
+        A detached metrics object underestimates Segoe UI, which left "Abbrechen"
+        wider than its button. The theme's style sheet ignores ``setFont``, so a
+        rule on the button itself is used when a style sheet is active.
         """
-        buttons = (
-            self.pause_button,
-            self.resume_button,
-            self.stop_button,
-            self.results_button,
-            self.back_button,
-        )
-        tight = False
-        for button in buttons:
-            if button.width() <= 0:
-                continue
-            font = QFont(button.font())
-            font.setPixelSize(12)
-            if QFontMetrics(font).horizontalAdvance(button.text()) + 4 > button.width():
-                tight = True
-                break
-        value = "small" if tight else ""
-        for button in buttons:
-            if button.property("fit") != value:
-                button.setProperty("fit", value)
-                button.style().unpolish(button)
-                button.style().polish(button)
-            if button.width() <= 0:
-                continue
-            font = QFont(button.font())
-            font.setPixelSize(10 if tight else 12)
-            while (
-                font.pixelSize() > 8
-                and QFontMetrics(font).horizontalAdvance(button.text()) + 4 > button.width()
+        buttons = self._buttons()
+        if any(button.width() <= 0 for button in buttons):
+            return
+        start = max(_pixel_size(self.font()), _MIN_TEXT_FONT)
+        winner = _MIN_TEXT_FONT
+        for size in range(start, _MIN_TEXT_FONT - 1, -1):
+            if all(
+                self._advance_for(button, size) <= self._label_limit(button) for button in buttons
             ):
-                font.setPixelSize(font.pixelSize() - 1)
+                winner = size
+                break
+        if self._fit_px == winner:
+            return
+        for button in buttons:
+            self._set_pixel(button, winner)
+        self._fit_px = winner
+
+    def _label_limit(self, button: QPushButton) -> int:
+        if button.width() <= 0:
+            return 0
+        option = QStyleOptionButton()
+        button.initStyleOption(option)
+        inner = button.style().subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, option, button
+        )
+        if inner.width() <= 0:
+            return button.width()
+        return min(button.width(), inner.width())
+
+    def _advance_for(self, button: QPushButton, size: int) -> int:
+        locked = self._stylesheet_fonts() or bool(button.property("fontLocked"))
+        key = (button.objectName(), button.text(), size, locked)
+        cached = self._advance_cache.get(key)
+        if cached is not None:
+            return cached
+        before = button.fontMetrics().horizontalAdvance(button.text())
+        before_size = button.font().pixelSize()
+        self._set_pixel(button, size)
+        advance = button.fontMetrics().horizontalAdvance(button.text())
+        if not locked and before_size > size and before > 0 and advance >= before:
+            button.setProperty("fontLocked", True)
+            self._set_pixel(button, size)
+            advance = button.fontMetrics().horizontalAdvance(button.text())
+            key = (button.objectName(), button.text(), size, True)
+        self._advance_cache[key] = advance
+        return advance
+
+    def _set_pixel(self, button: QPushButton, size: int) -> None:
+        use_rule = self._stylesheet_fonts() or bool(button.property("fontLocked"))
+        if use_rule:
+            rule = f"QPushButton#{button.objectName()} {{ font-size: {size}px; padding: 0px 1px; }}"
+            if button.styleSheet() != rule:
+                button.setStyleSheet(rule)
+        font = QFont(self.font())
+        font.setPixelSize(size)
+        if button.font().pixelSize() != size:
             button.setFont(font)
+
+    def _stylesheet_fonts(self) -> bool:
+        app = QApplication.instance()
+        return isinstance(app, QApplication) and bool(app.styleSheet())
 
 
 def mark_leader(table: QTableWidget) -> None:
@@ -855,6 +937,20 @@ class ElidingLabel(QLabel):
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             text,
         )
+
+
+class _TrackingLabel(ElidingLabel):
+    """A header line that refits the panel when its text changes."""
+
+    def __init__(self, object_name: str, *, color: str, bold: bool = False) -> None:
+        super().__init__(object_name, color=color, bold=bold)
+        self._after_text: Callable[[], None] | None = None
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        callback = getattr(self, "_after_text", None)
+        if callback is not None:
+            callback()
 
 
 def _meta(object_name: str) -> QLabel:

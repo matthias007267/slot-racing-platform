@@ -212,10 +212,11 @@ def _assert_names_and_lap_counts_fit(ranking: LiveRankingWidget, names: list[str
     name_need = max(QFontMetrics(bold).horizontalAdvance(name) for name in names) + 16
     assert table.columnWidth(COLUMN_DRIVER) >= name_need - 2
     assert not table.isColumnHidden(COLUMN_LAPS)
-    lap_need = max(
-        table.fontMetrics().horizontalAdvance(table.item(row, COLUMN_LAPS).text())
-        for row in range(table.rowCount())
-    )
+    lap_need = 0
+    for row in range(table.rowCount()):
+        item = table.item(row, COLUMN_LAPS)
+        assert item is not None
+        lap_need = max(lap_need, table.fontMetrics().horizontalAdvance(item.text()))
     assert table.columnWidth(COLUMN_LAPS) >= lap_need + 16
     assert table.isColumnHidden(COLUMN_BEST) or table.columnWidth(COLUMN_BEST) >= 64
 
