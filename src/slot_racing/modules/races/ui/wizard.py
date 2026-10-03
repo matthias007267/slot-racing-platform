@@ -73,6 +73,7 @@ class RaceWizard(QWidget):
         self._tracks = tracks
         self._providers = providers
         self._race: RaceInfo | None = None
+        self._editing_participant_id: int | None = None
         tr = translator.translate
 
         self.title_label = heading(tr("race.wizard.title"))
@@ -103,6 +104,8 @@ class RaceWizard(QWidget):
         self.lane_combo.setObjectName("race-lane")
         self.add_participant_button = QPushButton(tr("race.wizard.add_participant"))
         self.add_participant_button.setObjectName("race-add-participant")
+        self.edit_participant_button = QPushButton(tr("race.wizard.edit_participant"))
+        self.edit_participant_button.setObjectName("race-edit-participant")
         self.remove_participant_button = QPushButton(tr("race.wizard.remove_participant"))
         self.remove_participant_button.setObjectName("race-remove-participant")
         self.participant_table = make_table(
@@ -130,6 +133,7 @@ class RaceWizard(QWidget):
         set_role(self.back_button, "secondary")
         set_role(self.cancel_button, "ghost")
         set_role(self.add_participant_button, "secondary")
+        set_role(self.edit_participant_button, "secondary")
         set_role(self.remove_participant_button, "danger")
 
         self._build_pages()
@@ -152,6 +156,7 @@ class RaceWizard(QWidget):
         self.cancel_button.clicked.connect(lambda: self.closed.emit())
         self.start_button.clicked.connect(lambda: self.request_start())
         self.add_participant_button.clicked.connect(lambda: self.add_participant())
+        self.edit_participant_button.clicked.connect(lambda: self.edit_selected_participant())
         self.remove_participant_button.clicked.connect(lambda: self.remove_selected_participant())
         self.driver_combo.currentIndexChanged.connect(lambda _: self._reload_vehicles())
         self.provider_combo.currentIndexChanged.connect(lambda _: self._update_provider_status())
@@ -177,6 +182,7 @@ class RaceWizard(QWidget):
             self.name_edit.setText(self._race.name)
             self.laps_spin.setValue(self._race.laps)
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
+        self._cancel_participant_edit()
         self._refresh_participants()
         self._show_step(NAME)
 
@@ -191,6 +197,10 @@ class RaceWizard(QWidget):
 
     def add_participant(self) -> bool:
         return self._guard(self._add_participant)
+
+    def edit_selected_participant(self) -> bool:
+        """Load the selected participant, or write the open correction back onto that row."""
+        return self._guard(self._edit_participant)
 
     def remove_selected_participant(self) -> bool:
         return self._guard(self._remove_participant)
@@ -232,6 +242,7 @@ class RaceWizard(QWidget):
                 layout.addLayout(row)
                 actions = QHBoxLayout()
                 actions.addWidget(self.add_participant_button)
+                actions.addWidget(self.edit_participant_button)
                 actions.addWidget(self.remove_participant_button)
                 actions.addStretch(1)
                 layout.addLayout(actions)
@@ -382,8 +393,55 @@ class RaceWizard(QWidget):
             self._race_id(), DriverId(driver_id), VehicleId(vehicle_id), lane
         )
         self._race = self._service.require_race(self._race_id())
+        self._cancel_participant_edit()
         self._refresh_participants()
         self.status.clear_message()
+
+    def _edit_participant(self) -> None:
+        if self._editing_participant_id is None:
+            participant_id = selected_id(self.participant_table)
+            if participant_id is None or self._race is None:
+                raise ValidationError("error.race.participant_unknown")
+            participant = next(
+                (item for item in self._race.participants if item.id == participant_id), None
+            )
+            if participant is None:
+                raise ValidationError("error.race.participant_unknown")
+            self.driver_combo.setCurrentIndex(self.driver_combo.findData(participant.driver_id))
+            self._reload_vehicles()
+            if participant.vehicle_id is not None:
+                self.vehicle_combo.setCurrentIndex(
+                    self.vehicle_combo.findData(participant.vehicle_id)
+                )
+            self.lane_combo.setCurrentIndex(self.lane_combo.findData(participant.lane))
+            self._editing_participant_id = participant.id
+            self.edit_participant_button.setText(
+                self.translator.translate("race.wizard.update_participant")
+            )
+            self.status.clear_message()
+            return
+        driver_id = self.driver_combo.currentData()
+        vehicle_id = self.vehicle_combo.currentData()
+        lane = self.lane_combo.currentData()
+        if driver_id is None or vehicle_id is None or lane is None:
+            raise ValidationError("error.race.participant_required")
+        self._service.update_participant(
+            self._race_id(),
+            self._editing_participant_id,
+            DriverId(driver_id),
+            VehicleId(vehicle_id),
+            lane,
+        )
+        self._race = self._service.require_race(self._race_id())
+        self._cancel_participant_edit()
+        self._refresh_participants()
+        self.status.clear_message()
+
+    def _cancel_participant_edit(self) -> None:
+        self._editing_participant_id = None
+        self.edit_participant_button.setText(
+            self.translator.translate("race.wizard.edit_participant")
+        )
 
     def _remove_participant(self) -> None:
         participant_id = selected_id(self.participant_table)
@@ -391,6 +449,7 @@ class RaceWizard(QWidget):
             raise ValidationError("error.race.participant_unknown")
         self._service.remove_participant(self._race_id(), participant_id)
         self._race = self._service.require_race(self._race_id())
+        self._cancel_participant_edit()
         self._refresh_participants()
         self.status.clear_message()
 

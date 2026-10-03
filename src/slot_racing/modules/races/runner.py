@@ -37,7 +37,7 @@ class LiveRow:
     lane: int
     driver_label: str
     vehicle_label: str
-    start_number: int | None
+    start_number: int | str | None
     current_lap: int
     laps_completed: int
     last_lap_ns: int | None

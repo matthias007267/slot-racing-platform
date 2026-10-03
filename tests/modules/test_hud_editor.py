@@ -33,8 +33,9 @@ def test_numeric_geometry_is_clamped_and_shown_in_the_preview(qtbot: QtBot) -> N
     assert (clock.x, clock.y, clock.width, clock.height) == (0.10, 0.20, 0.30, 0.25)
     assert editor.selected_id == "live_ranking"
     editor.select(RACE_CLOCK)
-    spin = editor.findChild(QDoubleSpinBox, "hud-x")
-    assert spin is not None and spin.value() == 0.10
+    assert editor.findChild(QDoubleSpinBox, "hud-x") is None
+    assert editor.preview.grid.objectName() == "hud-grid"
+    assert editor.preview.grid.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     box = editor.box(RACE_CLOCK)
     assert box is not None
     rect = to_pixels(clock, 800, 450)
@@ -79,17 +80,17 @@ def test_dragging_moves_and_the_corner_resizes(qtbot: QtBot) -> None:
     _mouse(box, QEvent.Type.MouseButtonRelease, (20, 16), (180, 145))
     moved = editor.configuration().widget(RACE_HEADER)
     assert moved is not None
-    assert moved.x == pytest.approx(0.12)
-    assert moved.y == pytest.approx(0.12)
-    assert moved.width == 0.62
+    assert moved.x == pytest.approx(0.125)
+    assert moved.y == pytest.approx(1 / 9)
+    assert moved.width == pytest.approx(0.625)
 
     _mouse(box, QEvent.Type.MouseButtonPress, (box.width() - 2, box.height() - 2), (300, 200))
     _mouse(box, QEvent.Type.MouseMove, (box.width() - 2, box.height() - 2), (380, 245))
     _mouse(box, QEvent.Type.MouseButtonRelease, (box.width() - 2, box.height() - 2), (380, 245))
     resized = editor.configuration().widget(RACE_HEADER)
     assert resized is not None
-    assert resized.width == pytest.approx(0.72)
-    assert resized.height == pytest.approx(0.24)
+    assert resized.width == pytest.approx(0.75)
+    assert resized.height == pytest.approx(2 / 9)
     assert resized.x == moved.x
 
 
@@ -104,7 +105,8 @@ def test_z_order_buttons_change_the_stack(qtbot: QtBot) -> None:
     assert raised is not None
     assert raised.z_index == max(item.z_index for item in editor.configuration().widgets)
     box = editor.box(RACE_CLOCK)
-    assert editor.preview.children()[-1] is box
+    boxes = [child for child in editor.preview.children() if isinstance(child, HudBox)]
+    assert boxes[-1] is box
     editor.send_backward()
     lowered = editor.configuration().widget(RACE_CLOCK)
     assert lowered is not None
@@ -164,6 +166,32 @@ def test_a_saved_layout_reaches_an_open_stage(qtbot: QtBot) -> None:
         rect.width,
         rect.height,
     )
+
+
+def test_fullscreen_preview_edits_at_screen_size_and_closes(qtbot: QtBot) -> None:
+    editor = _editor(qtbot)
+    window = editor.open_fullscreen_preview()
+    qtbot.addWidget(window)
+    assert window.objectName() == "hud-fullscreen-preview"
+    assert 0.8 < window.windowOpacity() < 1.0
+    assert window.preview.grid.isVisible() or window.preview.grid.objectName() == "hud-grid"
+    window.resize(1600, 900)
+    window.preview.relayout()
+    editor.set_widget_geometry(RACE_CLOCK, 0.25, 0.25, 0.5, 0.25)
+    placed = editor.configuration().widget(RACE_CLOCK)
+    assert placed is not None
+    box = window.preview.box(RACE_CLOCK)
+    assert box is not None
+    rect = to_pixels(placed, window.preview.width(), window.preview.height())
+    assert (box.x(), box.y(), box.width(), box.height()) == (
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+    )
+    window.close_button.click()
+    assert editor.fullscreen is None
+    assert QApplication.instance() is not None
 
 
 def test_settings_page_hosts_the_hud_editor(qtbot: QtBot, env: Env) -> None:

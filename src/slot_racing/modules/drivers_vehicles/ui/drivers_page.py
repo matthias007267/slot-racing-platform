@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from slot_racing.core.catalog import DriverInfo
 from slot_racing.core.domain import DriverId
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.drivers_vehicles.service import (
-    MAX_START_NUMBER,
-    DriverInput,
-    DriverService,
-    VehicleService,
-)
+from slot_racing.modules.drivers_vehicles.service import DriverInput, DriverService, VehicleService
+from slot_racing.modules.drivers_vehicles.ui.start_number_field import StartNumberPicker
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog
 from slot_racing.uikit.widgets import fill_table, make_table, selected_id
 
@@ -35,11 +31,10 @@ class DriverDialog(FormDialog):
         self.name_edit.setObjectName("driver-name")
         self.display_name_edit = QLineEdit(driver.display_name or "" if driver else "")
         self.display_name_edit.setObjectName("driver-display-name")
-        self.start_number_edit = QSpinBox()
-        self.start_number_edit.setObjectName("driver-start-number")
-        self.start_number_edit.setRange(0, MAX_START_NUMBER)
-        self.start_number_edit.setSpecialValueText(tr("common.none"))
-        self.start_number_edit.setValue(driver.start_number or 0 if driver else 0)
+        current = None if driver is None else driver.start_number
+        self.start_number_edit = StartNumberPicker(
+            translator, service.defined_start_numbers(), current, "driver-start-number"
+        )
         self.form.addRow(tr("driver.field.name"), self.name_edit)
         self.form.addRow(tr("driver.field.display_name"), self.display_name_edit)
         self.form.addRow(tr("driver.field.start_number"), self.start_number_edit)
@@ -48,7 +43,7 @@ class DriverDialog(FormDialog):
         data = DriverInput(
             name=self.name_edit.text(),
             display_name=self.display_name_edit.text(),
-            start_number=self.start_number_edit.value() or None,
+            start_number=self.start_number_edit.value(),
         )
         if self._driver is None:
             self._service.create_driver(data)

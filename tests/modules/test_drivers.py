@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from slot_racing.core.errors import ValidationError
-from slot_racing.modules.drivers_vehicles.service import DriverInput
+from slot_racing.modules.drivers_vehicles.models import Driver
+from slot_racing.modules.drivers_vehicles.service import DriverInput, VehicleInput
 from tests.modules.conftest import Env
 
 
@@ -96,3 +97,20 @@ def test_unknown_driver_is_reported(env: Env) -> None:
     with pytest.raises(ValidationError) as caught:
         env.drivers.set_active(driver.id, False)
     assert caught.value.key == "error.driver.not_found"
+
+
+def test_an_already_stored_text_start_number_can_be_kept(env: Env) -> None:
+    with env.runtime.database.session() as session:
+        session.add(Driver(name="Bee", start_number="B", is_active=True))
+    assert env.drivers.defined_start_numbers() == ["B"]
+    stored = next(driver for driver in env.drivers.list_drivers() if driver.name == "Bee")
+    assert stored.start_number == "B"
+    updated = env.drivers.update_driver(
+        stored.id, DriverInput(name="Bee", display_name="Biene", start_number="B")
+    )
+    assert updated.start_number == "B"
+    vehicle = env.vehicles.create_vehicle(VehicleInput(name="Wagen", model="GT", start_number="B"))
+    assert vehicle.start_number == "B"
+    with pytest.raises(ValidationError) as caught:
+        env.drivers.create_driver(DriverInput(name="Neu", start_number="C"))
+    assert caught.value.key == "error.driver.start_number.unknown"

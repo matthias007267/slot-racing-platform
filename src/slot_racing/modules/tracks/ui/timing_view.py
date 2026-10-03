@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from slot_racing.core.catalog import TrackInfo
 from slot_racing.core.domain import TimingPositionType, TimingSetup, default_timing_setup
+from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.modules.tracks.timing_editor import TimingDraft
@@ -214,6 +215,20 @@ class TimingConfigView(QWidget):
 
     def save(self) -> None:
         self._guarded(self._save)
+
+    def save_persistent(self) -> None:
+        """Store a timing draft that differs from the last saved setup."""
+        if self.track is None:
+            return
+        setup = self.draft.to_setup()
+        service = self._service()
+        stored = None if service is None else service.get_setup(self.track.id)
+        baseline = stored if stored is not None else default_timing_setup()
+        if setup == baseline:
+            return
+        if service is None:
+            raise ValidationError("timing.service_missing")
+        service.save_setup(self.track.id, setup)
 
     def reset(self) -> None:
         """Discard the stored setup of the track and fall back to the default layout."""

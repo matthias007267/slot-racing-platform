@@ -7,6 +7,13 @@ SHELL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "app.title": "Slot-Racing Platform",
         "nav.dashboard": "Dashboard",
         "nav.settings": "Einstellungen",
+        "nav.quit": "Beenden",
+        "app.quit.confirm": "Möchtest du das Programm wirklich beenden?",
+        "app.quit.confirm_button": "Beenden",
+        "app.quit.cancel_button": "Abbrechen",
+        "app.quit.failed": (
+            "Die Daten konnten nicht gespeichert werden. Das Programm bleibt geöffnet."
+        ),
         "dashboard.heading": "Dashboard",
         "dashboard.active_modules": "Aktive Module",
         "dashboard.no_modules": "Keine Module aktiv.",

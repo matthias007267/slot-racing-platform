@@ -20,7 +20,7 @@ class DriverInfo:
     id: DriverId
     name: str
     display_name: str | None
-    start_number: int | None
+    start_number: int | str | None
     is_active: bool
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -38,7 +38,7 @@ class VehicleInfo:
     manufacturer: str | None
     scale: str | None
     notes: str | None
-    start_number: int | None
+    start_number: int | str | None
     is_active: bool
     driver_id: DriverId | None
     created_at: datetime | None = None

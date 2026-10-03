@@ -16,7 +16,7 @@ class ParticipantInfo:
     vehicle_id: VehicleId | None
     vehicle_label: str
     lane: int
-    start_number: int | None = None
+    start_number: int | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +52,7 @@ class ResultRow:
     driver_label: str
     vehicle_label: str
     lane: int
-    start_number: int | None
+    start_number: int | str | None
     laps_completed: int
     finished: bool
     total_time_ns: int | None

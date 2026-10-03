@@ -18,7 +18,7 @@ def participant_status_key(*, finished: bool, paused: bool, ended: bool) -> str:
     return "race.participant.racing"
 
 
-def start_number_text(number: int | None) -> str:
+def start_number_text(number: int | str | None) -> str:
     return "-" if number is None else str(number)
 
 

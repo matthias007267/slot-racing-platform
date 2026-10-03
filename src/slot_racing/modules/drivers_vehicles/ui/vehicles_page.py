@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (
-    QComboBox,
-    QDialog,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QSpinBox,
-    QWidget,
-)
+from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QPlainTextEdit, QPushButton, QWidget
 
 from slot_racing.core.catalog import VehicleInfo
 from slot_racing.core.domain import DriverId, VehicleId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.drivers_vehicles.service import DriverService, VehicleInput, VehicleService
+from slot_racing.modules.drivers_vehicles.ui.start_number_field import StartNumberPicker
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
 from slot_racing.uikit.theme import set_role
 
@@ -46,11 +39,13 @@ class VehicleDialog(FormDialog):
         self.notes_edit = QPlainTextEdit(vehicle.notes or "" if vehicle else "")
         self.notes_edit.setObjectName("vehicle-notes")
         self.notes_edit.setFixedHeight(70)
-        self.start_number_edit = QSpinBox()
-        self.start_number_edit.setObjectName("vehicle-start-number")
-        self.start_number_edit.setRange(0, 9999)
-        self.start_number_edit.setSpecialValueText(tr("common.none"))
-        self.start_number_edit.setValue(vehicle.start_number or 0 if vehicle else 0)
+        current_number = None if vehicle is None else vehicle.start_number
+        self.start_number_edit = StartNumberPicker(
+            translator,
+            drivers.defined_start_numbers(),
+            current_number,
+            "vehicle-start-number",
+        )
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("vehicle-driver")
         self.driver_combo.addItem(tr("common.none"), None)
@@ -75,7 +70,7 @@ class VehicleDialog(FormDialog):
             manufacturer=self.manufacturer_edit.text(),
             scale=self.scale_edit.text(),
             notes=self.notes_edit.toPlainText(),
-            start_number=self.start_number_edit.value() or None,
+            start_number=self.start_number_edit.value(),
             driver_id=None if driver_id is None else DriverId(driver_id),
         )
         if self._vehicle is None:

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError
@@ -523,6 +524,25 @@ class CameraSetupPage(QWidget):
         self._saved_flash = False
         self._drawing = False
         self._apply(self._read_store(), restart=True)
+
+    def save_persistent(self) -> None:
+        """Write a camera draft that has not been saved yet. A clean page is left untouched."""
+        if not self._is_dirty():
+            return
+        if any(not _complete(draft.position_id) for draft in self._drafts):
+            raise InputError("camera.status.incomplete")
+        try:
+            document = self._document()
+        except ValidationError as error:
+            raise InputError("camera.status.invalid") from error
+        try:
+            self._store.save(document)
+        except CameraConfigurationError as error:
+            raise InputError("camera.status.save_failed") from error
+        self._snapshot = self._state()
+        self._corrupt = False
+        self._error_key = None
+        self._detail = None
 
     def _on_save(self) -> None:
         if any(not _complete(draft.position_id) for draft in self._drafts):
