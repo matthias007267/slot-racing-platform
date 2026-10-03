@@ -50,7 +50,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 |---|---|
 | `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
 | `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
-| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live view, results). Requires `drivers_vehicles` and `tracks`, optionally `timing` |
+| `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live HUD, results) and the saved race-HUD layout. Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Timing** page that edits that document on the live picture. Zones are not stored per track |
@@ -423,10 +423,50 @@ data can be deactivated but not deleted.
   `RaceOverview`, which only calls the existing service and controller). A card is omitted when
   its service is not registered. No race rules live in the shell.
 - *Einstellungen* lists the modules with checkboxes to enable/disable them at runtime; the
-  choice is saved in the config file.
+  choice is saved in the config file. Below the modules it hosts `SettingsSection`s contributed
+  by plugins. The races module adds **Renn-HUD** there. The shell does not import the module:
+  the section factory is registered at activation and returns a widget.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
   Rennen 40, Zeitmessung 50, Kamera-Timing 55 (only when the camera plugin is enabled),
   Statistiken 60, Streckenplaner 70, Einstellungen (shell).
+
+## Race HUD
+
+The live race page is a stage of independent panels (header, clock, lap progress, ranking,
+driver highlight, last lap, best lap, status, message, controls). What they show comes from
+`RaceSnapshot` and the race events the view already receives. The clock text is
+`snapshot.elapsed_ns` formatted with `format_duration`. Pause, resume and abort call the
+existing `RaceRunner`. The stage does not read sensors, open a camera or write race rows.
+
+Where each panel sits is a document, not code in the live widget (ADR 0013):
+
+```text
+settings['ui.race_hud.configuration']
+  version: 1
+  name: "standard"          # the one active layout; a later version can store several
+  canvas: {width, height}   # aspect reference, 16 by 9, not a pixel size
+  widgets[]:
+    id, visible, x, y, width, height, z_index
+```
+
+`x`, `y`, `width` and `height` are fractions of the display, from 0 to 1. A widget is at least
+0.06 on each side and stays inside the display. Pixels are computed when the stage (or the
+settings preview) is drawn, so the same document fits a small window and a large one. Overlap
+is allowed. `z_index` decides which panel is on top; the editor can move the selection forward
+or backward.
+
+A missing row, a broken document or an unknown `version` becomes the built-in 16:9 layout and
+does not crash. Unknown widget ids are kept, so a future panel survives a round trip. The
+editor's **Standardlayout** loads that built-in layout without writing it. **Speichern** writes
+the document. **Zurücksetzen** reloads the last saved document and drops unsaved edits.
+`HudConfigurationStore.reset()` writes the built-in layout; that is the stored reset.
+
+The live view keeps the previous labels, the ranking table and the race buttons, so the
+existing live and result flows stay in place. Inside a panel, type size follows the panel.
+The ranking keeps the race's row order, hides secondary columns when the panel is narrow,
+and scrolls vertically. Pause and resume are separate buttons and only call `RaceRunner`.
+A fullscreen window can host the same stage later; this step does not add one, and it does
+not add a library of named layouts.
 
 ## Dependency rules
 
@@ -438,6 +478,7 @@ data can be deactivated but not deleted.
 | `app` ↛ `modules` (plugins are discovered) | import-linter |
 | race engine, service, recorder, runner, types, models ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
 | `modules.races.ui` ↛ engine, recorder (no race logic in the UI) | import-linter |
+| `modules.races.hud` ↛ PySide6, `uikit`, engine, recorder, runner | import-linter |
 | `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
 | race engine ↛ timing modules, `app`, `uikit` (engine knows only the core) | import-linter |
 | `timing`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |

@@ -189,6 +189,10 @@ def stylesheet(checkmark: str = "") -> str:
     QLabel[role="telemetry"] {{
         font-size: 18px;
     }}
+    QLabel[role="telemetry-fit"] {{
+        font-weight: 600;
+        font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+    }}
     QLabel[role="caption"] {{
         color: {c.text_secondary};
         font-size: 12px;
@@ -207,6 +211,52 @@ def stylesheet(checkmark: str = "") -> str:
         border: 1px solid {c.border};
         border-radius: 8px;
     }}
+    QFrame[role="hud-panel"] {{
+        background: {c.surface};
+        border: 1px solid {c.border};
+        border-radius: 8px;
+    }}
+    QFrame[role="hud-panel"][tone="ok"] {{
+        border: 1px solid {c.accent};
+    }}
+    QFrame[role="hud-panel"][tone="warn"] {{
+        border: 1px solid {c.warning};
+    }}
+    QWidget#hud-preview, QWidget#hud-stage {{
+        background: {c.background};
+        border: 1px solid {c.border};
+        border-radius: 8px;
+    }}
+    QFrame[role="hud-box"] {{
+        background: {c.surface};
+        border: 1px dashed {c.border};
+        border-radius: 6px;
+    }}
+    QFrame[role="hud-box"][active="true"] {{
+        background: {c.selection};
+        border: 1px solid {c.accent};
+    }}
+    QFrame[role="hud-handle"] {{
+        background: {c.accent};
+        border: none;
+        border-radius: 2px;
+    }}
+    QScrollArea#settings-scroll, QWidget#settings-body {{
+        background: transparent;
+        border: none;
+    }}
+    QProgressBar {{
+        background: {c.elevated};
+        border: 1px solid {c.border};
+        border-radius: 4px;
+        color: {c.text};
+        text-align: center;
+        min-height: 14px;
+    }}
+    QProgressBar::chunk {{
+        background: {c.accent};
+        border-radius: 3px;
+    }}
     QPushButton {{
         background: {c.elevated};
         color: {c.text};
@@ -223,6 +273,11 @@ def stylesheet(checkmark: str = "") -> str:
         color: {c.text_muted};
         background: {c.surface};
         border-color: {c.border};
+    }}
+    QPushButton[compact="true"] {{
+        min-height: 0px;
+        padding: 2px 6px;
+        font-size: 12px;
     }}
     QPushButton:default, QPushButton[role="primary"] {{
         background: {c.accent};
@@ -279,7 +334,7 @@ def stylesheet(checkmark: str = "") -> str:
         color: {c.accent_hover};
         font-weight: 600;
     }}
-    QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
         background: {c.elevated};
         color: {c.text};
         border: 1px solid {c.border};
@@ -289,7 +344,7 @@ def stylesheet(checkmark: str = "") -> str:
         selection-background-color: {c.selection};
         selection-color: {c.text};
     }}
-    QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
     QPlainTextEdit:focus, QTextEdit:focus, QListWidget:focus {{
         border: 1px solid {c.accent};
     }}

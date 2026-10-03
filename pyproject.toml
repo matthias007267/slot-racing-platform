@@ -135,6 +135,18 @@ source_modules = [
 forbidden_modules = ["PySide6", "slot_racing.uikit", "cv2", "gpiozero", "RPi"]
 
 [[tool.importlinter.contracts]]
+name = "HUD configuration is free of UI and the race engine"
+type = "forbidden"
+source_modules = ["slot_racing.modules.races.hud"]
+forbidden_modules = [
+    "PySide6",
+    "slot_racing.uikit",
+    "slot_racing.modules.races.engine",
+    "slot_racing.modules.races.recorder",
+    "slot_racing.modules.races.runner",
+]
+
+[[tool.importlinter.contracts]]
 name = "Race UI does not contain race logic"
 type = "forbidden"
 source_modules = ["slot_racing.modules.races.ui"]

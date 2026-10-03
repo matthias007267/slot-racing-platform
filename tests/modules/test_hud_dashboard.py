@@ -1,0 +1,335 @@
+"""Motorsport HUD: readable panels, live snapshot data, and the existing race controls."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
+from pytestqt.qtbot import QtBot
+
+from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
+from slot_racing.core.domain import RaceStatus
+from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
+from slot_racing.modules.races.ui.hud_widgets import (
+    COLUMN_BEST,
+    COLUMN_DRIVER,
+    COLUMN_LAPS,
+    COLUMN_POSITION,
+    COLUMN_VEHICLE,
+    LEADER_ROLE,
+    BestLapWidget,
+    LapProgressWidget,
+    LastLapWidget,
+    LiveRankingWidget,
+    RaceControlsWidget,
+    RaceMessageWidget,
+)
+from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.races_page import RacesPage
+from slot_racing.modules.races.ui.results_view import ResultsView
+from slot_racing.uikit import fill_table
+from tests.modules.conftest import Env
+from tests.modules.test_hud_editor import _translator
+from tests.modules.test_live_race_ui import _ready_race
+from tests.modules.test_ui_management import column_text, open_page
+
+
+def test_lap_progress_shows_the_target_and_an_open_race() -> None:
+    assert format_lap_progress(12, 30) == "12 / 30"
+    assert format_lap_progress(1, 2) == "1 / 2"
+    assert format_lap_progress(0, 0) == EMPTY_DISPLAY
+    assert format_lap_progress(4, -1) == "4"
+
+
+def test_progress_widget_hides_the_bar_without_a_target(qtbot: QtBot) -> None:
+    widget = LapProgressWidget(_translator())
+    qtbot.addWidget(widget)
+    widget.show_counts(12, 30, 11)
+    assert widget.laps_label.text() == "12 / 30"
+    assert widget.progress.value() == 11
+    assert not widget.progress.isHidden()
+    widget.show_counts(0, 0, 0)
+    assert widget.laps_label.text() == EMPTY_DISPLAY
+    assert widget.progress.isHidden()
+
+
+def test_empty_lap_and_message_widgets_do_not_invent_a_value(qtbot: QtBot) -> None:
+    translator = _translator()
+    last = LastLapWidget(translator)
+    best = BestLapWidget(translator)
+    message = RaceMessageWidget(translator)
+    qtbot.addWidget(last)
+    qtbot.addWidget(best)
+    qtbot.addWidget(message)
+    assert last.value_label.text() == EMPTY_DISPLAY
+    assert best.value_label.text() == EMPTY_DISPLAY
+    assert message.message_label.text() == EMPTY_DISPLAY
+    assert translator.translate("race.status.ready") == "Bereit"
+    assert translator.translate("race.status.running") == "Läuft"
+    assert translator.translate("race.status.paused") == "Pausiert"
+    assert translator.translate("race.status.finished") == "Beendet"
+
+
+def test_the_ranking_scrolls_vertically_and_keeps_the_given_order(qtbot: QtBot) -> None:
+    ranking = LiveRankingWidget(_translator())
+    qtbot.addWidget(ranking)
+    names = [f"Fahrer {index:02d}" for index in range(12)]
+    fill_table(
+        ranking.table,
+        [
+            (
+                str(index + 1),
+                name,
+                "Porsche",
+                "7",
+                "1",
+                "3",
+                "4/10",
+                "0:08.000",
+                "0:08.000",
+                "0:24.000",
+                "3/10",
+                "Fährt",
+            )
+            for index, name in enumerate(names)
+        ],
+    )
+    ranking.resize(340, 150)
+    ranking.show()
+    QApplication.processEvents()
+    ranking.present()
+    shown = []
+    for row in range(12):
+        item = ranking.table.item(row, COLUMN_DRIVER)
+        assert item is not None
+        shown.append(item.text())
+    assert shown == names
+    leader = ranking.table.item(0, COLUMN_POSITION)
+    assert leader is not None and leader.data(LEADER_ROLE) is True and leader.font().bold()
+    second = ranking.table.item(1, COLUMN_POSITION)
+    assert second is not None and second.data(LEADER_ROLE) is False
+    assert ranking.table.verticalScrollBar().maximum() > 0
+    assert ranking.table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert ranking.table.isColumnHidden(COLUMN_VEHICLE)
+    assert not ranking.table.isColumnHidden(COLUMN_DRIVER)
+    assert not ranking.table.isColumnHidden(COLUMN_LAPS)
+    assert not ranking.table.isColumnHidden(COLUMN_BEST)
+
+    ranking.resize(640, 280)
+    QApplication.processEvents()
+    ranking.present()
+    assert not ranking.table.isColumnHidden(COLUMN_VEHICLE)
+    assert ranking.table.isColumnHidden(3)
+
+    ranking.resize(1200, 400)
+    QApplication.processEvents()
+    ranking.present()
+    assert not ranking.table.isColumnHidden(3)
+    assert not ranking.table.isColumnHidden(COLUMN_BEST)
+    _assert_children_inside(ranking)
+
+
+def test_controls_stay_on_two_rows_when_the_panel_is_small_or_large(qtbot: QtBot) -> None:
+    controls = RaceControlsWidget(_translator())
+    qtbot.addWidget(controls)
+    controls.show()
+    for size in ((220, 72), (280, 90), (640, 160)):
+        controls.resize(*size)
+        QApplication.processEvents()
+        _assert_two_rows(controls)
+        _assert_children_inside(controls)
+    assert controls.pause_button.text() == "Pause"
+    assert controls.resume_button.text() == "Fortsetzen"
+    assert controls.stop_button.text() == "Abbrechen"
+    assert controls.results_button.text() == "Ergebnisse"
+    assert controls.back_button.text() == "Zurück"
+
+
+def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
+    qtbot: QtBot, env: Env
+) -> None:
+    live, page = _running_race(qtbot, env)
+    runner = live.runner
+    assert runner is not None and runner.status is RaceStatus.RUNNING
+    assert live.status_label.text() == "● Läuft"
+    assert live.header.participants_label.text() == "2 Teilnehmer"
+    assert live.header.header_status.text().endswith("Läuft")
+    assert live.messages.message_label.text() == "Rennen gestartet"
+    assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
+    assert live.laps_label.text() == "1 / 2"
+    assert live.pause_button.isEnabled()
+    assert not live.resume_button.isEnabled()
+    assert live.stop_button.isEnabled()
+    assert not live.results_button.isEnabled()
+    assert live.back_button.isEnabled()
+    assert live.highlight.position_label.text() == "P1"
+    assert live.highlight.name_label.text() == "ZOE"
+    assert "PORSCHE" in live.highlight.vehicle_label.text()
+    assert "Zoe" in live.detail.text()
+    assert EMPTY_DISPLAY in live.highlight.last_label.text()
+
+    env.clock.advance(3 * NANOS_PER_SECOND)
+    live.refresh()
+    assert live.time_label.text() == "0:03.000"
+    assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
+
+    env.clock.advance(2 * NANOS_PER_SECOND)
+    live.refresh()
+    assert live.time_label.text() == "0:05.000"
+    assert column_text(live.table, 0, "Fahrer") == "Zoe"
+    assert column_text(live.table, 1, "Fahrer") == "Anna"
+    assert [column_text(live.table, index, "Fahrer") for index in range(2)] == [
+        row.driver_label for row in runner.snapshot().rows
+    ]
+    assert column_text(live.table, 0, "Platz") == "1"
+    assert column_text(live.table, 0, "Runden") == "1"
+    assert live.laps_label.text() == "2 / 2"
+    assert live.progress.progress.value() == 1
+    last = column_text(live.table, 0, "Letzte Runde")
+    assert last == format_duration(runner.snapshot().rows[0].last_lap_ns)
+    assert last in live.last_lap.value_label.text()
+    assert "Zoe" in live.last_lap.value_label.text()
+    assert last in live.best_lap.value_label.text()
+    assert last in live.highlight.last_label.text()
+    assert last in live.highlight.best_label.text()
+    assert live.messages.message_label.text() == "Fahrer Zoe hat Runde 1 abgeschlossen"
+    leader = live.table.item(0, 0)
+    assert leader is not None and leader.data(LEADER_ROLE) is True
+
+    frozen = live.time_label.text()
+    live.pause_button.click()
+    assert runner.snapshot().status is RaceStatus.PAUSED
+    assert live.status_label.text() == "● Pausiert"
+    assert live.messages.message_label.text() == "Rennen pausiert"
+    assert not live.pause_button.isEnabled()
+    assert live.resume_button.isEnabled()
+    assert live.stop_button.isEnabled()
+    env.clock.advance(5 * NANOS_PER_SECOND)
+    live.refresh()
+    assert live.time_label.text() == frozen
+    assert column_text(live.table, 0, "Runden") == "1"
+
+    live.pause_button.click()
+    assert runner.snapshot().status is RaceStatus.PAUSED
+    live.resume_button.click()
+    assert runner.snapshot().status is RaceStatus.RUNNING
+    assert live.status_label.text() == "● Läuft"
+    assert live.messages.message_label.text() == "Rennen fortgesetzt"
+    assert live.pause_button.isEnabled()
+    assert not live.resume_button.isEnabled()
+    env.clock.advance(NANOS_PER_SECOND)
+    live.refresh()
+    assert live.time_label.text() == "0:06.000"
+    assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
+
+    seen_second_lap = False
+    for _ in range(120):
+        if column_text(live.table, 0, "Runden") == "2":
+            seen_second_lap = True
+        if isinstance(page.current_view(), ResultsView):
+            break
+        env.clock.advance(NANOS_PER_SECOND)
+        live.refresh()
+    assert seen_second_lap
+    assert isinstance(page.current_view(), ResultsView)
+    assert live.status_label.text() == "● Beendet"
+    assert live.messages.message_label.text() == "Rennen beendet"
+    assert not live.pause_button.isEnabled()
+    assert not live.resume_button.isEnabled()
+    assert not live.stop_button.isEnabled()
+    assert live.results_button.isEnabled()
+    assert live.back_button.isEnabled()
+    finished_at = live.time_label.text()
+    assert finished_at == format_duration(runner.snapshot().elapsed_ns)
+    assert [column_text(live.table, index, "Fahrer") for index in range(2)] == [
+        row.driver_label for row in runner.snapshot().rows
+    ]
+    assert column_text(live.table, 0, "Platz") == "1"
+    assert "Zoe" in live.best_lap.value_label.text()
+    assert live.last_lap.value_label.text() != EMPTY_DISPLAY
+    env.clock.advance(5 * NANOS_PER_SECOND)
+    live.refresh()
+    assert live.time_label.text() == finished_at
+    assert not live._timer.isActive()
+    live.results_button.click()
+    assert isinstance(page.current_view(), ResultsView)
+    assert column_text(page.results.table, 0, "Fahrer") == "Zoe"
+
+
+def test_panels_keep_their_content_inside_at_several_sizes(qtbot: QtBot, env: Env) -> None:
+    window, live, _page = _shown_race(qtbot, env)
+    sizes = ((640, 400), (1100, 700), (1600, 1000), (1800, 520), (720, 1100))
+    fonts: list[int] = []
+    for width, height in sizes:
+        window.resize(width, height)
+        QApplication.processEvents()
+        live.stage.relayout()
+        QApplication.processEvents()
+        runner = live.runner
+        assert runner is not None
+        assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
+        _assert_two_rows(live.controls)
+        policy = live.ranking.table.horizontalScrollBarPolicy()
+        assert policy == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        for panel in (
+            live.header,
+            live.clock,
+            live.progress,
+            live.ranking,
+            live.highlight,
+            live.last_lap,
+            live.best_lap,
+            live.status,
+            live.messages,
+            live.controls,
+        ):
+            _assert_children_inside(panel)
+        fonts.append(live.time_label.font().pixelSize())
+    assert fonts[2] > fonts[0]
+
+
+def _running_race(qtbot: QtBot, env: Env) -> tuple[LiveRaceView, RacesPage]:
+    window, live, page = _shown_race(qtbot, env)
+    assert window is not None
+    return live, page
+
+
+def _shown_race(qtbot: QtBot, env: Env) -> tuple[QWidget, LiveRaceView, RacesPage]:
+    _ready_race(env, laps=2)
+    window, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.refresh()
+    page.table.selectRow(0)
+    page.buttons["start"].click()
+    window.show()
+    QApplication.processEvents()
+    assert isinstance(page.live, LiveRaceView)
+    return window, page.live, page
+
+
+def _assert_two_rows(controls: RaceControlsWidget) -> None:
+    pause = controls.pause_button.geometry().center().y()
+    resume = controls.resume_button.geometry().center().y()
+    stop = controls.stop_button.geometry().center().y()
+    results = controls.results_button.geometry().center().y()
+    back = controls.back_button.geometry().center().y()
+    assert abs(pause - resume) <= 3
+    assert abs(stop - results) <= 3
+    assert abs(results - back) <= 3
+    assert stop > pause
+    xs = [
+        controls.stop_button.geometry().center().x(),
+        controls.results_button.geometry().center().x(),
+        controls.back_button.geometry().center().x(),
+    ]
+    assert xs[0] < xs[1] < xs[2]
+
+
+def _assert_children_inside(widget: QWidget) -> None:
+    for child in widget.children():
+        if not isinstance(child, QWidget) or not child.isVisible():
+            continue
+        geo = child.geometry()
+        assert geo.left() >= -1
+        assert geo.top() >= -1
+        assert geo.right() <= widget.width() + 1
+        assert geo.bottom() <= widget.height() + 1

@@ -21,6 +21,7 @@ from slot_racing.core.plugin import (
     PluginState,
     ServiceNotFoundError,
     ServiceRegistry,
+    SettingsSection,
     discover_plugins,
 )
 from slot_racing.core.timing import TimingSource
@@ -296,6 +297,19 @@ def test_contribution_listeners_are_notified_and_isolated() -> None:
     with pytest.raises(PluginError):
         registry.add_navigation("p", NavigationItem(id="dup", title_key="k"))
         registry.add_navigation("q", NavigationItem(id="dup", title_key="k"))
+
+
+def test_settings_sections_are_ordered_and_removed_with_the_owner() -> None:
+    registry = ContributionRegistry()
+    registry.add_settings_section("p", SettingsSection(id="b", title_key="t", order=2))
+    registry.add_settings_section("p", SettingsSection(id="a", title_key="t", order=1))
+    registry.add_settings_section("q", SettingsSection(id="c", title_key="t", order=0))
+    assert [item.id for item in registry.settings_sections()] == ["c", "a", "b"]
+    registry.remove_owner("p")
+    assert [item.id for item in registry.settings_sections()] == ["c"]
+    assert registry.navigation_items() == []
+    with pytest.raises(PluginError):
+        registry.add_settings_section("q", SettingsSection(id="c", title_key="t"))
 
 
 def test_all_builtin_modules_are_discovered() -> None:

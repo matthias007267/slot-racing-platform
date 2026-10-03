@@ -111,7 +111,9 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert column_text(live.table, 0, "Runden") == "1"
     assert column_text(live.table, 1, "Runden") == "0"
 
-    live.pause_button.click()
+    assert not live.pause_button.isEnabled()
+    assert live.resume_button.isEnabled()
+    live.resume_button.click()
     assert live.status_label.text().endswith("Läuft")
     assert column_text(live.table, 1, "Status") == "Fährt"
     assert runner.snapshot().status is RaceStatus.RUNNING

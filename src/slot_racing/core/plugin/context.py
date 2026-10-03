@@ -9,7 +9,11 @@ from slot_racing.core.clock import Clock
 from slot_racing.core.config import AppConfig
 from slot_racing.core.events import Event, EventDispatcher, Subscription
 from slot_racing.core.i18n import Translator
-from slot_racing.core.plugin.contributions import ContributionRegistry, NavigationItem
+from slot_racing.core.plugin.contributions import (
+    ContributionRegistry,
+    NavigationItem,
+    SettingsSection,
+)
 from slot_racing.core.plugin.services import ServiceRegistry
 from slot_racing.core.timing import TimingSourceFactory
 
@@ -83,6 +87,10 @@ class PluginContext:
 
     def add_navigation(self, item: NavigationItem) -> None:
         self._contributions.add_navigation(self.plugin_name, item)
+
+    def add_settings_section(self, section: SettingsSection) -> None:
+        """Add a block to the settings page. Removed when this plugin is disabled."""
+        self._contributions.add_settings_section(self.plugin_name, section)
 
     def release(self) -> None:
         """Remove everything this plugin registered. Called by the plugin manager."""
