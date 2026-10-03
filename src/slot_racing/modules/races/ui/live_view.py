@@ -30,7 +30,12 @@ from slot_racing.modules.races.hud import (
     default_hud_configuration,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceController, RaceRunner, RaceSnapshot
-from slot_racing.modules.races.ui.formatting import participant_status_key, start_number_text
+from slot_racing.modules.races.ui.formatting import (
+    EMPTY_DISPLAY,
+    format_lap_progress,
+    participant_status_key,
+    start_number_text,
+)
 from slot_racing.modules.races.ui.hud_stage import HudStage
 from slot_racing.modules.races.ui.hud_widgets import (
     BestLapWidget,
@@ -86,6 +91,7 @@ class LiveRaceView(QWidget):
         self._announced_end = False
         self._busy = False
         self._last_lap: tuple[int, int] | None = None
+        self._lap_notice: tuple[int, int] | None = None
         self._announced_finishers: set[int] = set()
         self._message = ""
         self._unsubscribe_hud: Callable[[], None] | None = None
@@ -116,6 +122,7 @@ class LiveRaceView(QWidget):
         self.detail = self.highlight.detail
         self.warning = self.messages.warning
         self.pause_button = self.controls.pause_button
+        self.resume_button = self.controls.resume_button
         self.stop_button = self.controls.stop_button
         self.results_button = self.controls.results_button
         self.back_button = self.controls.back_button
@@ -139,7 +146,8 @@ class LiveRaceView(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
-        self.pause_button.clicked.connect(lambda: self.toggle_pause())
+        self.pause_button.clicked.connect(self.pause_race)
+        self.resume_button.clicked.connect(self.resume_race)
         self.stop_button.clicked.connect(lambda: self.stop_race())
         self.results_button.clicked.connect(lambda: self._show_results())
         self.back_button.clicked.connect(self.back_requested.emit)
@@ -165,6 +173,7 @@ class LiveRaceView(QWidget):
         self._snapshot = None
         self._announced_end = False
         self._last_lap = None
+        self._lap_notice = None
         self._announced_finishers = set()
         self._message = ""
         self.warning.clear_message()
@@ -189,15 +198,29 @@ class LiveRaceView(QWidget):
         finally:
             self._busy = False
 
+    def pause_race(self) -> None:
+        runner = self._runner
+        if runner is None or runner.status is not RaceStatus.RUNNING:
+            return
+        self._guard(runner.pause)
+        self.refresh()
+
+    def resume_race(self) -> None:
+        runner = self._runner
+        if runner is None or runner.status is not RaceStatus.PAUSED:
+            return
+        self._guard(runner.resume)
+        self.refresh()
+
     def toggle_pause(self) -> None:
+        """Pause or resume through the runner. Kept for callers that use one action."""
         runner = self._runner
         if runner is None:
             return
         if runner.status is RaceStatus.PAUSED:
-            self._guard(runner.resume)
+            self.resume_race()
         elif runner.status is RaceStatus.RUNNING:
-            self._guard(runner.pause)
-        self.refresh()
+            self.pause_race()
 
     def stop_race(self) -> None:
         runner = self._runner
@@ -225,7 +248,9 @@ class LiveRaceView(QWidget):
         tr = self.translator.translate
         if isinstance(event, LapCompleted):
             self._last_lap = (event.lane, event.lap_time_ns)
-        elif isinstance(event, RaceStarted):
+            self._lap_notice = (event.lane, event.lap_number)
+            return
+        if isinstance(event, RaceStarted):
             self._message = tr("hud.message.started")
         elif isinstance(event, RacePaused):
             self._message = tr("hud.message.paused")
@@ -234,6 +259,10 @@ class LiveRaceView(QWidget):
         elif isinstance(event, RaceFinished):
             key = "hud.message.aborted" if event.aborted else "hud.message.finished"
             self._message = tr(key)
+        else:
+            return
+        # A later race-status event wins over a lap line from the same tick.
+        self._lap_notice = None
 
     def _redraw_for(self, race_id: RaceId) -> None:
         runner = self._runner
@@ -258,10 +287,15 @@ class LiveRaceView(QWidget):
         self.name_label.setText(snapshot.name)
         self.track_label.setText(f"{tr('race.live.track')}: {snapshot.track_name}")
         self.header.header_status.setText(f"{tr('race.live.status')}: {status_text}")
+        self.header.participants_label.setText(
+            self.translator.format("hud.header.participants", count=len(snapshot.rows))
+        )
         provider = provider_label(self.translator, snapshot.timing_provider)
         self.provider_label.setText(f"{tr('race.live.provider')}: {provider}")
         self.status_label.setText(f"● {status_text}")
-        set_tone(self.status_label, _status_tone(snapshot))
+        tone = _status_tone(snapshot)
+        set_tone(self.status_label, tone)
+        self.status.emphasize(tone)
         self.time_label.setText(format_duration(snapshot.elapsed_ns))
         self._show_progress(snapshot)
         ended = snapshot.status is RaceStatus.FINISHED
@@ -273,21 +307,22 @@ class LiveRaceView(QWidget):
         )
         if self.table.rowCount() and selected_id(self.table) is None:
             self.table.selectRow(0)
+        self.ranking.present()
         self._show_detail()
         self._show_laps(snapshot)
+        lap_message = self._consume_lap_message(snapshot)
         self._announce_finishers(snapshot)
+        if lap_message:
+            self._message = lap_message
         if not self._message:
             self._message = _status_message(tr, snapshot)
-        self.messages.message_label.setText(self._message or "-")
+        self.messages.message_label.setText(self._message or EMPTY_DISPLAY)
         if snapshot.source_errors:
             self.warning.show_error(
                 self.translator.format(
                     "race.live.warning", detail="; ".join(snapshot.source_errors)
                 )
             )
-        self.pause_button.setText(
-            tr("race.live.resume" if snapshot.status is RaceStatus.PAUSED else "race.live.pause")
-        )
         self._update_buttons()
         if snapshot.status is RaceStatus.FINISHED:
             self._timer.stop()
@@ -298,23 +333,31 @@ class LiveRaceView(QWidget):
     def _show_progress(self, snapshot: RaceSnapshot) -> None:
         leader = min(snapshot.rows, key=lambda row: row.position, default=None)
         current = 0 if leader is None else leader.current_lap
-        self.laps_label.setText(f"{current} / {snapshot.laps}")
         completed = max((row.laps_completed for row in snapshot.rows), default=0)
-        target = max(snapshot.laps, 1)
-        self.progress.progress.setRange(0, target)
-        self.progress.progress.setValue(min(completed, target))
-        self.progress.progress.setFormat(f"{completed}/{snapshot.laps}")
+        self.progress.show_counts(current, snapshot.laps, completed)
+
+    def _consume_lap_message(self, snapshot: RaceSnapshot) -> str:
+        notice = self._lap_notice
+        if notice is None:
+            return ""
+        self._lap_notice = None
+        lane, lap_number = notice
+        return self.translator.format(
+            "hud.message.lap_completed",
+            driver=_name_on_lane(snapshot, lane),
+            lap=lap_number,
+        )
 
     def _show_laps(self, snapshot: RaceSnapshot) -> None:
         if self._last_lap is None:
-            self.last_lap.value_label.setText("-")
+            self.last_lap.value_label.setText(EMPTY_DISPLAY)
         else:
             lane, lap_time_ns = self._last_lap
             name = _name_on_lane(snapshot, lane)
             self.last_lap.value_label.setText(f"{name}\n{format_duration(lap_time_ns)}")
         timed = [row for row in snapshot.rows if row.best_lap_ns is not None]
         if not timed:
-            self.best_lap.value_label.setText("-")
+            self.best_lap.value_label.setText(EMPTY_DISPLAY)
             return
         best = min(timed, key=lambda row: (row.best_lap_ns or 0, row.position))
         self.best_lap.value_label.setText(
@@ -360,8 +403,17 @@ class LiveRaceView(QWidget):
             else next((item for item in snapshot.rows if item.lane == lane), None)
         )
         if snapshot is None or row is None:
+            self.highlight.clear_driver()
             self.detail.setText(tr("race.live.detail_empty"))
             return
+        self.highlight.show_driver(
+            position=f"P{row.position}",
+            name=row.driver_label,
+            vehicle=row.vehicle_label,
+            lap=format_lap_progress(row.current_lap, snapshot.laps),
+            last=_shown_time(row.last_lap_ns),
+            best=_shown_time(row.best_lap_ns),
+        )
         times = ", ".join(format_duration(lap) for lap in row.lap_times_ns) or "-"
         status = tr(
             participant_status_key(
@@ -390,10 +442,12 @@ class LiveRaceView(QWidget):
 
     def _update_buttons(self) -> None:
         runner = self._runner
-        active = runner is not None and runner.is_active
-        self.pause_button.setEnabled(active)
-        self.stop_button.setEnabled(active)
+        status = None if runner is None else runner.status
+        self.pause_button.setEnabled(status is RaceStatus.RUNNING)
+        self.resume_button.setEnabled(status is RaceStatus.PAUSED)
+        self.stop_button.setEnabled(runner is not None and runner.is_active)
         self.results_button.setEnabled(runner is not None and runner.is_finished)
+        self.back_button.setEnabled(True)
 
     def _guard(self, action: Callable[[], None]) -> None:
         try:
@@ -439,3 +493,7 @@ def _status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> 
 def _name_on_lane(snapshot: RaceSnapshot, lane: int) -> str:
     row = next((item for item in snapshot.rows if item.lane == lane), None)
     return str(lane) if row is None else row.driver_label
+
+
+def _shown_time(value: int | None) -> str:
+    return EMPTY_DISPLAY if value is None else format_duration(value)

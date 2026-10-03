@@ -216,6 +216,12 @@ def stylesheet(checkmark: str = "") -> str:
         border: 1px solid {c.border};
         border-radius: 8px;
     }}
+    QFrame[role="hud-panel"][tone="ok"] {{
+        border: 1px solid {c.accent};
+    }}
+    QFrame[role="hud-panel"][tone="warn"] {{
+        border: 1px solid {c.warning};
+    }}
     QWidget#hud-preview, QWidget#hud-stage {{
         background: {c.background};
         border: 1px solid {c.border};
@@ -267,6 +273,11 @@ def stylesheet(checkmark: str = "") -> str:
         color: {c.text_muted};
         background: {c.surface};
         border-color: {c.border};
+    }}
+    QPushButton[compact="true"] {{
+        min-height: 0px;
+        padding: 2px 6px;
+        font-size: 12px;
     }}
     QPushButton:default, QPushButton[role="primary"] {{
         background: {c.accent};

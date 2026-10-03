@@ -462,8 +462,11 @@ the document. **Zurücksetzen** reloads the last saved document and drops unsave
 `HudConfigurationStore.reset()` writes the built-in layout; that is the stored reset.
 
 The live view keeps the previous labels, the ranking table and the race buttons, so the
-existing live and result flows stay in place. A fullscreen window can host the same stage
-later; this step does not add one, and it does not add a library of named layouts.
+existing live and result flows stay in place. Inside a panel, type size follows the panel.
+The ranking keeps the race's row order, hides secondary columns when the panel is narrow,
+and scrolls vertically. Pause and resume are separate buttons and only call `RaceRunner`.
+A fullscreen window can host the same stage later; this step does not add one, and it does
+not add a library of named layouts.
 
 ## Dependency rules
 

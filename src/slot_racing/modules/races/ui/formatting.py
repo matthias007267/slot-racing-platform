@@ -20,3 +20,17 @@ def participant_status_key(*, finished: bool, paused: bool, ended: bool) -> str:
 
 def start_number_text(number: int | None) -> str:
     return "-" if number is None else str(number)
+
+
+EMPTY_DISPLAY = "—"
+
+
+def format_lap_progress(current: int, target: int) -> str:
+    """Current lap against the race target.
+
+    A race without a positive lap target is shown as the current lap only.
+    ``format_duration`` is unrelated: this text is a counter, not a time.
+    """
+    if target < 1:
+        return str(current) if current > 0 else EMPTY_DISPLAY
+    return f"{current} / {target}"

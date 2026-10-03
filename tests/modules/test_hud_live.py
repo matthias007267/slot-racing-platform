@@ -36,8 +36,8 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert live.laps_label.text() == "1 / 2"
     assert live.time_label.text() == "0:00.000"
     assert column_text(live.table, 0, "Fahrer") == "Zoe"
-    assert live.last_lap.value_label.text() == "-"
-    assert live.best_lap.value_label.text() == "-"
+    assert live.last_lap.value_label.text() == "—"
+    assert live.best_lap.value_label.text() == "—"
 
     env.clock.advance(3 * NANOS_PER_SECOND)
     live.refresh()
@@ -60,14 +60,16 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     frozen = live.time_label.text()
     live.pause_button.click()
     assert live.status_label.text() == "● Pausiert"
-    assert live.messages.message_label.text() == "Pause"
+    assert live.messages.message_label.text() == "Rennen pausiert"
+    assert not live.pause_button.isEnabled()
+    assert live.resume_button.isEnabled()
     assert runner.snapshot().status is RaceStatus.PAUSED
     env.clock.advance(5 * NANOS_PER_SECOND)
     live.refresh()
     assert live.time_label.text() == frozen
     assert column_text(live.table, 0, "Runden") == "1"
 
-    live.pause_button.click()
+    live.resume_button.click()
     assert live.status_label.text() == "● Läuft"
     assert live.messages.message_label.text() == "Rennen fortgesetzt"
     env.clock.advance(NANOS_PER_SECOND)
