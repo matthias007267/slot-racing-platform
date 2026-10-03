@@ -131,6 +131,7 @@ source_modules = [
     "slot_racing.modules.races.runner",
     "slot_racing.modules.races.types",
     "slot_racing.modules.races.models",
+    "slot_racing.modules.races.time_trial_board",
 ]
 forbidden_modules = ["PySide6", "slot_racing.uikit", "cv2", "gpiozero", "RPi"]
 
