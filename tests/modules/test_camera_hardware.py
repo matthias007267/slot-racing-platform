@@ -101,7 +101,7 @@ def test_a_connected_camera_completes_a_lap(env: Env) -> None:
             ),
         )
     )
-    track = env.track(lanes=1)
+    track = env.track(lanes=2)
     env.runtime.services.get(TimingSetupService).save_setup(
         track.id,
         TimingSetup(

@@ -219,7 +219,8 @@ def create_camera_race(
     positions: tuple[str, ...] = ("start_finish",),
     name: str = "Kamera",
 ) -> tuple[RaceId, str]:
-    track = env.track(name="Ring", lanes=max(lanes, 1))
+    # One car is enough for the race. The track is stored with at least two lanes.
+    track = env.track(name="Ring", lanes=max(lanes, 2))
     save_layout(env, track.id, positions)
     race = env.races.create_race(name, track.id, laps, "camera")
     for lane in range(1, lanes + 1):
@@ -793,7 +794,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         ),
     )
     attach(env, hub)
-    track = env.track(name="Ring", lanes=1)
+    track = env.track(name="Ring", lanes=2)
     save_layout(env, track.id, ("start_finish", "sector_1"))
     race = env.races.create_race("Kamera", track.id, 1, "camera")
     driver = env.driver("Anna")

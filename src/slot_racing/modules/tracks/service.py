@@ -10,18 +10,19 @@ from sqlalchemy.orm import Session
 
 from slot_racing.core.catalog import TrackCatalog, TrackInfo
 from slot_racing.core.domain import TrackId
+from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
 from slot_racing.modules.tracks.models import Track
 
-MIN_LANES = 1
-MAX_LANES = 6
+MIN_LANES = MIN_LANE_COUNT
+MAX_LANES = MAX_LANE_COUNT
 
 
 @dataclass(frozen=True, slots=True)
 class TrackInput:
     name: str
-    lane_count: int = 2
+    lane_count: int = DEFAULT_LANE_COUNT
     description: str | None = None
     image_path: str | None = None
 
@@ -64,9 +65,9 @@ class TrackService(TrackCatalog):
             return _track_info(track)
 
     def update_track(self, track_id: TrackId, data: TrackInput) -> TrackInfo:
-        values = self._validate(data)
         with self._database.session() as session:
             track = self._load(session, track_id)
+            values = self._validate(data, keep=track.lane_count)
             for field, value in values.items():
                 setattr(track, field, value)
             session.flush()
@@ -89,13 +90,18 @@ class TrackService(TrackCatalog):
             raise ValidationError("error.track.in_use") from error
 
     @staticmethod
-    def _validate(data: TrackInput) -> dict[str, str | int | None]:
+    def _validate(data: TrackInput, *, keep: int | None = None) -> dict[str, str | int | None]:
         name = data.name.strip()
         if not name:
             raise ValidationError("error.track.name.required")
         if len(name) > 100:
             raise ValidationError("error.track.name.too_long", limit=100)
-        if not MIN_LANES <= data.lane_count <= MAX_LANES:
+        count = data.lane_count
+        selectable = MIN_LANES <= count <= MAX_LANES
+        # A count already stored on this track stays valid, so saving the name does not
+        # rewrite an older configuration down to the new default.
+        unchanged = keep is not None and count == keep and count >= 1
+        if not selectable and not unchanged:
             raise ValidationError("error.track.lane_count", minimum=MIN_LANES, maximum=MAX_LANES)
         image = (data.image_path or "").strip()
         if len(image) > 500:

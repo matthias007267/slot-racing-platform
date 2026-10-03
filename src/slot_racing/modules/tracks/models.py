@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
+from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT
 from slot_racing.core.storage.base import Base
 
 
@@ -15,7 +16,7 @@ class Track(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(Text)
-    lane_count: Mapped[int] = mapped_column(default=2)
+    lane_count: Mapped[int] = mapped_column(default=DEFAULT_LANE_COUNT)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     image_path: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
