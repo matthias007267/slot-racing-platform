@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
@@ -129,7 +130,7 @@ class CameraSetupPage(QWidget):
         self.position.setObjectName("camera-position")
         self.lane = QSpinBox()
         self.lane.setObjectName("camera-lane")
-        self.lane.setRange(1, 999)
+        self.lane.setRange(1, MAX_LANE_COUNT)
         self.add_zone = QPushButton(self._tr("camera.action.add"))
         self.add_zone.setObjectName("camera-add-zone")
         self.delete_zone = QPushButton(self._tr("camera.action.delete"))
@@ -234,7 +235,7 @@ class CameraSetupPage(QWidget):
             ZoneDraft(zone.position_id, zone.lane, zone.roi) for zone in config.detection.zones
         ]
         highest = max((draft.lane for draft in self._drafts), default=1)
-        self.lane.setMaximum(max(999, highest))
+        self.lane.setMaximum(max(MAX_LANE_COUNT, highest))
         self._fill_devices(self._probe(), config.camera.device_index)
         self._fill_choices(
             self.resolution,

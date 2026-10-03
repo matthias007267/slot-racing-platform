@@ -11,7 +11,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "track.dialog.edit": "Strecke bearbeiten",
         "track.field.name": "Name",
         "track.field.description": "Beschreibung",
-        "track.field.lane_count": "Spuren ({minimum} bis {maximum})",
+        "track.field.lane_count": "Bahnanzahl",
         "track.field.image": "Bild / Symbol",
         "track.column.lanes": "Spuren",
         "track.browse": "Durchsuchen …",
@@ -123,7 +123,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.timing.service_missing": "Die Zeitmessung ist nicht aktiv.",
         "error.track.name.required": "Bitte geben Sie einen Namen für die Strecke ein.",
         "error.track.name.too_long": "Der Name darf höchstens {limit} Zeichen lang sein.",
-        "error.track.lane_count": "Die Spurenzahl muss zwischen {minimum} und {maximum} liegen.",
+        "error.track.lane_count": "Die Bahnanzahl muss 2, 3 oder 4 sein.",
         "error.track.image.too_long": "Der Bildpfad darf höchstens {limit} Zeichen lang sein.",
         "error.track.not_found": "Die Strecke existiert nicht mehr.",
         "error.track.in_use": (
