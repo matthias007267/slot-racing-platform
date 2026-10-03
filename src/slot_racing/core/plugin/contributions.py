@@ -13,6 +13,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class SettingsSection:
+    """A block on the settings page, contributed by a plugin.
+
+    ``factory`` creates the section widget lazily. It is typed as ``object`` because the core is
+    toolkit independent; the settings page expects a ``QWidget``.
+    """
+
+    id: str
+    title_key: str
+    order: int = 100
+    factory: Callable[[], object] | None = None
+    owner: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class NavigationItem:
     """An entry in the main navigation.
 
@@ -29,10 +44,11 @@ class NavigationItem:
 
 
 class ContributionRegistry:
-    """Collects navigation items per plugin and notifies the shell when they change."""
+    """Collects navigation items and settings sections and notifies the shell on change."""
 
     def __init__(self) -> None:
         self._items: list[NavigationItem] = []
+        self._sections: list[SettingsSection] = []
         self._listeners: list[Callable[[], None]] = []
 
     def add_navigation(self, owner: str, item: NavigationItem) -> None:
@@ -41,14 +57,26 @@ class ContributionRegistry:
         self._items.append(dataclasses.replace(item, owner=owner))
         self._notify()
 
+    def add_settings_section(self, owner: str, section: SettingsSection) -> None:
+        if any(existing.id == section.id for existing in self._sections):
+            raise PluginError(f"settings section {section.id!r} is already registered")
+        self._sections.append(dataclasses.replace(section, owner=owner))
+        self._notify()
+
     def remove_owner(self, owner: str) -> None:
-        remaining = [item for item in self._items if item.owner != owner]
-        if len(remaining) != len(self._items):
-            self._items = remaining
+        items = [item for item in self._items if item.owner != owner]
+        sections = [section for section in self._sections if section.owner != owner]
+        changed = len(items) != len(self._items) or len(sections) != len(self._sections)
+        self._items = items
+        self._sections = sections
+        if changed:
             self._notify()
 
     def navigation_items(self) -> list[NavigationItem]:
         return sorted(self._items, key=lambda item: (item.order, item.id))
+
+    def settings_sections(self) -> list[SettingsSection]:
+        return sorted(self._sections, key=lambda section: (section.order, section.id))
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Register a change listener. Returns a function that removes it."""

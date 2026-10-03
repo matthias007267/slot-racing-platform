@@ -18,6 +18,7 @@ from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from slot_racing.core.domain import RaceId
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.ui.live_view import LiveRaceView
@@ -47,6 +48,7 @@ class RacesPage(QWidget):
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
         providers: TimingProviderRegistry,
+        hud_store: HudConfigurationStore | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -97,7 +99,7 @@ class RacesPage(QWidget):
         list_layout.addWidget(self.status)
 
         self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks, providers)
-        self.live = LiveRaceView(translator, controller)
+        self.live = LiveRaceView(translator, controller, hud_store)
         self.results = ResultsView(translator, service)
         self.stack = QStackedWidget()
         self.list_page = list_page

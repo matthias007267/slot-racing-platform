@@ -14,5 +14,6 @@
 | [0010](0010-vendor-neutral-naming.md) | Manufacturer-neutral naming: package, command, plugin group, data locations |
 | [0011](0011-camera-configuration.md) | Camera configuration is global and not tied to a track |
 | [0012](0012-camera-setup-ui.md) | Camera setup page edits that global document visually |
+| [0013](0013-configurable-race-hud.md) | Race HUD layout is a versioned settings document |
 
 New decisions get the next number. Format: Context, Decision, Consequences.
