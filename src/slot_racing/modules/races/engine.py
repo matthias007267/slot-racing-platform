@@ -9,8 +9,11 @@ Race rules implemented here:
   start/finish line after having passed all sector positions in order.
 * Sensor events that do not match the position a car is expected to pass next are ignored.
   The engine looks at the logical position of an event, never at the sensor or hardware.
-* A participant finishes after completing ``laps`` laps. The first one to finish is the winner.
-  The race finishes when all participants have finished or when it is stopped manually.
+* Lap races: a participant finishes after completing ``laps`` laps. The first one to finish is the
+  winner. The race finishes when all participants have finished or when it is stopped manually.
+* Time trials use :class:`~slot_racing.core.domain.scoring.TimeTrialScoring`: a completed lap is
+  a measured time and does not finish the participant. The session ends only when it is stopped,
+  and that stop is a normal finish. Standings follow the best time on that participant's lane.
 * Events arriving while the race is paused are ignored. An event whose timestamp falls inside a
   pause is ignored even when it is delivered after ``resume``. Paused time is excluded from
   race time.
@@ -39,9 +42,11 @@ from slot_racing.core.domain import (
     Participant,
     ParticipantResult,
     RaceId,
+    RaceMode,
     RaceStatus,
     TimingLayout,
 )
+from slot_racing.core.domain.scoring import RaceScoring, scoring_for
 from slot_racing.core.events import (
     EventDispatcher,
     LapCompleted,
@@ -77,9 +82,12 @@ class RaceConfig:
     laps: int
     participants: tuple[Participant, ...]
     layout: TimingLayout
+    mode: RaceMode = RaceMode.LAPS
 
     def __post_init__(self) -> None:
-        if self.laps < 1:
+        mode = RaceMode(self.mode)
+        object.__setattr__(self, "mode", mode)
+        if mode is RaceMode.LAPS and self.laps < 1:
             raise ValueError("a race needs at least one lap")
         if not self.participants:
             raise ValueError("a race needs at least one participant")
@@ -114,6 +122,7 @@ class RaceEngine:
         timing_sources: Sequence[TimingSource] = (),
     ) -> None:
         self._config = config
+        self._scoring: RaceScoring = scoring_for(config.mode)
         self._bus = bus
         self._clock = clock
         self._sources = tuple(timing_sources)
@@ -175,10 +184,10 @@ class RaceEngine:
         self._bus.publish(RaceResumed(timestamp_ns=now, race_id=self._config.race_id))
 
     def stop(self) -> None:
-        """End the race before everyone finished. Standings are ranked by laps, then time."""
+        """End the session. A lap race is aborted; a time trial stores the measured times."""
         if self._status not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
             raise RaceStateError(f"cannot stop a race that is {self._status}")
-        self._finish(self._clock.now_ns(), aborted=True)
+        self._finish(self._clock.now_ns(), aborted=self._scoring.stop_is_abort)
 
     def close(self) -> None:
         """Detach from the bus and stop timing sources without publishing anything."""
@@ -285,7 +294,7 @@ class RaceEngine:
                 race_time_ns=race_time,
             )
         )
-        if state.lap_number < self._config.laps:
+        if not self._scoring.participant_finished(state.lap_number, self._config.laps):
             state.lap_number += 1
             state.lap_start_ns = race_time
             self._publish_lap_started(state, timestamp_ns, race_time)
@@ -348,28 +357,34 @@ class RaceEngine:
         """See the module docstring for the five ranking rules."""
 
         def sort_key(state: _ParticipantState) -> tuple[int, int, int, int]:
-            if state.finish_order is not None:
-                return (0, state.finish_order, 0, 0)
-            return (
-                1,
-                -len(state.lap_times_ns),
-                state.last_lap_end_ns if state.last_lap_end_ns is not None else 2**63,
-                state.participant.lane,
+            best = min(state.lap_times_ns) if state.lap_times_ns else None
+            return self._scoring.rank_key(
+                finish_order=state.finish_order,
+                laps_completed=len(state.lap_times_ns),
+                last_lap_end_ns=state.last_lap_end_ns,
+                best_lap_ns=best,
+                lane=state.participant.lane,
             )
 
         ranked = sorted(self._states.values(), key=sort_key)
+        session_over = self._status is RaceStatus.FINISHED
         return tuple(
             ParticipantResult(
                 driver_id=DriverId(state.participant.driver_id),
                 lane=state.participant.lane,
                 position=position,
                 laps_completed=len(state.lap_times_ns),
-                finished=state.finished,
+                finished=self._result_finished(state, session_over=session_over),
                 total_time_ns=state.last_lap_end_ns,
                 best_lap_ns=min(state.lap_times_ns) if state.lap_times_ns else None,
             )
             for position, state in enumerate(ranked, start=1)
         )
+
+    def _result_finished(self, state: _ParticipantState, *, session_over: bool) -> bool:
+        if self._scoring.marks_result_when_session_ends:
+            return session_over and bool(state.lap_times_ns)
+        return state.finished
 
     def _start_sources(self) -> None:
         for source in self._sources:

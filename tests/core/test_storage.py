@@ -34,6 +34,7 @@ def test_migration_creates_all_domain_tables(db: Database) -> None:
         "race_participants",
         "laps",
         "sectors",
+        "time_measurements",
         "timing_configurations",
         "timing_sensors",
         "plugins",
@@ -176,6 +177,7 @@ def test_upgrade_preserves_existing_data() -> None:
         assert track is not None and track.is_active and track.lane_count == 2
         race = session.get(Race, 1)
         assert race is not None and race.status == "finished" and race.track_id == 1
+        assert race.mode == "laps"
         participant = session.get(RaceParticipant, 1)
         assert participant is not None and participant.final_position == 1
         assert participant.laps_completed == 0 and not participant.finished

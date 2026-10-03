@@ -25,7 +25,7 @@ from slot_racing.core.catalog import (
     VehicleCatalog,
 )
 from slot_racing.core.clock import format_duration
-from slot_racing.core.domain import RaceStatus
+from slot_racing.core.domain import RaceMode, RaceStatus
 from slot_racing.core.plugin import PluginState
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.uikit.cards import Card, MetricCard
@@ -176,9 +176,14 @@ class DashboardPage(QWidget):
             translate(f"race.status.{summary.status.value}"),
             _RACE_TONE.get(summary.status, "info"),
         )
+        meta_key = (
+            "dashboard.race.meta_time_trial"
+            if summary.mode is RaceMode.TIME_TRIAL
+            else "dashboard.race.meta"
+        )
         meta = QLabel(
             self._runtime.translator.format(
-                "dashboard.race.meta",
+                meta_key,
                 track=summary.track_name or "-",
                 laps=summary.laps,
                 provider=provider_label(self._runtime.translator, summary.timing_provider),

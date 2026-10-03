@@ -30,6 +30,7 @@ SHELL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "dashboard.race.latest": "Zuletzt angelegt",
         "dashboard.race.none": "Kein Rennen",
         "dashboard.race.meta": "{track} · {laps} Runden · {provider}",
+        "dashboard.race.meta_time_trial": "{track} · Zeitrennen · {provider}",
         "dashboard.result.title": "LETZTES ERGEBNIS",
         "dashboard.result.empty": "Keine Platzierung gespeichert",
         "dashboard.result.position": "Platz",

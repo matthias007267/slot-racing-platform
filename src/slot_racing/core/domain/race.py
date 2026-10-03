@@ -8,6 +8,18 @@ from enum import StrEnum
 from slot_racing.core.domain.ids import DriverId, VehicleId
 
 
+class RaceMode(StrEnum):
+    """How a race is scored.
+
+    ``LAPS`` finishes each participant after a fixed number of laps. ``TIME_TRIAL`` keeps every
+    measured lap as its own result and never ends because a lap target was reached. Further modes
+    can be added here together with their own scoring; this enum is the only list of modes.
+    """
+
+    LAPS = "laps"
+    TIME_TRIAL = "time_trial"
+
+
 class RaceStatus(StrEnum):
     """Lifecycle of a race. The engine uses CREATED, RUNNING, PAUSED and FINISHED; READY (fully
     configured) and ABORTED (stopped early) are set by race management when persisting."""

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -12,15 +13,25 @@ from slot_racing.core.domain import (
     DriverId,
     ParticipantResult,
     RaceId,
+    RaceMode,
     RaceStatus,
     TrackId,
     VehicleId,
 )
+from slot_racing.core.domain.scoring import scoring_for, time_trial_stored_key
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database, utc_now
 from slot_racing.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProviderRegistry
-from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector
-from slot_racing.modules.races.types import LapRecord, ParticipantInfo, RaceInfo, ResultRow
+from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector, TimeMeasurement
+from slot_racing.modules.races.types import (
+    LaneRanking,
+    LapRecord,
+    ParticipantInfo,
+    RaceInfo,
+    ResultRow,
+    TimeBest,
+    TimeMeasurementInfo,
+)
 
 MAX_LAPS = 999
 MAX_PROVIDER_ID_LENGTH = 64
@@ -28,6 +39,30 @@ MAX_PROVIDER_ID_LENGTH = 64
 _EDITABLE = (RaceStatus.CREATED, RaceStatus.READY)
 _LIVE = (RaceStatus.RUNNING, RaceStatus.PAUSED)
 _MISSING_LAP_TIME = 2**62
+
+
+def _measurement_order(row: TimeMeasurement) -> tuple[int, datetime, int]:
+    """Faster times win. An equal time keeps the earlier measurement."""
+    return (row.time_ns, row.recorded_at, row.id)
+
+
+def _best_row(rows: Sequence[TimeMeasurement]) -> TimeMeasurement | None:
+    if not rows:
+        return None
+    return min(rows, key=_measurement_order)
+
+
+def _best_by(
+    rows: Sequence[TimeMeasurement],
+    key: Callable[[TimeMeasurement], tuple[object, ...]],
+) -> list[TimeMeasurement]:
+    chosen: dict[tuple[object, ...], TimeMeasurement] = {}
+    for row in rows:
+        group = key(row)
+        current = chosen.get(group)
+        if current is None or _measurement_order(row) < _measurement_order(current):
+            chosen[group] = row
+    return list(chosen.values())
 
 
 def _stored_standing_key(
@@ -88,6 +123,27 @@ class RaceService:
                 name=clean_name,
                 track_id=track_id,
                 target_laps=laps,
+                mode=RaceMode.LAPS.value,
+                timing_provider=provider,
+                status=RaceStatus.CREATED.value,
+            )
+            session.add(race)
+            session.flush()
+            return self._race_info(session, race)
+
+    def create_time_trial(
+        self, name: str, track_id: TrackId, timing_provider: str | None = None
+    ) -> RaceInfo:
+        """A time trial has no lap target. Each measured lap is stored as its own result."""
+        clean_name = self._validate_name(name)
+        provider = self._validate_provider(timing_provider or self.default_provider_id())
+        self._require_active_track(track_id)
+        with self._database.session() as session:
+            race = Race(
+                name=clean_name,
+                track_id=track_id,
+                target_laps=0,
+                mode=RaceMode.TIME_TRIAL.value,
                 timing_provider=provider,
                 status=RaceStatus.CREATED.value,
             )
@@ -102,13 +158,23 @@ class RaceService:
         track_id: TrackId,
         laps: int,
         timing_provider: str | None = None,
+        mode: RaceMode | None = None,
     ) -> RaceInfo:
-        """Change the configuration. ``timing_provider=None`` keeps the stored provider."""
+        """Change the configuration. ``timing_provider=None`` keeps the stored provider.
+
+        ``mode=None`` keeps the stored mode. A time trial does not store a lap target.
+        """
         clean_name = self._validate_name(name)
-        self._validate_laps(laps)
         provider = None if timing_provider is None else self._validate_provider(timing_provider)
+        chosen = None if mode is None else self._validate_mode(mode)
+        if chosen is RaceMode.LAPS:
+            self._validate_laps(laps)
         with self._database.session() as session:
             race = self._load_editable(session, race_id)
+            if chosen is None:
+                chosen = self._validate_mode(RaceMode(race.mode))
+            if chosen is RaceMode.LAPS:
+                self._validate_laps(laps)
             if track_id != race.track_id:
                 track = self._require_active_track(track_id)
                 lanes = self._participant_lanes(session, race.id)
@@ -116,7 +182,8 @@ class RaceService:
                     raise ValidationError("error.race.track_too_small", lanes=track.lane_count)
                 race.track_id = track_id
             race.name = clean_name
-            race.target_laps = laps
+            race.mode = chosen.value
+            race.target_laps = laps if chosen is RaceMode.LAPS else 0
             if provider is not None:
                 race.timing_provider = provider
             session.flush()
@@ -337,6 +404,88 @@ class RaceService:
                 )
             return records
 
+    def list_time_measurements(
+        self, *, race_id: RaceId | None = None, track_id: TrackId | None = None
+    ) -> list[TimeMeasurementInfo]:
+        """Every stored measurement, oldest first. History is not replaced by a later best time."""
+        with self._database.session() as session:
+            rows = self._measurement_rows(session, race_id=race_id, track_id=track_id)
+            return [self._measurement_info(row) for row in rows]
+
+    def personal_best(
+        self,
+        driver_id: DriverId,
+        vehicle_id: VehicleId | None,
+        lane: int,
+        *,
+        track_id: TrackId | None = None,
+    ) -> TimeBest | None:
+        """Best time of one driver with one vehicle on one lane. Other lanes stay untouched."""
+        with self._database.session() as session:
+            rows = [
+                row
+                for row in self._measurement_rows(session, track_id=track_id)
+                if row.driver_id == driver_id
+                and row.vehicle_id == vehicle_id
+                and row.lane == lane
+                and (track_id is None or row.track_id == track_id)
+            ]
+            best = _best_row(rows)
+            return None if best is None else self._time_best(best)
+
+    def driver_bests_on_lane(self, lane: int, *, track_id: TrackId | None = None) -> list[TimeBest]:
+        """Fastest driver on this lane first. Each driver keeps only that lane's best time."""
+        with self._database.session() as session:
+            rows = [
+                row
+                for row in self._measurement_rows(session, track_id=track_id)
+                if row.lane == lane
+            ]
+            grouped = _best_by(rows, lambda row: (row.track_id, row.driver_id, row.lane))
+            return [self._time_best(row) for row in sorted(grouped, key=_measurement_order)]
+
+    def vehicle_bests_on_lane(
+        self, vehicle_id: VehicleId, lane: int, *, track_id: TrackId | None = None
+    ) -> list[TimeBest]:
+        """How fast this vehicle was driven on this lane, one row per driver, fastest first."""
+        with self._database.session() as session:
+            rows = [
+                row
+                for row in self._measurement_rows(session, track_id=track_id)
+                if row.vehicle_id == vehicle_id and row.lane == lane
+            ]
+            grouped = _best_by(
+                rows,
+                lambda row: (row.track_id, row.driver_id, row.vehicle_id, row.lane),
+            )
+            return [self._time_best(row) for row in sorted(grouped, key=_measurement_order)]
+
+    def overall_bests(self, *, track_id: TrackId | None = None) -> list[TimeBest]:
+        """Personal bests of driver + vehicle + lane, fastest first. Every row names its lane."""
+        with self._database.session() as session:
+            rows = self._measurement_rows(session, track_id=track_id)
+            grouped = _best_by(
+                rows, lambda row: (row.track_id, row.driver_id, row.vehicle_id, row.lane)
+            )
+            return [self._time_best(row) for row in sorted(grouped, key=_measurement_order)]
+
+    def lane_rankings(self, *, track_id: TrackId | None = None) -> list[LaneRanking]:
+        """One ranking per lane that has a measurement. Lanes are never combined into one list."""
+        with self._database.session() as session:
+            rows = self._measurement_rows(session, track_id=track_id)
+            lanes = sorted({row.lane for row in rows})
+            rankings: list[LaneRanking] = []
+            for lane in lanes:
+                grouped = _best_by(
+                    [row for row in rows if row.lane == lane],
+                    lambda row: (row.track_id, row.driver_id, row.lane),
+                )
+                places = tuple(
+                    self._time_best(row) for row in sorted(grouped, key=_measurement_order)
+                )
+                rankings.append(LaneRanking(lane=lane, places=places))
+            return rankings
+
     # --- persistence of the race lifecycle (driven by events through the recorder) -------------
 
     def record_started(self, race_id: RaceId) -> None:
@@ -381,6 +530,19 @@ class RaceService:
             participant.laps_completed = lap_number
             if participant.best_lap_ns is None or lap_time_ns < participant.best_lap_ns:
                 participant.best_lap_ns = lap_time_ns
+            race = self._load(session, race_id)
+            if race.mode == RaceMode.TIME_TRIAL.value:
+                session.add(
+                    TimeMeasurement(
+                        race_id=race.id,
+                        track_id=race.track_id,
+                        driver_id=participant.driver_id,
+                        vehicle_id=participant.vehicle_id,
+                        lane=participant.lane,
+                        time_ns=lap_time_ns,
+                        recorded_at=utc_now(),
+                    )
+                )
 
     def record_finished(
         self, race_id: RaceId, results: Sequence[ParticipantResult], *, aborted: bool
@@ -450,18 +612,36 @@ class RaceService:
             )
             for participant in participants
         ]
-        ranked = sorted(
-            stored,
-            key=lambda item: _stored_standing_key(item[0], item[1], race.target_laps),
-        )
+        mode = RaceMode(race.mode)
+        if mode is RaceMode.TIME_TRIAL:
+            ranked = sorted(
+                stored,
+                key=lambda item: time_trial_stored_key(
+                    min((lap.lap_time_ns for lap in item[1]), default=None),
+                    item[0].lane,
+                ),
+            )
+        else:
+            ranked = sorted(
+                stored,
+                key=lambda item: _stored_standing_key(item[0], item[1], race.target_laps),
+            )
+        scoring = scoring_for(mode)
         for position, (participant, laps) in enumerate(ranked, start=1):
             participant.laps_completed = len(laps)
             participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
             participant.total_time_ns = laps[-1].race_time_ns if laps else None
-            participant.finished = len(laps) >= race.target_laps
+            participant.finished = scoring.participant_finished(len(laps), race.target_laps)
             participant.final_position = position
 
     # --- helpers -------------------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_mode(mode: RaceMode) -> RaceMode:
+        chosen = RaceMode(mode)
+        if chosen not in (RaceMode.LAPS, RaceMode.TIME_TRIAL):
+            raise ValidationError("error.race.mode_unknown")
+        return chosen
 
     @staticmethod
     def _validate_provider(provider_id: str) -> str:
@@ -529,6 +709,61 @@ class RaceService:
             if started:
                 race.started_at = utc_now()
 
+    def _measurement_rows(
+        self,
+        session: Session,
+        *,
+        race_id: RaceId | None = None,
+        track_id: TrackId | None = None,
+    ) -> list[TimeMeasurement]:
+        query = select(TimeMeasurement).order_by(TimeMeasurement.recorded_at, TimeMeasurement.id)
+        if race_id is not None:
+            query = query.where(TimeMeasurement.race_id == race_id)
+        if track_id is not None:
+            query = query.where(TimeMeasurement.track_id == track_id)
+        return list(session.scalars(query))
+
+    def _measurement_info(self, row: TimeMeasurement) -> TimeMeasurementInfo:
+        driver_label, vehicle_label, vehicle_id = self._entry_labels(row.driver_id, row.vehicle_id)
+        return TimeMeasurementInfo(
+            id=row.id,
+            race_id=RaceId(row.race_id),
+            track_id=None if row.track_id is None else TrackId(row.track_id),
+            driver_id=DriverId(row.driver_id),
+            driver_label=driver_label,
+            vehicle_id=vehicle_id,
+            vehicle_label=vehicle_label,
+            lane=row.lane,
+            time_ns=row.time_ns,
+            recorded_at=row.recorded_at,
+        )
+
+    def _time_best(self, row: TimeMeasurement) -> TimeBest:
+        info = self._measurement_info(row)
+        return TimeBest(
+            measurement_id=info.id,
+            driver_id=info.driver_id,
+            driver_label=info.driver_label,
+            vehicle_id=info.vehicle_id,
+            vehicle_label=info.vehicle_label,
+            lane=info.lane,
+            track_id=info.track_id,
+            time_ns=info.time_ns,
+            recorded_at=info.recorded_at,
+        )
+
+    def _entry_labels(
+        self, driver_id: int, vehicle_id: int | None
+    ) -> tuple[str, str, VehicleId | None]:
+        driver = self._drivers.get_driver(DriverId(driver_id))
+        typed_vehicle = None if vehicle_id is None else VehicleId(vehicle_id)
+        vehicle = None if typed_vehicle is None else self._vehicles.get_vehicle(typed_vehicle)
+        return (
+            driver.label if driver else f"#{driver_id}",
+            vehicle.label if vehicle else ("-" if vehicle_id is None else f"#{vehicle_id}"),
+            typed_vehicle,
+        )
+
     def _participant_info(self, participant: RaceParticipant) -> ParticipantInfo:
         driver = self._drivers.get_driver(DriverId(participant.driver_id))
         vehicle_id = None if participant.vehicle_id is None else VehicleId(participant.vehicle_id)
@@ -563,6 +798,7 @@ class RaceService:
             track_name=track.name if track else "-",
             lane_count=track.lane_count if track else 0,
             status=RaceStatus(race.status),
+            mode=RaceMode(race.mode),
             laps=race.target_laps,
             timing_provider=race.timing_provider,
             participants=tuple(self._participant_info(p) for p in participants),

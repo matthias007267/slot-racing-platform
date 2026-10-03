@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
-from slot_racing.core.domain import RaceId
+from slot_racing.core.domain import RaceId, RaceMode
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
@@ -212,7 +212,11 @@ class RacesPage(QWidget):
                     race.name,
                     race.track_name,
                     tr(f"race.status.{race.status.value}"),
-                    str(race.laps),
+                    (
+                        tr("race.wizard.mode.time_trial")
+                        if race.mode is RaceMode.TIME_TRIAL
+                        else str(race.laps)
+                    ),
                     str(len(race.participants)),
                     format_datetime(race.created_at),
                 )

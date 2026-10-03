@@ -9,7 +9,7 @@ from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
 
 from slot_racing.core.clock import format_duration
-from slot_racing.core.domain import RaceId, RaceStatus
+from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.events import (
     Event,
     LapCompleted,
@@ -33,6 +33,7 @@ from slot_racing.modules.races.runner import LiveRow, RaceController, RaceRunner
 from slot_racing.modules.races.ui.formatting import (
     EMPTY_DISPLAY,
     format_lap_progress,
+    format_progress_cell,
     participant_status_key,
     start_number_text,
 )
@@ -226,7 +227,12 @@ class LiveRaceView(QWidget):
         runner = self._runner
         if runner is None or not runner.is_active:
             return
-        if self.confirm(self.translator.translate("race.live.confirm_stop")):
+        confirm_key = (
+            "race.live.confirm_stop_time_trial"
+            if runner.race.mode is RaceMode.TIME_TRIAL
+            else "race.live.confirm_stop"
+        )
+        if self.confirm(self.translator.translate(confirm_key)):
             self._guard(runner.stop)
             self.refresh()
 
@@ -385,11 +391,11 @@ class LiveRaceView(QWidget):
             start_number_text(row.start_number),
             str(row.lane),
             str(row.laps_completed),
-            f"{row.current_lap}/{snapshot.laps}",
+            format_progress_cell(row.current_lap, snapshot.laps),
             format_duration(row.last_lap_ns),
             format_duration(row.best_lap_ns),
             format_duration(row.total_time_ns),
-            f"{row.laps_completed}/{snapshot.laps}",
+            format_progress_cell(row.laps_completed, snapshot.laps),
             tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),
         )
 
@@ -430,7 +436,8 @@ class LiveRaceView(QWidget):
                     f"{tr('race.column.start_number')}: {start_number_text(row.start_number)}",
                     f"{tr('race.column.position')}: {row.position}",
                     f"{tr('race.column.lane')}: {row.lane}",
-                    f"{tr('race.column.current_lap')}: {row.current_lap}/{snapshot.laps}",
+                    f"{tr('race.column.current_lap')}: "
+                    f"{format_progress_cell(row.current_lap, snapshot.laps)}",
                     f"{tr('race.column.laps_done')}: {row.laps_completed}",
                     f"{tr('race.column.last_lap')}: {format_duration(row.last_lap_ns)}",
                     f"{tr('race.column.best_lap')}: {format_duration(row.best_lap_ns)}",

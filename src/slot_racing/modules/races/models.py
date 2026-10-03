@@ -28,6 +28,8 @@ class Race(Base):
         ForeignKey("track_layouts.id", ondelete="SET NULL")
     )
     status: Mapped[str] = mapped_column(String(16), default="created")
+    mode: Mapped[str] = mapped_column(String(32), default="laps", server_default="laps")
+    """``laps`` or ``time_trial``. Existing races stay lap races."""
     target_laps: Mapped[int] = mapped_column(default=10)
     timing_provider: Mapped[str] = mapped_column(
         String(64), default=DEFAULT_TIMING_PROVIDER, server_default=DEFAULT_TIMING_PROVIDER
@@ -69,6 +71,25 @@ class Lap(Base):
     lap_number: Mapped[int]
     lap_time_ns: Mapped[int] = mapped_column(BigInteger)
     race_time_ns: Mapped[int] = mapped_column(BigInteger)
+
+
+class TimeMeasurement(Base):
+    """One measured time. Driver, vehicle and lane are copied onto the row.
+
+    The lane of the participant can describe who is on the track right now. This row keeps the
+    lane the time was actually driven on, so later statistics cannot mix different lanes.
+    """
+
+    __tablename__ = "time_measurements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
+    track_id: Mapped[int | None] = mapped_column(ForeignKey("tracks.id", ondelete="RESTRICT"))
+    driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="RESTRICT"))
+    vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="RESTRICT"))
+    lane: Mapped[int]
+    time_ns: Mapped[int] = mapped_column(BigInteger)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 class Sector(Base):
