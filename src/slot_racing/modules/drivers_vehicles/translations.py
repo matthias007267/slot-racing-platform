@@ -40,6 +40,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "vehicle.field.notes": "Notizen",
         "vehicle.field.start_number": "Startnummer",
         "vehicle.field.driver": "Fahrer",
+        "vehicle.field.favorite": "Favorit",
         "vehicle.unassign": "Fahrer entfernen",
         "error.vehicle.name.required": "Bitte geben Sie einen Namen für das Fahrzeug ein.",
         "error.vehicle.name.too_long": "Der Name darf höchstens {limit} Zeichen lang sein.",

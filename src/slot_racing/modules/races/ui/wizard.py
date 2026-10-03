@@ -310,22 +310,23 @@ class RaceWizard(QWidget):
             self.lane_combo.addItem(str(lane), lane)
 
     def _reload_vehicles(self) -> None:
-        """Offer the selected driver's vehicles and vehicles that have no owner."""
-        driver_id = self.driver_combo.currentData()
+        """Offer every active vehicle. Assignment only chooses the suggested default."""
         self.vehicle_combo.clear()
         for vehicle in self._vehicles.list_vehicles(active_only=True):
-            if vehicle.driver_id is None or vehicle.driver_id == driver_id:
-                self.vehicle_combo.addItem(vehicle.label, vehicle.id)
+            self.vehicle_combo.addItem(vehicle.label, vehicle.id)
         self._preselect_vehicle()
 
     def _preselect_vehicle(self) -> None:
-        """Offer the driver's own vehicle first when the driver owns one."""
+        """Suggest the driver's favorite, otherwise the first vehicle assigned to them."""
         driver_id = self.driver_combo.currentData()
         if driver_id is None:
             return
         owned = self._vehicles.list_vehicles(active_only=True, driver_id=DriverId(driver_id))
-        if owned:
-            self.vehicle_combo.setCurrentIndex(max(0, self.vehicle_combo.findData(owned[0].id)))
+        if not owned:
+            return
+        favorite = next((vehicle for vehicle in owned if vehicle.is_favorite), None)
+        chosen = owned[0] if favorite is None else favorite
+        self.vehicle_combo.setCurrentIndex(max(0, self.vehicle_combo.findData(chosen.id)))
 
     def _show_step(self, step: int) -> None:
         tr = self.translator.translate

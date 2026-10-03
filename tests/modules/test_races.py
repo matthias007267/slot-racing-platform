@@ -124,7 +124,7 @@ def test_unknown_driver_and_vehicle_are_rejected(env: Env) -> None:
     assert key_of(caught) == "error.race.vehicle_unknown"
 
 
-def test_a_vehicle_must_belong_to_the_driver_or_to_nobody(env: Env) -> None:
+def test_any_driver_may_use_a_vehicle_owned_by_someone_else(env: Env) -> None:
     race = env.races.create_race("R", env.track_id(lanes=4), 3)
     owner = env.driver("Anna")
     other = env.driver("Ben")
@@ -138,10 +138,14 @@ def test_a_vehicle_must_belong_to_the_driver_or_to_nobody(env: Env) -> None:
     assert added_free.vehicle_id == free_car.id
 
     third = env.driver("Chris")
-    with pytest.raises(ValidationError) as caught:
-        env.races.add_participant(race.id, third.id, foreign_car.id, 3)
-    assert key_of(caught) == "error.race.vehicle_wrong_driver"
-    assert len(env.races.require_race(race.id).participants) == 2
+    shared = env.races.add_participant(race.id, third.id, foreign_car.id, 3)
+    assert shared.vehicle_id == foreign_car.id
+    second_foreign = env.vehicle("Lambo", driver_id=other.id)
+    updated = env.races.update_participant(race.id, added.id, owner.id, second_foreign.id, 1)
+    assert updated.id == added.id
+    assert updated.vehicle_id == second_foreign.id
+    assert len(env.vehicles.list_vehicles()) == 4
+    assert len(env.races.require_race(race.id).participants) == 3
 
 
 def test_participants_must_be_unique(env: Env) -> None:

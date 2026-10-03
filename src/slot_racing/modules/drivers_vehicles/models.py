@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func, true
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, false, func, true
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -65,7 +65,9 @@ class Vehicle(Base):
     start_number: Mapped[int | str | None] = mapped_column(StartNumberColumn)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     driver_id: Mapped[int | None] = mapped_column(ForeignKey("drivers.id", ondelete="SET NULL"))
-    """Owner. Many vehicles may belong to one driver."""
+    """Owner. Many vehicles may belong to one driver. Any driver may still race the vehicle."""
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    """The vehicle suggested for its owner when a race is created. At most one per driver."""
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

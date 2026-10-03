@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QPlainTextEdit, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QWidget,
+)
 
 from slot_racing.core.catalog import VehicleInfo
 from slot_racing.core.domain import DriverId, VehicleId
@@ -54,6 +62,12 @@ class VehicleDialog(FormDialog):
             if driver.is_active or driver.id == current:
                 self.driver_combo.addItem(driver.label, driver.id)
         self.driver_combo.setCurrentIndex(max(0, self.driver_combo.findData(current)))
+        self.favorite_check = QCheckBox(tr("vehicle.field.favorite"))
+        self.favorite_check.setObjectName("vehicle-favorite")
+        self.driver_combo.currentIndexChanged.connect(lambda _: self._sync_favorite())
+        self._sync_favorite()
+        if vehicle is not None and vehicle.is_favorite and vehicle.driver_id is not None:
+            self.favorite_check.setChecked(True)
         self.form.addRow(tr("vehicle.field.name"), self.name_edit)
         self.form.addRow(tr("vehicle.field.model"), self.model_edit)
         self.form.addRow(tr("vehicle.field.manufacturer"), self.manufacturer_edit)
@@ -61,6 +75,14 @@ class VehicleDialog(FormDialog):
         self.form.addRow(tr("vehicle.field.notes"), self.notes_edit)
         self.form.addRow(tr("vehicle.field.start_number"), self.start_number_edit)
         self.form.addRow(tr("vehicle.field.driver"), self.driver_combo)
+        self.form.addRow(tr("vehicle.field.favorite"), self.favorite_check)
+
+    def _sync_favorite(self) -> None:
+        """A favorite belongs to a driver, so the box stays off while none is selected."""
+        has_driver = self.driver_combo.currentData() is not None
+        self.favorite_check.setEnabled(has_driver)
+        if not has_driver:
+            self.favorite_check.setChecked(False)
 
     def submit(self) -> None:
         driver_id = self.driver_combo.currentData()
@@ -72,6 +94,7 @@ class VehicleDialog(FormDialog):
             notes=self.notes_edit.toPlainText(),
             start_number=self.start_number_edit.value(),
             driver_id=None if driver_id is None else DriverId(driver_id),
+            is_favorite=self.favorite_check.isChecked(),
         )
         if self._vehicle is None:
             self._vehicles.create_vehicle(data)
@@ -92,6 +115,7 @@ class VehiclesPage(EntityPage):
                 "vehicle.field.manufacturer",
                 "vehicle.field.start_number",
                 "vehicle.field.driver",
+                "vehicle.field.favorite",
                 "common.active",
             ],
             name="vehicles",
@@ -126,6 +150,7 @@ class VehiclesPage(EntityPage):
                     vehicle.manufacturer or "",
                     "" if vehicle.start_number is None else str(vehicle.start_number),
                     "" if vehicle.driver_id is None else drivers.get(vehicle.driver_id, ""),
+                    tr("common.yes" if vehicle.is_favorite else "common.no"),
                     tr("common.yes" if vehicle.is_active else "common.no"),
                 ),
                 active=vehicle.is_active,
