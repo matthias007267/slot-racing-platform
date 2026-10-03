@@ -21,6 +21,7 @@ from slot_racing.core.domain import (
     TimingSetup,
 )
 from slot_racing.core.errors import ProviderConfigurationError
+from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
 from slot_racing.core.events import Event, EventBus, LapCompleted, SensorTriggered
 from slot_racing.core.i18n import Translator
 from slot_racing.core.plugin import (
@@ -118,6 +119,8 @@ def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry, Database]:
     database.migrate()
     services = ServiceRegistry()
     services.register(Database, database, owner="core")
+def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry]:
+    services = ServiceRegistry()
     manager = PluginManager(
         bus=EventBus(),
         services=services,
@@ -132,6 +135,7 @@ def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry, Database]:
         return services.find_all(TimingSourceFactory)
 
     return manager, TimingProviderRegistry(factories), database
+    return manager, TimingProviderRegistry(factories)
 
 
 def test_factory_identity_and_capabilities() -> None:
@@ -141,11 +145,14 @@ def test_factory_identity_and_capabilities() -> None:
     assert factory.capabilities == ProviderCapabilities(
         supports_multiple_lanes=True, supports_test_mode=False
     )
+    assert not factory.availability().available
+    assert factory.availability().reason_key == "error.timing_provider.camera_not_connected"
 
 
 def test_factory_creates_a_source_without_a_camera() -> None:
     session = spec_for(("start_finish",), {"start_finish": "sensor-sf"})
     source = CameraTimingFactory(ManualFrameSource()).create_source(session)
+    source = CameraTimingFactory().create_source(session)
     assert isinstance(source, TimingSource)
     assert not isinstance(source, ManuallyTriggerable)
     assert source.source_id == "camera"
@@ -190,6 +197,23 @@ def test_plugin_registers_the_camera_provider_once_and_opens_no_device() -> None
     created = factory.create_source(session)
     assert isinstance(created, TimingSource)
     assert not created.is_running
+    assert "cv2" not in sys.modules
+    manager, registry = plugin_registry()
+    manager.enable("timing_camera")
+    assert "cv2" not in sys.modules
+    assert registry.provider_ids() == ["camera"]
+    info = registry.info("camera")
+    assert info.capabilities.supports_multiple_lanes
+    assert not info.capabilities.supports_test_mode
+    assert not info.available
+    assert info.availability.reason_key == "error.timing_provider.camera_not_connected"
+
+    session = spec_for(("start_finish",), {"start_finish": "sensor-sf"})
+    with pytest.raises(ProviderUnavailable) as caught:
+        registry.create_source("camera", session)
+    assert caught.value.key == "error.timing_provider.camera_not_connected"
+    created = registry.factory("camera").create_source(session)
+    assert isinstance(created, TimingSource)
 
     manager.disable("timing_camera")
     assert registry.provider_ids() == []

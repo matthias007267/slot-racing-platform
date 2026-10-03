@@ -54,6 +54,10 @@ class FrameSource(ABC):
 
     def check(self) -> None:  # noqa: B027
         """Raise when capture has failed since ``start``."""
+        """Hold new frames back while a race is paused."""
+
+    def resume(self) -> None:  # noqa: B027
+        """Accept frames again after a pause."""
 
     @abstractmethod
     def poll_frame(self) -> TimedFrame | None:
@@ -90,6 +94,9 @@ class ManualFrameSource(FrameSource):
         if self._running:
             self._paused = False
         return False
+    def resume(self) -> None:
+        if self._running:
+            self._paused = False
 
     def submit(self, frame: GrayFrame, timestamp_ns: int) -> None:
         """Queue one frame. Ignored while this source is stopped or paused."""
