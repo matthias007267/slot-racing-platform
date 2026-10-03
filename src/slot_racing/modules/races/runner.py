@@ -15,6 +15,7 @@ from slot_racing.core.domain import (
     Participant,
     ParticipantResult,
     RaceId,
+    RaceMode,
     RaceStatus,
     TimingSetup,
     TrackId,
@@ -29,6 +30,10 @@ from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.types import ParticipantInfo, RaceInfo
 
 logger = logging.getLogger(__name__)
+
+# The timing source of a time trial still needs a positive lap count so a simulation can keep
+# producing laps. The race engine ignores that number and ends the session only when it is stopped.
+TIME_TRIAL_TIMING_LAPS = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,13 +145,19 @@ class RaceRunner:
     def _row(self, result: ParticipantResult) -> LiveRow:
         info: ParticipantInfo = self._participants[result.lane]
         lap_times = tuple(self._lap_times_ns.get(result.lane, ()))
+        if self.race.mode is RaceMode.LAPS:
+            current_lap = min(result.laps_completed + 1, self.race.laps)
+        elif self.is_active or result.laps_completed == 0:
+            current_lap = result.laps_completed + 1
+        else:
+            current_lap = result.laps_completed
         return LiveRow(
             position=result.position,
             lane=result.lane,
             driver_label=info.driver_label,
             vehicle_label=info.vehicle_label,
             start_number=info.start_number,
-            current_lap=min(result.laps_completed + 1, self.race.laps),
+            current_lap=current_lap,
             laps_completed=result.laps_completed,
             last_lap_ns=lap_times[-1] if lap_times else None,
             total_time_ns=result.total_time_ns,
@@ -197,10 +208,11 @@ class RaceController:
             raise ValidationError("error.race.already_running")
         race = self._service.validate_startable(race_id)
         setup = self._timing_setup(race.track_id)
+        source_laps = race.laps if race.mode is RaceMode.LAPS else TIME_TRIAL_TIMING_LAPS
         spec = TimingSessionSpec(
             setup=setup,
             lanes=tuple(p.lane for p in race.participants),
-            laps=race.laps,
+            laps=source_laps,
             race_id=race.id,
             track_id=race.track_id,
         )
@@ -213,6 +225,7 @@ class RaceController:
                 for p in race.participants
             ),
             layout=setup.layout,
+            mode=race.mode,
         )
         engine = RaceEngine(config, self._bus, self._clock, [source])
         runner = RaceRunner(race, engine, self._bus, self._storage_errors)

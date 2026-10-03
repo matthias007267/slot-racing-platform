@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from slot_racing.core.domain import DriverId, RaceId, RaceStatus, TrackId, VehicleId
+from slot_racing.core.domain import DriverId, RaceId, RaceMode, RaceStatus, TrackId, VehicleId
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,7 @@ class RaceInfo:
     track_name: str
     lane_count: int
     status: RaceStatus
+    mode: RaceMode
     laps: int
     timing_provider: str
     participants: tuple[ParticipantInfo, ...]
@@ -59,6 +60,45 @@ class ResultRow:
     best_lap_ns: int | None
     last_lap_ns: int | None
     average_lap_ns: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TimeMeasurementInfo:
+    """One stored time-trial measurement. ``lane`` belongs to that run."""
+
+    id: int
+    race_id: RaceId
+    track_id: TrackId | None
+    driver_id: DriverId
+    driver_label: str
+    vehicle_id: VehicleId | None
+    vehicle_label: str
+    lane: int
+    time_ns: int
+    recorded_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class TimeBest:
+    """Fastest stored measurement for one combination. The lane is always part of the result."""
+
+    measurement_id: int
+    driver_id: DriverId
+    driver_label: str
+    vehicle_id: VehicleId | None
+    vehicle_label: str
+    lane: int
+    track_id: TrackId | None
+    time_ns: int
+    recorded_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LaneRanking:
+    """Drivers on one lane, fastest personal time on that lane first."""
+
+    lane: int
+    places: tuple[TimeBest, ...]
 
 
 @dataclass(frozen=True, slots=True)

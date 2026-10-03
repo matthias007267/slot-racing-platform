@@ -1,7 +1,7 @@
 """Plain domain types shared between modules. No persistence, no UI."""
 
 from slot_racing.core.domain.ids import DriverId, RaceId, TrackId, VehicleId
-from slot_racing.core.domain.race import Participant, ParticipantResult, RaceStatus
+from slot_racing.core.domain.race import Participant, ParticipantResult, RaceMode, RaceStatus
 from slot_racing.core.domain.timing import (
     TimingLayout,
     TimingPosition,
@@ -16,6 +16,7 @@ __all__ = [
     "Participant",
     "ParticipantResult",
     "RaceId",
+    "RaceMode",
     "RaceStatus",
     "TimingLayout",
     "TimingPosition",

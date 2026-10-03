@@ -9,7 +9,6 @@ from typing import cast
 import pytest
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QLineEdit,
     QPushButton,
@@ -594,7 +593,7 @@ def test_wizard_reports_rule_violations_and_keeps_going(qtbot: QtBot, env: Env) 
     assert "Spur 2 ist bereits vergeben" in wizard.status.text()
 
 
-def test_wizard_shows_lap_racing_as_the_only_mode(qtbot: QtBot, env: Env) -> None:
+def test_wizard_offers_lap_racing_and_a_time_trial(qtbot: QtBot, env: Env) -> None:
     env.track("Heimbahn", lanes=2)
     _, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)
@@ -605,8 +604,14 @@ def test_wizard_shows_lap_racing_as_the_only_mode(qtbot: QtBot, env: Env) -> Non
     wizard.track_combo.setCurrentIndex(0)
     assert wizard.go_next()
     assert wizard.step == MODE
-    assert wizard.mode_value.text() == "Rundenrennen"
-    assert wizard.findChild(QComboBox, "race-mode") is None
+    assert wizard.mode_combo.currentText() == "Rundenrennen"
+    assert not wizard.laps_spin.isHidden()
+    labels = [wizard.mode_combo.itemText(index) for index in range(wizard.mode_combo.count())]
+    assert labels == ["Rundenrennen", "Zeitrennen"]
+    wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("time_trial"))
+    assert wizard.laps_spin.isHidden()
+    wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("laps"))
+    assert not wizard.laps_spin.isHidden()
 
 
 def test_wizard_blocks_empty_steps(qtbot: QtBot, env: Env) -> None:

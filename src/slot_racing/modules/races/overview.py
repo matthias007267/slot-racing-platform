@@ -46,6 +46,7 @@ class RaceOverview(RaceCatalog):
             track_name=snapshot.track_name,
             timing_provider=snapshot.timing_provider,
             laps=snapshot.laps,
+            mode=runner.race.mode,
             standings=standings,
         )
 
@@ -60,6 +61,7 @@ class RaceOverview(RaceCatalog):
             track_name=race.track_name,
             timing_provider=race.timing_provider,
             laps=race.laps,
+            mode=race.mode,
         )
 
     def latest_result(self) -> RaceSummary | None:
@@ -73,6 +75,7 @@ class RaceOverview(RaceCatalog):
                 track_name=race.track_name,
                 timing_provider=race.timing_provider,
                 laps=race.laps,
+                mode=race.mode,
                 standings=_standings(rows),
             )
         return None

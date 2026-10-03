@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 
-from slot_racing.core.domain import DriverId, RaceStatus, TrackId, VehicleId
+from slot_racing.core.domain import DriverId, RaceMode, RaceStatus, TrackId, VehicleId
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +121,7 @@ class RaceSummary:
     track_name: str
     timing_provider: str
     laps: int
+    mode: RaceMode = RaceMode.LAPS
     standings: tuple[StandingLine, ...] = ()
 
 

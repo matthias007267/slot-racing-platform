@@ -25,6 +25,13 @@ def start_number_text(number: int | str | None) -> str:
 EMPTY_DISPLAY = "—"
 
 
+def format_progress_cell(current: int, target: int) -> str:
+    """Lap races keep ``current/target``. A time trial has no target and shows the lap counter."""
+    if target < 1:
+        return format_lap_progress(current, target)
+    return f"{current}/{target}"
+
+
 def format_lap_progress(current: int, target: int) -> str:
     """Current lap against the race target.
 

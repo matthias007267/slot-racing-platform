@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
-from slot_racing.core.domain import DriverId, RaceId, TrackId, VehicleId
+from slot_racing.core.domain import DriverId, RaceId, RaceMode, TrackId, VehicleId
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
@@ -90,8 +90,12 @@ class RaceWizard(QWidget):
         self.provider_combo.setObjectName("race-provider")
         self.provider_status = QLabel()
         self.provider_status.setObjectName("race-provider-status")
-        self.mode_value = QLabel(tr("race.wizard.mode.laps"))
-        self.mode_value.setObjectName("race-mode")
+        self.mode_combo = QComboBox()
+        self.mode_combo.setObjectName("race-mode")
+        self.mode_combo.addItem(tr("race.wizard.mode.laps"), RaceMode.LAPS.value)
+        self.mode_combo.addItem(tr("race.wizard.mode.time_trial"), RaceMode.TIME_TRIAL.value)
+        self.laps_caption = QLabel(tr("race.wizard.laps"))
+        self.laps_caption.setObjectName("race-laps-label")
         self.laps_spin = QSpinBox()
         self.laps_spin.setObjectName("race-laps")
         self.laps_spin.setRange(1, MAX_LAPS)
@@ -160,6 +164,7 @@ class RaceWizard(QWidget):
         self.remove_participant_button.clicked.connect(lambda: self.remove_selected_participant())
         self.driver_combo.currentIndexChanged.connect(lambda _: self._reload_vehicles())
         self.provider_combo.currentIndexChanged.connect(lambda _: self._update_provider_status())
+        self.mode_combo.currentIndexChanged.connect(lambda _: self._sync_lap_target())
         self._show_step(NAME)
 
     @property
@@ -177,11 +182,15 @@ class RaceWizard(QWidget):
         self._reload_choices()
         if self._race is None:
             self.name_edit.clear()
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(RaceMode.LAPS.value))
             self.laps_spin.setValue(5)
         else:
             self.name_edit.setText(self._race.name)
-            self.laps_spin.setValue(self._race.laps)
+            self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._race.mode.value)))
+            if self._race.mode is RaceMode.LAPS and self._race.laps >= 1:
+                self.laps_spin.setValue(self._race.laps)
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
+        self._sync_lap_target()
         self._cancel_participant_edit()
         self._refresh_participants()
         self._show_step(NAME)
@@ -225,8 +234,8 @@ class RaceWizard(QWidget):
                 layout.addWidget(self.provider_status)
             elif index == MODE:
                 layout.addWidget(QLabel(tr("race.wizard.mode")))
-                layout.addWidget(self.mode_value)
-                layout.addWidget(QLabel(tr("race.wizard.laps")))
+                layout.addWidget(self.mode_combo)
+                layout.addWidget(self.laps_caption)
                 layout.addWidget(self.laps_spin)
             elif index == PARTICIPANTS:
                 row = QHBoxLayout()
@@ -373,15 +382,31 @@ class RaceWizard(QWidget):
         self._providers.check(provider_id)
         return str(provider_id)
 
+    def _selected_mode(self) -> RaceMode:
+        value = self.mode_combo.currentData()
+        return RaceMode.LAPS if value is None else RaceMode(str(value))
+
+    def _sync_lap_target(self) -> None:
+        show_laps = self._selected_mode() is RaceMode.LAPS
+        self.laps_caption.setVisible(show_laps)
+        self.laps_spin.setVisible(show_laps)
+
     def _save_basics(self) -> None:
         name = self.name_edit.text()
         track_id = TrackId(self.track_combo.currentData())
-        laps = self.laps_spin.value()
         provider = self._check_provider()
+        mode = self._selected_mode()
+        laps = self.laps_spin.value()
         if self._race is None:
-            self._race = self._service.create_race(name, track_id, laps, provider)
+            self._race = (
+                self._service.create_time_trial(name, track_id, provider)
+                if mode is RaceMode.TIME_TRIAL
+                else self._service.create_race(name, track_id, laps, provider)
+            )
         else:
-            self._race = self._service.update_race(self._race.id, name, track_id, laps, provider)
+            self._race = self._service.update_race(
+                self._race.id, name, track_id, laps, provider, mode
+            )
         self._refresh_participants()
 
     def _add_participant(self) -> None:
@@ -479,7 +504,11 @@ class RaceWizard(QWidget):
         lines = [
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
-            fmt("race.overview.laps", laps=race.laps),
+            (
+                fmt("race.overview.time_trial")
+                if race.mode is RaceMode.TIME_TRIAL
+                else fmt("race.overview.laps", laps=race.laps)
+            ),
             fmt(
                 "race.overview.provider",
                 provider=provider_label(self.translator, race.timing_provider),
