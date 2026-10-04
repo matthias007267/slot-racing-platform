@@ -541,6 +541,8 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     for header in ("Gesamtzeit", "Beste Runde", "Letzte Runde", "Durchschnitt"):
         assert column_text(results.table, 0, header) != "-"
     assert results.laps_table.rowCount() == 4
+    assert results.records_table.isHidden()
+    assert results.records_heading.isHidden()
 
     results.back_button.click()
     assert page.current_view() is page.list_page
