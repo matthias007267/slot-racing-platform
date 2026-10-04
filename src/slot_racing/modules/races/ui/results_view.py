@@ -14,7 +14,6 @@ from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, RaceMode, TrackId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.service import RaceService
-from slot_racing.modules.races.time_trial_board import build_time_trial_board, format_lap_seconds
 from slot_racing.modules.races.types import RaceInfo, TimeBest
 from slot_racing.modules.races.ui.formatting import participant_status_key, start_number_text
 from slot_racing.modules.races.ui.time_trial_board_view import fill_lane_table
