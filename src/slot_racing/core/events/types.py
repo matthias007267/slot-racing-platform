@@ -102,3 +102,12 @@ class PluginEnabled(Event):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PluginDisabled(Event):
     plugin_name: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PersistentStoreReplacing(Event):
+    """The database file is about to be replaced by a backup.
+
+    Live holders must release timing and in-memory race state. They must not write another
+    result: the file on disk is the state that will be kept or replaced.
+    """

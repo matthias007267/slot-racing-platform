@@ -53,6 +53,26 @@ SHELL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.state.registered": "nicht aktiviert",
         "settings.state.disabled": "deaktiviert",
         "settings.state.failed": "Fehler",
+        "backup.title": "Datensicherung",
+        "backup.directory": "Backup-Ordner",
+        "backup.choose": "Ordner wählen",
+        "backup.create": "Backup erstellen",
+        "backup.restore": "Backup wiederherstellen",
+        "backup.schedule": "Automatisches Backup",
+        "backup.schedule.off": "Aus",
+        "backup.schedule.daily": "Täglich",
+        "backup.schedule.on_exit": "Beim Beenden",
+        "backup.keep": "Automatische Backups behalten",
+        "backup.created": "Backup erstellt: {name}",
+        "backup.restored": "Die Daten wurden wiederhergestellt.",
+        "backup.restore.title": "Backup wiederherstellen",
+        "backup.restore.confirm": (
+            "Beim Wiederherstellen werden die aktuell gespeicherten Daten durch den Stand "
+            "des Backups ersetzt."
+        ),
+        "backup.restore.accept": "Wiederherstellen",
+        "backup.restore.cancel": "Abbrechen",
+        "backup.file_filter": "Slot-Racing Backup (*.slbackup)",
         "page.placeholder": "Diese Ansicht ist noch nicht implementiert.",
         "page.error": "Diese Ansicht konnte nicht geladen werden.",
     }

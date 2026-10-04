@@ -22,14 +22,36 @@ class Database:
 
     def __init__(self, url: str) -> None:
         self.url = url
+        self.engine: Engine
+        self._session_factory: sessionmaker[Session]
+        self._open(url)
+
+    def _open(self, url: str) -> None:
+        self.url = url
         parsed = make_url(url)
         kwargs: dict[str, Any] = {}
         if parsed.get_backend_name() == "sqlite" and parsed.database in (None, "", ":memory:"):
             kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
-        self.engine: Engine = create_engine(url, **kwargs)
+        self.engine = create_engine(url, **kwargs)
         if parsed.get_backend_name() == "sqlite":
             event.listen(self.engine, "connect", _enable_sqlite_foreign_keys)
         self._session_factory = sessionmaker(self.engine, expire_on_commit=False)
+
+    def file_path(self) -> Path | None:
+        """The SQLite file, when this database is stored in one."""
+        parsed = make_url(self.url)
+        if parsed.get_backend_name() != "sqlite":
+            return None
+        name = parsed.database
+        if not name or name == ":memory:":
+            return None
+        return Path(name)
+
+    def reopen(self) -> None:
+        """Close every connection and open the same file again."""
+        url = self.url
+        self.dispose()
+        self._open(url)
 
     @classmethod
     def from_path(cls, path: Path) -> Database:

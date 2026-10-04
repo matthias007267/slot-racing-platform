@@ -101,6 +101,12 @@ elsewhere. Set `SLOT_RACING_HOME` to use another directory. It contains `config.
 recognized and never moved or deleted (see [ADR 0010](docs/adr/0010-vendor-neutral-naming.md)).
 The database schema is migrated automatically on startup.
 
+Backups are a single `.slbackup` file: the database, the application settings and a short
+manifest. In *Einstellungen → Datensicherung* you can create one, restore one, and choose the
+folder. The default folder is `backups` inside the data directory. That choice does not move
+the database. Restoring asks for confirmation and writes a safety copy of the current data
+first. Automatic backups can be off, once a day, or created when the application exits.
+
 Modules can be switched on and off under *Einstellungen*. The camera and sensor timing modules
 are off by default.
 
