@@ -426,34 +426,47 @@ def test_vehicle_dialog_requires_a_model(qtbot: QtBot, env: Env) -> None:
     assert env.vehicles.list_vehicles() == []
 
 
-def test_track_page_validates_the_lane_count(qtbot: QtBot, env: Env) -> None:
+def test_track_page_offers_two_three_or_four_lanes(qtbot: QtBot, env: Env) -> None:
     _, area = open_page(qtbot, env, "tracks")
     assert isinstance(area, TracksArea)
     page: TracksPage = area.tracks_page
     page.refresh()
-    seen: list[str] = []
 
-    def invalid(dialog: QDialog) -> int:
+    def default_two(dialog: QDialog) -> None:
         assert isinstance(dialog, TrackDialog)
-        dialog.name_edit.setText("Zu viele Spuren")
-        dialog.lane_count_edit.setValue(9)
-        dialog.accept()
-        seen.append(dialog.message.text())
-        return int(dialog.result())
+        choices = [
+            dialog.lane_count_edit.itemData(index)
+            for index in range(dialog.lane_count_edit.count())
+        ]
+        assert choices == [2, 3, 4]
+        assert dialog.lane_count_edit.currentData() == 2
+        assert dialog.lane_count_edit.findData(1) < 0
+        assert dialog.lane_count_edit.findData(5) < 0
+        dialog.name_edit.setText("Heim")
 
-    page.dialog_runner = invalid
+    page.dialog_runner = runner_for(default_two)
     page.add()
-    assert "Spurenzahl" in seen[0]
-    assert env.tracks.list_tracks() == []
+    assert cells(page.table, 0) == ["Heim", "2", "", "Ja"]
 
-    def valid(dialog: QDialog) -> None:
+    def four_lanes(dialog: QDialog) -> None:
         assert isinstance(dialog, TrackDialog)
         dialog.name_edit.setText("Heimbahn")
-        dialog.lane_count_edit.setValue(4)
+        dialog.lane_count_edit.setCurrentIndex(dialog.lane_count_edit.findData(4))
 
-    page.dialog_runner = runner_for(valid)
+    page.dialog_runner = runner_for(four_lanes)
     page.add()
-    assert cells(page.table, 0) == ["Heimbahn", "4", "", "Ja"]
+    assert cells(page.table, 0) == ["Heim", "2", "", "Ja"]
+    assert cells(page.table, 1) == ["Heimbahn", "4", "", "Ja"]
+
+    def keeps_four(dialog: QDialog) -> None:
+        assert isinstance(dialog, TrackDialog)
+        assert dialog.lane_count_edit.currentData() == 4
+
+    page.table.selectRow(1)
+    page.dialog_runner = runner_for(keeps_four)
+    page.edit_selected()
+    stored = {track.name: track.lane_count for track in env.tracks.list_tracks()}
+    assert stored == {"Heim": 2, "Heimbahn": 4}
 
 
 def configure_race(page: RacesPage, env: Env) -> None:

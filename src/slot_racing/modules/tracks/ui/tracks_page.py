@@ -4,20 +4,21 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
-    QSpinBox,
     QWidget,
 )
 
 from slot_racing.core.catalog import TrackInfo
 from slot_racing.core.domain import TrackId
+from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.tracks.service import MAX_LANES, MIN_LANES, TrackInput, TrackService
+from slot_racing.modules.tracks.service import TrackInput, TrackService
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
 from slot_racing.uikit.theme import set_role
 
@@ -41,10 +42,13 @@ class TrackDialog(FormDialog):
         self.description_edit = QPlainTextEdit(track.description or "" if track else "")
         self.description_edit.setObjectName("track-description")
         self.description_edit.setFixedHeight(70)
-        self.lane_count_edit = QSpinBox()
+        self.lane_count_edit = QComboBox()
         self.lane_count_edit.setObjectName("track-lane-count")
-        self.lane_count_edit.setRange(0, 99)
-        self.lane_count_edit.setValue(track.lane_count if track else 2)
+        stored = None if track is None else track.lane_count
+        for count in _lane_choices(stored):
+            self.lane_count_edit.addItem(str(count), count)
+        selected = DEFAULT_LANE_COUNT if stored is None else stored
+        self.lane_count_edit.setCurrentIndex(self.lane_count_edit.findData(selected))
         self.image_edit = QLineEdit(track.image_path or "" if track else "")
         self.image_edit.setObjectName("track-image")
         browse = QPushButton(tr("track.browse"))
@@ -55,10 +59,7 @@ class TrackDialog(FormDialog):
         image_row.addWidget(browse)
         self.form.addRow(tr("track.field.name"), self.name_edit)
         self.form.addRow(tr("track.field.description"), self.description_edit)
-        self.form.addRow(
-            translator.format("track.field.lane_count", minimum=MIN_LANES, maximum=MAX_LANES),
-            self.lane_count_edit,
-        )
+        self.form.addRow(tr("track.field.lane_count"), self.lane_count_edit)
         self.form.addRow(tr("track.field.image"), image_row)
 
     def _browse(self) -> None:
@@ -71,7 +72,7 @@ class TrackDialog(FormDialog):
     def submit(self) -> None:
         data = TrackInput(
             name=self.name_edit.text(),
-            lane_count=self.lane_count_edit.value(),
+            lane_count=int(self.lane_count_edit.currentData()),
             description=self.description_edit.toPlainText(),
             image_path=self.image_edit.text(),
         )
@@ -79,6 +80,15 @@ class TrackDialog(FormDialog):
             self._service.create_track(data)
         else:
             self._service.update_track(self._track.id, data)
+
+
+def _lane_choices(stored: int | None) -> list[int]:
+    """2, 3 and 4, plus a count already stored so opening the dialog does not change it."""
+    choices = list(range(MIN_LANE_COUNT, MAX_LANE_COUNT + 1))
+    if stored is not None and stored not in choices and stored >= 1:
+        choices.append(stored)
+        choices.sort()
+    return choices
 
 
 class TracksPage(EntityPage):

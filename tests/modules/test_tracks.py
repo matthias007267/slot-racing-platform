@@ -3,8 +3,40 @@ from __future__ import annotations
 import pytest
 
 from slot_racing.core.errors import ValidationError
+from slot_racing.modules.tracks.models import Track
 from slot_racing.modules.tracks.service import MAX_LANES, TrackInput
 from tests.modules.conftest import Env
+
+
+def test_a_new_track_defaults_to_two_lanes(env: Env) -> None:
+    track = env.tracks.create_track(TrackInput(name="Heim"))
+    assert track.lane_count == 2
+
+
+@pytest.mark.parametrize("lanes", [2, 3, 4])
+def test_two_three_and_four_lanes_can_be_stored(env: Env, lanes: int) -> None:
+    track = env.tracks.create_track(TrackInput(name="Bahn", lane_count=lanes))
+    loaded = env.tracks.get_track(track.id)
+    assert loaded is not None and loaded.lane_count == lanes
+
+
+def test_an_already_stored_lane_count_is_not_reduced(env: Env) -> None:
+    track = env.tracks.create_track(TrackInput(name="Alt", lane_count=4))
+    with env.runtime.database.session() as session:
+        stored = session.get(Track, track.id)
+        assert stored is not None
+        stored.lane_count = 6
+    loaded = env.tracks.get_track(track.id)
+    assert loaded is not None and loaded.lane_count == 6
+    kept = env.tracks.update_track(track.id, TrackInput(name="Alt bleibt", lane_count=6))
+    assert kept.lane_count == 6
+    with pytest.raises(ValidationError) as caught:
+        env.tracks.update_track(track.id, TrackInput(name="Alt", lane_count=5))
+    assert caught.value.key == "error.track.lane_count"
+    still = env.tracks.get_track(track.id)
+    assert still is not None and still.lane_count == 6
+    reduced = env.tracks.update_track(track.id, TrackInput(name="Alt", lane_count=4))
+    assert reduced.lane_count == 4
 
 
 def test_create_and_edit_track(env: Env) -> None:
@@ -20,7 +52,7 @@ def test_create_and_edit_track(env: Env) -> None:
     assert env.tracks.list_tracks() == [updated]
 
 
-@pytest.mark.parametrize("lanes", [0, -1, MAX_LANES + 1])
+@pytest.mark.parametrize("lanes", [0, -1, 1, MAX_LANES + 1])
 def test_lane_count_is_validated(env: Env, lanes: int) -> None:
     with pytest.raises(ValidationError) as caught:
         env.tracks.create_track(TrackInput(name="X", lane_count=lanes))

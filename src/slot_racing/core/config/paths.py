@@ -47,3 +47,8 @@ def default_database_path() -> Path:
     if not current.exists() and legacy.is_file():
         return legacy
     return current
+
+
+def default_backup_directory() -> Path:
+    """Local folder for backup files. This is not the database location."""
+    return app_data_dir() / "backups"

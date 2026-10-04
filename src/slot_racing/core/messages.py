@@ -58,6 +58,16 @@ CORE_TRANSLATIONS: dict[str, dict[str, str]] = {
             "Die Kennung „{provider}“ ist für mehrere Zeitmessungen registriert."
         ),
         "error.timing_provider.lanes_duplicate": "Eine Spur darf nur einmal vorkommen.",
+        "error.backup.invalid": "Die Datei ist kein gültiges Backup.",
+        "error.backup.unsupported_version": "Diese Backup-Version wird nicht unterstützt.",
+        "error.backup.corrupt": "Das Backup ist beschädigt und wurde nicht wiederhergestellt.",
+        "error.backup.missing_tables": "Dem Backup fehlen erforderliche Daten.",
+        "error.backup.no_database_file": (
+            "Diese Datenbank liegt nicht in einer Datei und kann nicht ersetzt werden."
+        ),
+        "error.backup.failed": (
+            "Die Wiederherstellung ist fehlgeschlagen. Die bisherigen Daten bleiben erhalten."
+        ),
         "timing.provider.available": "verfügbar",
         "timing.provider.unavailable": "nicht verfügbar",
     }
