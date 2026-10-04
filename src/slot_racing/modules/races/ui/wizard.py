@@ -217,6 +217,10 @@ class RaceWizard(QWidget):
     def request_start(self) -> bool:
         return self._guard(self._request_start)
 
+    def show_error(self, message: str) -> None:
+        """Show a reason that appeared after the start was handed to the race page."""
+        self.status.show_error(message)
+
     def _build_pages(self) -> None:
         tr = self.translator.translate
         for index, key in enumerate(STEP_KEYS):
@@ -368,6 +372,8 @@ class RaceWizard(QWidget):
             self._save_basics()
             self._reload_lanes()
         elif step == PARTICIPANTS:
+            if not self._drivers.list_drivers():
+                raise ValidationError("error.race.no_drivers")
             if self._race is None or not self._race.participants:
                 raise ValidationError("error.race.no_participants")
         elif step == OVERVIEW:

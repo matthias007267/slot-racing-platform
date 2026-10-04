@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QComboBox
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.domain import RaceStatus
+from slot_racing.core.errors import ProviderConfigurationError
 from slot_racing.core.timing import ProviderAvailability, TimingSourceFactory
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -125,6 +126,52 @@ def test_without_any_provider_the_selection_explains_and_blocks(qtbot: QtBot, en
     assert wizard.provider_status.text() == "Keine Zeitmessung registriert."
     assert not wizard.go_next()
     assert "Zeitmessung" in wizard.status.text()
+
+
+def test_a_camera_that_cannot_start_explains_that_on_the_wizard(qtbot: QtBot, env: Env) -> None:
+    register(
+        env,
+        FakeTimingFactory(
+            "camera",
+            create_error=ProviderConfigurationError("error.timing_provider.camera_zones_missing"),
+        ),
+    )
+    anna = env.driver("Anna")
+    env.vehicle("Porsche", driver_id=anna.id)
+    page, wizard = wizard_at_track_step(qtbot, env)
+    wizard.provider_combo.setCurrentIndex(wizard.provider_combo.findData("camera"))
+    assert wizard.go_next() and wizard.go_next()
+    wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(anna.id))
+    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
+    assert wizard.add_participant()
+    assert wizard.go_next() and wizard.step == OVERVIEW
+    assert wizard.go_next() and wizard.step == START
+    wizard.start_button.click()
+    assert wizard.step == START
+    assert page.current_view() is page.wizard
+    assert "Erkennungszonen" in wizard.status.text()
+    race = wizard.race
+    assert race is not None
+    assert env.races.require_race(race.id).status is RaceStatus.READY
+
+
+def test_a_valid_camera_provider_starts_the_race(qtbot: QtBot, env: Env) -> None:
+    register(env, FakeTimingFactory("camera"))
+    anna = env.driver("Anna")
+    env.vehicle("Porsche", driver_id=anna.id)
+    page, wizard = wizard_at_track_step(qtbot, env)
+    wizard.provider_combo.setCurrentIndex(wizard.provider_combo.findData("camera"))
+    assert wizard.go_next() and wizard.go_next()
+    wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(anna.id))
+    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
+    assert wizard.add_participant()
+    assert wizard.go_next() and wizard.go_next()
+    wizard.start_button.click()
+    assert isinstance(page.current_view(), LiveRaceView)
+    race = wizard.race
+    assert race is not None
+    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+    assert env.races.require_race(race.id).timing_provider == "camera"
 
 
 def test_a_race_with_the_simulation_still_starts_through_the_ui(qtbot: QtBot, env: Env) -> None:

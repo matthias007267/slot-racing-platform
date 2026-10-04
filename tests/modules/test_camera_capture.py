@@ -239,6 +239,28 @@ def test_frames_are_processed_in_grab_order() -> None:
         source.stop()
 
 
+def test_poll_latest_discards_older_preview_frames_and_stop_ends_the_thread() -> None:
+    capture = ScriptedCapture()
+    source, frames, received = started(capture, queue_size=4)
+    try:
+        capture.push(blank())
+        capture.push(blank().paint(DetectionRoi(0, 0, 4, 4), 40))
+        capture.push(GrayFrame.blank(WIDTH, HEIGHT, 9))
+        capture.wait_until_reads(3)
+        wait_for(lambda: frames.queued == 3)
+        latest = frames.poll_latest()
+        assert latest is not None
+        assert latest.frame.pixels[0] == 9
+        assert frames.queued == 0
+        assert frames.captured == 3
+        assert frames.last_read_ns >= 0
+        source.poll()
+        assert received == []
+    finally:
+        source.stop()
+    assert not frames.is_capturing
+
+
 def test_the_queue_stays_bounded_and_keeps_the_newest_frames() -> None:
     capture = ScriptedCapture()
     source, frames, _received = started(capture, queue_size=2)
@@ -512,12 +534,13 @@ def test_opencv_requests_size_and_fps_and_records_the_driver_values(
         assert capture.props[api.CAP_PROP_FRAME_WIDTH] == 640
         assert capture.props[api.CAP_PROP_FRAME_HEIGHT] == 480
         assert capture.props[api.CAP_PROP_FPS] == 30
+        assert capture.props[38] == 1
         assert device.actual_width == 320
         assert device.actual_height == 240
         assert device.actual_fps == 15
         frame = device.read()
         assert (frame.width, frame.height) == (2, 2)
-        assert frame.pixels == (1, 2, 3, 4)
+        assert tuple(frame.pixels) == (1, 2, 3, 4)
     finally:
         device.close()
     assert api.instances[0].released
@@ -534,7 +557,7 @@ def test_opencv_converts_color_frames_to_gray(monkeypatch: pytest.MonkeyPatch) -
     finally:
         device.close()
     assert api.converted
-    assert frame.pixels == (9, 8, 7, 6)
+    assert tuple(frame.pixels) == (9, 8, 7, 6)
 
 
 def test_opencv_missing_device_is_released(monkeypatch: pytest.MonkeyPatch) -> None:

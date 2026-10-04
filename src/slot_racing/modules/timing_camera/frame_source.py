@@ -59,6 +59,20 @@ class FrameSource(ABC):
     def poll_frame(self) -> TimedFrame | None:
         """The next frame to process, or ``None`` when nothing is due."""
 
+    def poll_latest(self) -> TimedFrame | None:
+        """The newest queued frame. Older frames are discarded.
+
+        Preview uses this so the picture on screen is the current grab. A timing
+        source keeps calling :meth:`poll_frame` instead, in grab order, so a
+        crossing that is still in the small queue is not thrown away.
+        """
+        latest: TimedFrame | None = None
+        while True:
+            frame = self.poll_frame()
+            if frame is None:
+                return latest
+            latest = frame
+
 
 class ManualFrameSource(FrameSource):
     """Queue of frames pushed by a test or another caller on this thread.

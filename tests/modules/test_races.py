@@ -182,6 +182,10 @@ def test_start_requires_participants_and_active_resources(env: Env) -> None:
     race = env.races.create_race("R", env.track_id(), 3)
     with pytest.raises(ValidationError) as caught:
         env.controller.start_race(race.id)
+    assert key_of(caught) == "error.race.no_drivers"
+    env.driver("Anna")
+    with pytest.raises(ValidationError) as caught:
+        env.controller.start_race(race.id)
     assert key_of(caught) == "error.race.no_participants"
     driver_id, vehicle_id = env.pair(1)
     env.races.add_participant(race.id, driver_id, vehicle_id, 1)

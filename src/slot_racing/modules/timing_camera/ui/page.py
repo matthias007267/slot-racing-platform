@@ -9,7 +9,7 @@ page stops that preview and releases the device.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
@@ -25,12 +25,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from slot_racing.core.domain.lanes import MAX_LANE_COUNT
+from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
@@ -53,6 +52,7 @@ from slot_racing.uikit.theme import configure_page, set_role, set_tone
 logger = logging.getLogger(__name__)
 
 _PREVIEW_INTERVAL_MS = 50
+_DEFAULT_POSITION = "start_finish"
 _RESOLUTIONS = ((320, 240), (640, 480), (800, 600), (1280, 720), (1920, 1080))
 _FRAME_RATES = (15, 30, 60)
 _State = tuple[object, ...]
@@ -95,12 +95,14 @@ class CameraSetupPage(QWidget):
         translator: Translator,
         store: CameraSetupStore,
         preview: CameraSetupPreview,
+        lane_limit: Callable[[], int] | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("camera-setup")
         self._translator = translator
         self._store = store
         self._preview = preview
+        self._lane_limit = lane_limit or (lambda: MAX_LANE_COUNT)
         self._drafts: list[ZoneDraft] = []
         self._snapshot: _State = ()
         self._source: FrameSource | None = None
@@ -128,9 +130,6 @@ class CameraSetupPage(QWidget):
         self.zones.setObjectName("camera-zones")
         self.position = QLineEdit()
         self.position.setObjectName("camera-position")
-        self.lane = QSpinBox()
-        self.lane.setObjectName("camera-lane")
-        self.lane.setRange(1, MAX_LANE_COUNT)
         self.add_zone = QPushButton(self._tr("camera.action.add"))
         self.add_zone.setObjectName("camera-add-zone")
         self.delete_zone = QPushButton(self._tr("camera.action.delete"))
@@ -156,7 +155,6 @@ class CameraSetupPage(QWidget):
         camera_form.addRow(self._tr("camera.field.fps"), self.fps)
         zone_form = QFormLayout()
         zone_form.addRow(self._tr("camera.field.position"), self.position)
-        zone_form.addRow(self._tr("camera.field.lane"), self.lane)
 
         side = QWidget()
         side.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Expanding)
@@ -188,7 +186,6 @@ class CameraSetupPage(QWidget):
         self.fps.currentIndexChanged.connect(self._on_camera_changed)
         self.zones.currentRowChanged.connect(self._on_list)
         self.position.textChanged.connect(self._on_position)
-        self.lane.valueChanged.connect(self._on_lane)
         self.add_zone.clicked.connect(self._on_add)
         self.delete_zone.clicked.connect(self._on_delete)
         self.refresh.clicked.connect(self._on_refresh)
@@ -234,8 +231,6 @@ class CameraSetupPage(QWidget):
         self._drafts = [
             ZoneDraft(zone.position_id, zone.lane, zone.roi) for zone in config.detection.zones
         ]
-        highest = max((draft.lane for draft in self._drafts), default=1)
-        self.lane.setMaximum(max(MAX_LANE_COUNT, highest))
         self._fill_devices(self._probe(), config.camera.device_index)
         self._fill_choices(
             self.resolution,
@@ -325,17 +320,13 @@ class CameraSetupPage(QWidget):
         index = self.stage.selected_index()
         enabled = 0 <= index < len(self._drafts)
         self.position.setEnabled(enabled)
-        self.lane.setEnabled(enabled)
         self.delete_zone.setEnabled(enabled)
         previous = self._loading
         self._loading = True
         if enabled:
-            draft = self._drafts[index]
-            self.position.setText(draft.position_id)
-            self.lane.setValue(draft.lane)
+            self.position.setText(self._drafts[index].position_id)
         else:
             self.position.clear()
-            self.lane.setValue(1)
         self._loading = previous
 
     def _label(self, draft: ZoneDraft) -> str:
@@ -461,25 +452,31 @@ class CameraSetupPage(QWidget):
             item.setText(self._list_text(index))
         self._note_edit()
 
-    def _on_lane(self, value: int) -> None:
-        if self._loading:
-            return
-        index = self.stage.selected_index()
-        if index < 0 or index >= len(self._drafts):
-            return
-        self._drafts[index].lane = value
-        self.stage.set_label(index, self._label(self._drafts[index]))
-        item = self.zones.item(index)
-        if item is not None:
-            item.setText(self._list_text(index))
-        self._note_edit()
+    def _current_lane_limit(self) -> int:
+        try:
+            reported = self._lane_limit()
+        except Exception:
+            logger.exception("Could not read the track lane count")
+            return MAX_LANE_COUNT
+        if isinstance(reported, bool) or not isinstance(reported, int):
+            return MAX_LANE_COUNT
+        return max(1, min(MAX_LANE_COUNT, reported))
 
     def _on_add(self) -> None:
         self._error_key = None
         self._detail = None
-        self._drawing = True
-        self.stage.arm_draw()
-        self._refresh_status()
+        limit = self._current_lane_limit()
+        used = {draft.lane for draft in self._drafts}
+        lane = next((number for number in range(1, limit + 1) if number not in used), None)
+        if lane is None or len(self._drafts) >= limit:
+            self._error_key = "camera.status.too_many_zones"
+            self._drawing = False
+            self._refresh_status()
+            return
+        self._drafts.append(ZoneDraft(_DEFAULT_POSITION, lane, _default_roi(lane)))
+        self._drawing = False
+        self._show_drafts(len(self._drafts) - 1)
+        self._note_edit()
 
     def _on_delete(self) -> None:
         index = self.stage.selected_index()
@@ -613,7 +610,7 @@ class CameraSetupPage(QWidget):
         if source is None:
             return
         try:
-            delivered = source.poll_frame()
+            delivered = source.poll_latest()
         except Exception as error:
             logger.exception("Camera preview stopped delivering frames")
             self._stop_preview()
@@ -685,3 +682,22 @@ def _section(text: str) -> QLabel:
 
 def _complete(position_id: str) -> bool:
     return position_id.strip() != "" and position_id == position_id.strip()
+
+
+def zone_limit(lane_counts: Iterable[int]) -> int:
+    """How many camera zones the current tracks allow.
+
+    The widest active track decides. The result stays inside the lane choices
+    the application offers for a new track, and it is never above four.
+    """
+    counts = tuple(lane_counts)
+    if not counts:
+        return DEFAULT_LANE_COUNT
+    widest = max(counts)
+    return min(MAX_LANE_COUNT, max(MIN_LANE_COUNT, widest))
+
+
+def _default_roi(lane: int) -> NormalizedRoi:
+    """A rectangle the user can drag. Each lane starts on its own row."""
+    top = min(0.75, 0.08 + (lane - 1) * 0.2)
+    return NormalizedRoi(x=0.35, y=top, width=0.3, height=0.12)

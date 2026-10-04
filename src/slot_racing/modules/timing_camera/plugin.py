@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from slot_racing.core.storage import Database
 from slot_racing.modules.timing_camera.lease import CameraLease
@@ -46,7 +47,10 @@ class CameraTimingPlugin(Plugin):
             "camera.status.saved": "Konfiguration gespeichert.",
             "camera.status.draw": "Ziehe ein Rechteck im Bild.",
             "camera.status.too_small": "Die Zone ist zu klein.",
-            "camera.status.incomplete": "Jede Zone braucht eine Position und eine Lane.",
+            "camera.status.too_many_zones": (
+                "Für diese Bahnanzahl sind keine weiteren Zonen möglich."
+            ),
+            "camera.status.incomplete": "Jede Zone braucht eine Position.",
             "camera.status.invalid": "Die Konfiguration ist ungültig.",
             "camera.status.save_failed": "Die Konfiguration konnte nicht gespeichert werden.",
             "camera.zone.incomplete": "Neue Zone",
@@ -80,9 +84,18 @@ class CameraTimingPlugin(Plugin):
         context.register_timing_provider(CameraTimingFactory(configurations=store, lease=lease))
 
         def camera_page() -> object:
-            from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+            from slot_racing.modules.timing_camera.ui.page import CameraSetupPage, zone_limit
 
-            return CameraSetupPage(translator, store, preview)
+            tracks = context.find_service(TrackCatalog)
+
+            def lane_limit() -> int:
+                if tracks is None:
+                    return zone_limit(())
+                return zone_limit(
+                    track.lane_count for track in tracks.list_tracks(active_only=True)
+                )
+
+            return CameraSetupPage(translator, store, preview, lane_limit=lane_limit)
 
         context.add_navigation(
             NavigationItem(
