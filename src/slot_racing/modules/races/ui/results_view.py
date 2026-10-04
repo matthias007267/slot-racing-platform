@@ -14,7 +14,6 @@ from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, RaceMode, TrackId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.service import RaceService
-from slot_racing.modules.races.time_trial_board import build_time_trial_board, format_lap_seconds
 from slot_racing.modules.races.types import RaceInfo, TimeBest
 from slot_racing.modules.races.ui.formatting import participant_status_key, start_number_text
 from slot_racing.modules.races.ui.time_trial_board_view import fill_lane_table
@@ -63,18 +62,6 @@ class ResultsView(QWidget):
                 tr("race.column.sectors"),
             ],
             "results-laps",
-        )
-        self.records_heading = QLabel(tr("race.time_trial.records"))
-        self.records_heading.setObjectName("time-trial-result-records-heading")
-        set_role(self.records_heading, "section")
-        self.records_table = make_table(
-            [
-                tr("race.time_trial.column.lane"),
-                tr("race.column.driver"),
-                tr("race.column.vehicle"),
-                tr("race.time_trial.column.best"),
-            ],
-            "time-trial-result-records",
         )
         self.measurements_heading = QLabel(tr("race.results.measurements"))
         self.measurements_table = make_table(
@@ -136,8 +123,6 @@ class ResultsView(QWidget):
         for widget in (self.table, self.laps_heading, self.laps_table):
             widget.setVisible(not time_trial)
         for widget in (
-            self.records_heading,
-            self.records_table,
             self.measurements_heading,
             self.measurements_table,
             self.bests_heading,
@@ -177,30 +162,6 @@ class ResultsView(QWidget):
             else self._best_line(bests[0])
         )
         self.summary.setText(f"{self._header(race)}\n{extra}")
-        stored = (
-            []
-            if race.track_id is None
-            else self._service.list_time_measurements(track_id=race.track_id)
-        )
-        board = build_time_trial_board(
-            lane_count=race.lane_count,
-            race_id=race.id,
-            measurements=stored,
-            participants=race.participants,
-        )
-        fill_lane_table(
-            self.records_table,
-            [
-                (
-                    str(line.lane),
-                    line.driver_label or "-",
-                    line.vehicle_label or "-",
-                    format_lap_seconds(line.time_ns),
-                )
-                for line in board.records
-            ],
-            time_column=3,
-        )
         measurements = self._service.list_time_measurements(race_id=race.id)
         fill_table(
             self.measurements_table,
