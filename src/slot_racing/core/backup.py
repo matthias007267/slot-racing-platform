@@ -487,7 +487,7 @@ def _snapshot_database(database: Database, destination: Path) -> None:
     connection = database.engine.connect()
     try:
         raw = _sqlite_connection(connection)
-        with sqlite3.connect(destination) as target:
+        with _connect(destination) as target:
             raw.backup(target)
     finally:
         connection.close()
@@ -508,7 +508,7 @@ def _checkpoint(database: Database) -> None:
 
 def _require_intact(path: Path) -> None:
     try:
-        with sqlite3.connect(path) as connection:
+        with _connect(path) as connection:
             row = connection.execute("PRAGMA integrity_check").fetchone()
     except sqlite3.DatabaseError as error:
         raise BackupError("error.backup.corrupt") from error
@@ -517,7 +517,7 @@ def _require_intact(path: Path) -> None:
 
 
 def _require_tables(path: Path, required: frozenset[str]) -> None:
-    with sqlite3.connect(path) as connection:
+    with _connect(path) as connection:
         rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     present = {row[0] for row in rows}
     if not required <= present:
@@ -526,13 +526,27 @@ def _require_tables(path: Path, required: frozenset[str]) -> None:
 
 def _schema_revision(path: Path) -> str:
     try:
-        with sqlite3.connect(path) as connection:
+        with _connect(path) as connection:
             rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
     except sqlite3.DatabaseError as error:
         raise BackupError("error.backup.corrupt") from error
     if len(rows) != 1 or not isinstance(rows[0][0], str) or not rows[0][0]:
         raise BackupError("error.backup.corrupt")
     return rows[0][0]
+
+
+@contextmanager
+def _connect(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a SQLite file and close it before the caller can delete or replace it.
+
+    ``with sqlite3.connect(...)`` only commits. On Windows an unclosed handle blocks removal
+    of the file and of the temporary directory that contains it.
+    """
+    connection = sqlite3.connect(path)
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 def _known_revisions() -> frozenset[str]:
