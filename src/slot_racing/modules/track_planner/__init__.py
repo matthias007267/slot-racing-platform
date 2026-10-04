@@ -1,1 +1,1 @@
-"""Track layout planning for any slot-racing system (placeholder)."""
+"""Graphical track plans stored with an existing track."""

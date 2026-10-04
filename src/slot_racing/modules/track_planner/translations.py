@@ -1,0 +1,46 @@
+"""German texts of the track planner."""
+
+from __future__ import annotations
+
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "de": {
+        "plugin.track_planner.title": "Streckenplaner",
+        "nav.track_planner": "Streckenplaner",
+        "planner.track": "Strecke",
+        "planner.lanes": "Bahnen: {count}",
+        "planner.tool.straight_h": "Gerade horizontal",
+        "planner.tool.straight_v": "Gerade vertikal",
+        "planner.tool.curve": "90°-Kurve",
+        "planner.tool.start": "Start/Ziel",
+        "planner.tool.delete": "Entfernen",
+        "planner.direction.clockwise": "Uhrzeigersinn",
+        "planner.direction.counterclockwise": "Gegen den Uhrzeigersinn",
+        "planner.save": "Speichern",
+        "planner.discard": "Verwerfen",
+        "planner.reset": "Zurücksetzen",
+        "planner.properties": "Eigenschaften",
+        "planner.field.x": "X",
+        "planner.field.y": "Y",
+        "planner.field.rotation": "Drehung",
+        "planner.empty": "Keine Strecke vorhanden.",
+        "planner.unsaved": "Bitte zuerst speichern oder verwerfen.",
+        "planner.saved": "Streckenplan gespeichert.",
+        "planner.discarded": "Änderungen verworfen.",
+        "planner.reset_done": "Der Plan wurde geleert. Speichern übernimmt das.",
+        "planner.none": "Kein Element ausgewählt.",
+        "planner.kind.straight_h": "Horizontale Gerade",
+        "planner.kind.straight_v": "Vertikale Gerade",
+        "planner.kind.curve_90": "90°-Kurve",
+        "planner.kind.start_finish": "Start/Ziel",
+        "planner.kind.sensor": "Sensor",
+        "planner.kind.camera": "Kamera",
+        "planner.kind.timing_point": "Zeitmesspunkt",
+        "planner.kind.sector": "Sektor",
+        "error.planner.invalid": "Der gespeicherte Streckenplan kann nicht gelesen werden.",
+        "error.planner.track_missing": "Die Strecke existiert nicht.",
+        "error.planner.position": "Das Element liegt außerhalb der Arbeitsfläche.",
+        "error.planner.direction": "Die Fahrtrichtung ist ungültig.",
+        "error.planner.lane": "Die Bahn liegt außerhalb der Strecke.",
+        "error.planner.piece": "Das Streckenelement ist ungültig.",
+    }
+}
