@@ -9,6 +9,7 @@ from slot_racing.core.catalog import (
     TrackCatalog,
     VehicleCatalog,
 )
+from slot_racing.core.events import PersistentStoreReplacing
 from slot_racing.core.plugin import (
     NavigationItem,
     Plugin,
@@ -72,6 +73,9 @@ class RacesPlugin(Plugin):
         )
         self._recorder = recorder
         self._controller = controller
+        context.events.subscribe(
+            PersistentStoreReplacing, lambda _event: controller.release_for_restore()
+        )
         context.register_service(RaceService, service)
         context.register_service(RaceController, controller)
         context.register_service(RaceCatalog, RaceOverview(service, controller))

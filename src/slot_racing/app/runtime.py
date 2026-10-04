@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from slot_racing.app.translations import SHELL_TRANSLATIONS
+from slot_racing.core.backup import run_scheduled_backup
 from slot_racing.core.clock import Clock, MonotonicClock
 from slot_racing.core.config import AppConfig, save_config
 from slot_racing.core.events import EventBus
@@ -92,6 +93,10 @@ class Runtime:
             for name in manager.plugin_names()
             if config.is_plugin_enabled(name, manager.manifest_default_enabled(name))
         )
+        try:
+            run_scheduled_backup(database, config, reason="startup")
+        except Exception:
+            logger.exception("Automatic backup on startup failed")
         return cls(
             config=config,
             config_path=config_path,
@@ -119,4 +124,8 @@ class Runtime:
 
     def shutdown(self) -> None:
         self.plugins.shutdown()
+        try:
+            run_scheduled_backup(self.database, self.config, reason="shutdown")
+        except Exception:
+            logger.exception("Automatic backup on exit failed")
         self.database.dispose()

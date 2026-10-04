@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from slot_racing.core.config.paths import default_database_path
+from slot_racing.core.config.paths import default_backup_directory, default_database_path
 
 
 class ConfigError(Exception):
@@ -27,9 +28,18 @@ class AppConfig(BaseModel):
     window_width: int | None = None
     window_height: int | None = None
     """Last window geometry. Missing values keep the built-in default size and position."""
+    backup_directory: Path | None = None
+    """Folder for ``.slbackup`` files. ``None`` uses the default folder next to the data."""
+    backup_schedule: Literal["off", "daily", "on_exit"] = "off"
+    """Automatic backups. ``off`` creates none, ``daily`` one per day, ``on_exit`` when closing."""
+    backup_keep: int = Field(default=10, ge=1, le=100)
+    """How many automatic backups to keep. Manual and safety copies are left in place."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()
+
+    def resolved_backup_directory(self) -> Path:
+        return self.backup_directory or default_backup_directory()
 
     def is_plugin_enabled(self, name: str, enabled_by_default: bool = True) -> bool:
         return self.plugin_overrides.get(name, enabled_by_default)

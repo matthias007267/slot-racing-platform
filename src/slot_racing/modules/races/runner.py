@@ -251,6 +251,16 @@ class RaceController:
         finally:
             runner.close()
 
+    def release_for_restore(self) -> None:
+        """Drop the in-memory race before a backup replaces the database file.
+
+        Stored rows are left as they are. Stopping the race here would write a new result into
+        the database that is about to be replaced or kept.
+        """
+        runner, self.active = self.active, None
+        if runner is not None:
+            runner.close()
+
     def _timing_setup(self, track_id: TrackId | None) -> TimingSetup:
         """The track's stored timing configuration, or the default layout for tracks that have
         none yet (or when no timing module stores configurations)."""
