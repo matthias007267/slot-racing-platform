@@ -35,9 +35,11 @@ shell with a sidebar and dynamic navigation. Usable in the application:
   use the stored layout. Tracks without a configuration use a default layout.
 - **Kamera-Timing:** one global camera and its detection zones, edited on the live picture.
   Saving that document is what the next camera race uses.
+- **Streckenplaner:** a grid editor for an existing track. Straights, 90° curves, the
+  start/finish line and the driving direction are stored with that track.
 
 **Not** implemented yet: automatic vehicle detection, Raspberry Pi/GPIO, manufacturer-specific
-hardware, track planner, audio/animations, statistics, time limited races.
+hardware, audio/animations, statistics, time limited races.
 
 See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.md).
 
