@@ -22,7 +22,10 @@ from slot_racing.modules.track_planner.document import (
     parse_plan,
     to_document,
     validate_lanes,
+    with_instances,
 )
+from slot_racing.modules.track_planner.library import PartLibrary
+from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
 
 PLAN_NAME = "plan"
 
@@ -31,15 +34,19 @@ class TrackPlannerService:
     def __init__(self, database: Database, tracks: TrackCatalog) -> None:
         self._database = database
         self._tracks = tracks
+        self.library = PartLibrary(database)
 
     def load(self, track_id: TrackId) -> TrackPlan:
         """The stored plan, or an empty one when this track has no plan yet."""
         self._require_track(track_id)
         with self._database.session() as session:
             payload = self._read(session, track_id)
-        if payload is None:
-            return empty_plan(track_id)
-        return parse_plan(track_id, payload)
+        plan = empty_plan(track_id) if payload is None else parse_plan(track_id, payload)
+        with self._database.session() as session:
+            stored = self.library.read_instances(session, int(track_id))
+        if stored:
+            return with_instances(plan, stored)
+        return plan
 
     def save(self, plan: TrackPlan) -> TrackPlan:
         """Replace the plan document. The track row, including its lane count, is not written."""
@@ -47,8 +54,15 @@ class TrackPlannerService:
         validate_lanes(plan, track.lane_count)
         document = to_document(plan)
         with self._database.session() as session:
+            self.library.write_instances(session, int(plan.track_id), plan.instances)
             self._write(session, int(plan.track_id), document)
         return plan
+
+    def list_parts(self) -> tuple[PartRecord, ...]:
+        return self.library.list_parts()
+
+    def add_part(self, spec: PartSpec) -> PartRecord:
+        return self.library.add_part(spec)
 
     def _require_track(self, track_id: TrackId) -> TrackInfo:
         track = self._tracks.get_track(track_id)

@@ -15,9 +15,10 @@ if TYPE_CHECKING:
 class TrackPlannerPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
         name="track_planner",
-        version="0.2.0",
+        version="0.3.0",
         title="Track planner",
         requires=("tracks",),
+        models_module="slot_racing.modules.track_planner.models",
     )
     translations: ClassVar[dict[str, dict[str, str]]] = TRANSLATIONS
 
