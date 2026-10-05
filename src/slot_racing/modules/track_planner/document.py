@@ -6,6 +6,7 @@ each piece sits on the grid and where later timing points can attach to a piece 
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,7 @@ from slot_racing.modules.track_planner.parts import (
     PartInstance,
     PartSpec,
     Pose,
+    rotate_xy,
     snap_pose,
 )
 
@@ -318,6 +320,78 @@ def validate_lanes(plan: TrackPlan, lane_count: int) -> None:
 def add_instance(plan: TrackPlan, instance: PartInstance) -> TrackPlan:
     _check_instance(instance)
     return _replace(plan, instances=(*plan.instances, instance))
+
+
+def instances_center(instances: Sequence[PartInstance]) -> tuple[float, float]:
+    """Temporary centre of a selection. It is not stored on the plan."""
+    count = len(instances)
+    if count == 0:
+        return (0.0, 0.0)
+    return (
+        sum(instance.x_mm for instance in instances) / count,
+        sum(instance.y_mm for instance in instances) / count,
+    )
+
+
+def rotate_instances_around(
+    plan: TrackPlan,
+    instance_ids: Sequence[str],
+    center_x: float,
+    center_y: float,
+    delta_deg: float,
+) -> TrackPlan:
+    """Turn every listed instance around one shared point. Definitions stay untouched."""
+    wanted = set(instance_ids)
+    if not wanted or delta_deg % 360 == 0:
+        return plan
+    updated: list[PartInstance] = []
+    for instance in plan.instances:
+        if instance.id not in wanted:
+            updated.append(instance)
+            continue
+        dx, dy = rotate_xy(instance.x_mm - center_x, instance.y_mm - center_y, delta_deg)
+        updated.append(
+            PartInstance(
+                instance.id,
+                instance.part_id,
+                center_x + dx,
+                center_y + dy,
+                instance.z_mm,
+                instance.rotation_x_deg,
+                instance.rotation_y_deg,
+                (instance.rotation_z_deg + delta_deg) % 360.0,
+            )
+        )
+    return _replace(plan, instances=tuple(updated))
+
+
+def duplicate_instances(
+    plan: TrackPlan, instance_ids: Sequence[str], dx_mm: float, dy_mm: float
+) -> tuple[TrackPlan, tuple[str, ...]]:
+    """New instances of the same definitions, shifted so the copy is not on the original."""
+    wanted = set(instance_ids)
+    created: list[str] = []
+    extra: list[PartInstance] = []
+    for instance in plan.instances:
+        if instance.id not in wanted:
+            continue
+        identifier = new_id()
+        extra.append(
+            PartInstance(
+                identifier,
+                instance.part_id,
+                instance.x_mm + dx_mm,
+                instance.y_mm + dy_mm,
+                instance.z_mm,
+                instance.rotation_x_deg,
+                instance.rotation_y_deg,
+                instance.rotation_z_deg,
+            )
+        )
+        created.append(identifier)
+    if not extra:
+        return plan, ()
+    return _replace(plan, instances=(*plan.instances, *extra)), tuple(created)
 
 
 def move_instance(plan: TrackPlan, instance_id: str, x_mm: float, y_mm: float) -> TrackPlan:

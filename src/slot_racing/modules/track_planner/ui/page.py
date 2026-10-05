@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -33,7 +34,9 @@ from slot_racing.modules.track_planner.document import (
     Piece,
     TrackPlan,
     add_piece,
+    duplicate_instances,
     empty_plan,
+    move_instance,
     move_marker,
     move_piece,
     next_origin,
@@ -45,6 +48,7 @@ from slot_racing.modules.track_planner.document import (
     reposition_instance,
     reset_plan,
     rotate_instance,
+    rotate_instances_around,
     rotate_piece,
     set_direction,
     set_plan_grid,
@@ -53,6 +57,7 @@ from slot_racing.modules.track_planner.parts import PartInstance, PartSpec
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
+from slot_racing.modules.track_planner.ui.library_view import PartLibrary
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import configure_page, set_role
 from slot_racing.uikit.widgets import StatusLabel
@@ -71,6 +76,9 @@ class PlannerPage(QWidget):
         self._dirty = False
         self._filling = False
         self._parts: dict[int, PartSpec] = {}
+        self._history: list[TrackPlan] = []
+        self._clipboard: tuple[PartInstance, ...] = ()
+        self._keys_attached = False
         translate = translator.translate
         self.track_combo = QComboBox()
         self.track_combo.setObjectName("planner-track")
@@ -81,6 +89,11 @@ class PlannerPage(QWidget):
         self.direction_button.setObjectName("planner-direction")
         set_role(self.direction_button, "ghost")
         self.direction_button.clicked.connect(self._toggle_direction)
+        self.undo_button = QPushButton(translate("planner.undo"))
+        self.undo_button.setObjectName("planner-undo")
+        set_role(self.undo_button, "ghost")
+        self.undo_button.clicked.connect(self.undo)
+        self.undo_button.setEnabled(False)
         self.save_button = QPushButton(translate("planner.save"))
         self.save_button.setObjectName("planner-save")
         self.save_button.clicked.connect(self.save)
@@ -103,8 +116,7 @@ class PlannerPage(QWidget):
         self.delete_button = self._tool(
             "planner-delete", "planner.tool.delete", self.delete_selected
         )
-        self.library = QListWidget()
-        self.library.setObjectName("planner-library")
+        self.library = PartLibrary()
         self.place_part = self._tool("planner-place", "planner.library.place", self._place_part)
         self.add_part = self._tool("planner-add-part", "planner.library.add", self._add_part)
         self.grid = QCheckBox(translate("planner.field.grid"))
@@ -132,7 +144,9 @@ class PlannerPage(QWidget):
         self.y_mm.setDecimals(1)
         self.canvas = PlanCanvas()
         self.canvas.set_listener(self._moved)
-        self.canvas.set_instance_listener(self._moved_instance)
+        self.canvas.set_group_listener(self._moved_group)
+        self.canvas.set_rotation_listener(self._rotated)
+        self.canvas.set_drop_listener(self._dropped)
         self.canvas.scene().selectionChanged.connect(self._show_selection)
         self.selection_label = QLabel(translate("planner.none"))
         self.selection_label.setObjectName("planner-selection")
@@ -167,15 +181,10 @@ class PlannerPage(QWidget):
         properties.addRow(self.grid)
         properties.addRow(translate("planner.field.grid_size"), self.grid_size)
         properties.addRow(translate("planner.field.snap"), self.snap_distance)
+        for retired in (self.add_horizontal, self.add_vertical, self.add_curve, self.add_start):
+            retired.hide()
         tools = QVBoxLayout()
-        for button in (
-            self.add_horizontal,
-            self.add_vertical,
-            self.add_curve,
-            self.add_start,
-            self.delete_button,
-        ):
-            tools.addWidget(button)
+        tools.addWidget(self.delete_button)
         library_title = QLabel(translate("planner.library"))
         set_role(library_title, "section")
         tools.addWidget(library_title)
@@ -183,16 +192,21 @@ class PlannerPage(QWidget):
         tools.addWidget(self.place_part)
         tools.addWidget(self.add_part)
         tools.addStretch(1)
+        library_panel = QWidget()
+        library_panel.setObjectName("planner-library-panel")
+        library_panel.setMinimumWidth(360)
+        library_panel.setLayout(tools)
         header = QHBoxLayout()
         header.addWidget(QLabel(translate("planner.track")))
         header.addWidget(self.track_combo, 1)
         header.addWidget(self.lanes)
         header.addWidget(self.direction_button)
+        header.addWidget(self.undo_button)
         header.addWidget(self.save_button)
         header.addWidget(self.discard_button)
         header.addWidget(self.reset_button)
         body = QHBoxLayout()
-        body.addLayout(tools)
+        body.addWidget(library_panel)
         body.addWidget(self.canvas, 1)
         side = QWidget()
         side.setObjectName("planner-properties")
@@ -230,28 +244,109 @@ class PlannerPage(QWidget):
     def reset(self) -> None:
         if self._lane_count < 1:
             return
-        self._plan = reset_plan(self._plan)
-        self._dirty = True
-        self._draw()
+        self._commit(reset_plan(self._plan))
         self.status.show_info(self._translator.translate("planner.reset_done"))
 
     def delete_selected(self) -> None:
-        selected = self.canvas.selected_id()
-        if selected is None:
+        selected = set(self.canvas.selected_ids())
+        if not selected:
             return
-        if any(piece.id == selected for piece in self._plan.pieces):
-            self._plan = remove_piece(self._plan, selected)
-        elif any(instance.id == selected for instance in self._plan.instances):
-            self._plan = remove_instance(self._plan, selected)
-        else:
-            self._plan = remove_marker(self._plan, selected)
+        plan = self._plan
+        for piece in self._plan.pieces:
+            if piece.id in selected:
+                plan = remove_piece(plan, piece.id)
+        for instance in self._plan.instances:
+            if instance.id in selected:
+                plan = remove_instance(plan, instance.id)
+        for marker in plan.markers:
+            if marker.id in selected:
+                plan = remove_marker(plan, marker.id)
+        self._commit(plan)
+
+    def undo(self) -> None:
+        if not self._history:
+            return
+        selected = set(self.canvas.selected_ids())
+        self._plan = self._history.pop()
         self._dirty = True
-        self._draw()
+        self.undo_button.setEnabled(bool(self._history))
+        known = {piece.id for piece in self._plan.pieces}
+        known.update(instance.id for instance in self._plan.instances)
+        known.update(marker.id for marker in self._plan.markers)
+        self._draw(selected & known)
+
+    def copy_selection(self) -> None:
+        selected = set(self.canvas.selected_ids())
+        self._clipboard = tuple(
+            instance for instance in self._plan.instances if instance.id in selected
+        )
+
+    def paste_selection(self) -> None:
+        if not self._clipboard or self._lane_count < 1:
+            return
+        shift = max(self._plan.grid_mm * 4, 80.0)
+        plan, created = duplicate_instances(
+            self._plan, [instance.id for instance in self._clipboard], shift, shift
+        )
+        if not created:
+            return
+        self._clipboard = tuple(
+            instance for instance in plan.instances if instance.id in set(created)
+        )
+        self._commit(plan, set(created))
 
     def showEvent(self, event: object) -> None:  # noqa: N802
         super().showEvent(event)  # type: ignore[arg-type]
+        self._attach_keys()
         if not self._dirty:
             self._refresh_tracks()
+
+    def hideEvent(self, event: object) -> None:  # noqa: N802
+        self._detach_keys()
+        super().hideEvent(event)  # type: ignore[arg-type]
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self.isVisible()
+            and isinstance(event, QKeyEvent)
+            and isinstance(watched, QWidget)
+            and (watched is self or self.isAncestorOf(watched))
+            and self._handle_planner_key(event)
+        ):
+            return True
+        return super().eventFilter(watched, event)
+
+    def _attach_keys(self) -> None:
+        app = QApplication.instance()
+        if app is None or self._keys_attached:
+            return
+        app.installEventFilter(self)
+        self._keys_attached = True
+
+    def _detach_keys(self) -> None:
+        app = QApplication.instance()
+        if app is not None and self._keys_attached:
+            app.removeEventFilter(self)
+        self._keys_attached = False
+
+    def _handle_planner_key(self, event: QKeyEvent) -> bool:
+        """Delete, undo, copy and paste while the planner is the visible page."""
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        key = event.key()
+        if key == Qt.Key.Key_Delete and not ctrl:
+            self.delete_selected()
+            return True
+        if ctrl and key == Qt.Key.Key_Z:
+            self.undo()
+            return True
+        if ctrl and key == Qt.Key.Key_C:
+            self.copy_selection()
+            return True
+        if ctrl and key == Qt.Key.Key_V:
+            self.paste_selection()
+            return True
+        return False
 
     def _tool(self, object_name: str, key: str, slot: Callable[[], None]) -> QPushButton:
         button = QPushButton(self._translator.translate(key))
@@ -310,6 +405,8 @@ class PlannerPage(QWidget):
             self._plan = empty_plan(track_id)
         self._lane_count = track.lane_count
         self._dirty = False
+        self._history.clear()
+        self.undo_button.setEnabled(False)
         self._load_parts()
         self._show_grid()
         self.lanes.setText(self._translator.format("planner.lanes", count=track.lane_count))
@@ -335,17 +432,16 @@ class PlannerPage(QWidget):
         if self._lane_count < 1:
             return
         origin = next_origin(self._plan, piece_type)
-        self._plan = add_piece(self._plan, piece_type, origin[0], origin[1])
-        self._dirty = True
-        self._draw(self._plan.pieces[-1].id)
+        updated = add_piece(self._plan, piece_type, origin[0], origin[1])
+        created = updated.pieces[-1].id if updated.pieces else None
+        self._commit(updated, created)
 
     def _add_start(self) -> None:
         if self._lane_count < 1:
             return
         current = self._plan.start_finish()
         if current is None:
-            self._plan = place_start_finish(self._plan, 0, 0)
-            self._dirty = True
+            self._commit(place_start_finish(self._plan, 0, 0))
         selected = self._plan.start_finish()
         self._draw(None if selected is None else selected.id)
 
@@ -353,17 +449,18 @@ class PlannerPage(QWidget):
         if self._lane_count < 1:
             return
         direction = COUNTERCLOCKWISE if self._plan.direction == CLOCKWISE else CLOCKWISE
-        self._plan = set_direction(self._plan, direction)
-        self._dirty = True
-        self._draw(self.canvas.selected_id())
+        self._commit(set_direction(self._plan, direction), self.canvas.selected_ids())
 
     def _moved(self, item_id: str, x: int, y: int) -> None:
-        if any(piece.id == item_id for piece in self._plan.pieces):
-            self._plan = move_piece(self._plan, item_id, x, y)
-        else:
-            self._plan = move_marker(self._plan, item_id, x, y)
-        self._dirty = True
-        self._show_selection()
+        try:
+            if any(piece.id == item_id for piece in self._plan.pieces):
+                updated = move_piece(self._plan, item_id, x, y)
+            else:
+                updated = move_marker(self._plan, item_id, x, y)
+        except ValidationError as error:
+            self._report(error)
+            return
+        self._commit(updated, item_id)
 
     def _position_changed(self) -> None:
         if self._filling:
@@ -376,16 +473,15 @@ class PlannerPage(QWidget):
         y = self.y_spin.value()
         try:
             if isinstance(selected, Piece):
-                self._plan = move_piece(self._plan, selected.id, x, y)
+                updated = move_piece(self._plan, selected.id, x, y)
             else:
-                self._plan = move_marker(self._plan, selected.id, x, y)
+                updated = move_marker(self._plan, selected.id, x, y)
         except ValidationError as error:
             self._plan = previous
             self._show_selection()
             self._report(error)
             return
-        self._dirty = True
-        self._draw(selected.id)
+        self._commit(updated, selected.id)
 
     def _rotation_changed(self) -> None:
         if self._filling:
@@ -396,9 +492,7 @@ class PlannerPage(QWidget):
         angle = self.rotation.currentData()
         if not isinstance(angle, int):
             return
-        self._plan = rotate_piece(self._plan, selected.id, angle)
-        self._dirty = True
-        self._draw(selected.id)
+        self._commit(rotate_piece(self._plan, selected.id, angle), selected.id)
 
     def _selected(self) -> Piece | Marker | PartInstance | None:
         selected = self.canvas.selected_id()
@@ -420,6 +514,18 @@ class PlannerPage(QWidget):
         self._filling = True
         if selected is None:
             self.selection_label.setText(self._translator.translate("planner.none"))
+            self.x_spin.setEnabled(False)
+            self.y_spin.setEnabled(False)
+            self.rotation.setEnabled(False)
+            self.rotation_free.setEnabled(False)
+            self.x_mm.setEnabled(False)
+            self.y_mm.setEnabled(False)
+        elif len(self.canvas.selected_ids()) > 1:
+            self.selection_label.setText(
+                self._translator.format(
+                    "planner.selection.many", count=len(self.canvas.selected_ids())
+                )
+            )
             self.x_spin.setEnabled(False)
             self.y_spin.setEnabled(False)
             self.rotation.setEnabled(False)
@@ -463,8 +569,9 @@ class PlannerPage(QWidget):
         )
         self.direction_button.setText(self._translator.translate(key))
 
-    def _draw(self, selected: str | None = None) -> None:
-        self.canvas.show_plan(self._plan, max(self._lane_count, 1), selected, self._parts)
+    def _draw(self, selected: str | set[str] | list[str] | None = None) -> None:
+        chosen = set(selected) if isinstance(selected, list) else selected
+        self.canvas.show_plan(self._plan, max(self._lane_count, 1), chosen, self._parts)
         self._show_selection()
 
     def _set_enabled(self, enabled: bool) -> None:
@@ -488,12 +595,7 @@ class PlannerPage(QWidget):
         records = self._planner.list_parts()
         self._parts = {record.id: record.spec for record in records}
         current = self.library.currentRow()
-        self.library.clear()
-        for record in records:
-            self.library.addItem(f"{record.spec.name} ({record.spec.article_number})")
-            item = self.library.item(self.library.count() - 1)
-            if item is not None:
-                item.setData(Qt.ItemDataRole.UserRole, record.id)
+        self.library.set_records(records, self._translator)
         if self.library.count():
             self.library.setCurrentRow(0 if current < 0 else min(current, self.library.count() - 1))
 
@@ -524,14 +626,14 @@ class PlannerPage(QWidget):
             origin_x = last.x_mm + gap
             origin_y = last.y_mm
         try:
-            self._plan = place_instance(
+            updated = place_instance(
                 self._plan, part_id, spec, origin_x, origin_y, 0.0, self._parts
             )
         except Exception as error:
             self._report(error)
             return
-        self._dirty = True
-        self._draw(self._plan.instances[-1].id)
+        created = updated.instances[-1].id if updated.instances else None
+        self._commit(updated, created)
 
     def _add_part(self) -> None:
         dialog = PartDialog(self._translator, self._planner)
@@ -539,14 +641,47 @@ class PlannerPage(QWidget):
             self._load_parts()
             self._draw(self.canvas.selected_id())
 
-    def _moved_instance(self, item_id: str, x_mm: float, y_mm: float) -> None:
+    def _dropped(self, part_id: int, x_mm: float, y_mm: float) -> None:
+        if self._lane_count < 1:
+            return
+        spec = self._parts.get(part_id)
+        if spec is None:
+            return
         try:
-            self._plan = reposition_instance(self._plan, item_id, x_mm, y_mm, self._parts)
+            updated = place_instance(self._plan, part_id, spec, x_mm, y_mm, 0.0, self._parts)
         except Exception as error:
             self._report(error)
             return
-        self._dirty = True
-        self._draw(item_id)
+        created = updated.instances[-1].id if updated.instances else None
+        self._commit(updated, created)
+
+    def _moved_group(self, anchor: str, moves: list[tuple[str, float, float]]) -> None:
+        raw = {item_id: (x_mm, y_mm) for item_id, x_mm, y_mm in moves}
+        if anchor not in raw:
+            return
+        try:
+            snapped = reposition_instance(
+                self._plan, anchor, raw[anchor][0], raw[anchor][1], self._parts
+            )
+        except Exception as error:
+            self._report(error)
+            self._draw(set(raw))
+            return
+        anchor_pose = next(instance for instance in snapped.instances if instance.id == anchor)
+        dx = anchor_pose.x_mm - raw[anchor][0]
+        dy = anchor_pose.y_mm - raw[anchor][1]
+        plan = snapped
+        for item_id, (x_mm, y_mm) in raw.items():
+            if item_id == anchor:
+                continue
+            plan = move_instance(plan, item_id, x_mm + dx, y_mm + dy)
+        self._commit(plan, set(raw))
+
+    def _rotated(self, ids: list[str], center_x: float, center_y: float, delta: float) -> None:
+        self._commit(
+            rotate_instances_around(self._plan, ids, center_x, center_y, delta),
+            set(ids),
+        )
 
     def _millimetre_changed(self) -> None:
         if self._filling:
@@ -555,15 +690,14 @@ class PlannerPage(QWidget):
         if not isinstance(selected, PartInstance):
             return
         try:
-            self._plan = reposition_instance(
+            updated = reposition_instance(
                 self._plan, selected.id, self.x_mm.value(), self.y_mm.value(), self._parts
             )
         except Exception as error:
             self._report(error)
             self._show_selection()
             return
-        self._dirty = True
-        self._draw(selected.id)
+        self._commit(updated, selected.id)
 
     def _free_rotation_changed(self) -> None:
         if self._filling:
@@ -571,21 +705,35 @@ class PlannerPage(QWidget):
         selected = self._selected()
         if not isinstance(selected, PartInstance):
             return
-        self._plan = rotate_instance(self._plan, selected.id, self.rotation_free.value())
-        self._dirty = True
-        self._draw(selected.id)
+        self._commit(
+            rotate_instance(self._plan, selected.id, self.rotation_free.value()), selected.id
+        )
 
     def _grid_changed(self) -> None:
         if self._filling or self._lane_count < 1:
             return
-        self._plan = set_plan_grid(
-            self._plan,
-            enabled=self.grid.isChecked(),
-            grid_mm=float(self.grid_size.value()),
-            snap_mm=float(self.snap_distance.value()),
+        self._commit(
+            set_plan_grid(
+                self._plan,
+                enabled=self.grid.isChecked(),
+                grid_mm=float(self.grid_size.value()),
+                snap_mm=float(self.snap_distance.value()),
+            ),
+            self.canvas.selected_ids(),
         )
+
+    def _commit(self, plan: TrackPlan, selected: str | set[str] | list[str] | None = None) -> None:
+        if plan == self._plan:
+            if selected is not None:
+                self._draw(selected)
+            return
+        self._history.append(self._plan)
+        if len(self._history) > 50:
+            self._history.pop(0)
+        self._plan = plan
         self._dirty = True
-        self._draw(self.canvas.selected_id())
+        self.undo_button.setEnabled(True)
+        self._draw(selected)
 
     def _report(self, error: Exception) -> None:
         self.status.show_error(describe_error(self._translator, error))
