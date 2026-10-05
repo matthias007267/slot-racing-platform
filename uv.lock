@@ -827,6 +827,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pydantic" },
     { name = "pyside6" },
@@ -845,6 +846,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pyside6", specifier = ">=6.7" },

@@ -2,8 +2,8 @@
 
 Run it with ``pytest -m camera_hardware``. Without a camera the test is skipped.
 It uses the production capture device, the saved configuration and the race
-engine. A black reference frame makes the first lit picture a crossing, so the
-camera has to see a lit scene. No particular camera model is required.
+engine. A car has to travel through the zone in the configured direction; a
+single lit frame is not a crossing. No particular camera model is required.
 """
 
 from __future__ import annotations

@@ -19,7 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from slot_racing.modules.timing_camera._checks import require_position_id, require_range
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
-from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
+from slot_racing.modules.timing_camera.detection import (
+    DetectionZone,
+    DetectorSettings,
+    TravelDirection,
+)
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 
 SCHEMA_VERSION = 1
@@ -81,11 +85,18 @@ class StoredDetectionZone(BaseModel):
 
 
 class StoredDetection(BaseModel):
-    """The zones the camera currently watches. Empty until someone configures them."""
+    """The zones the camera currently watches. Empty until someone configures them.
+
+    ``block_size``, ``sensitivity`` and ``direction`` belong to the detection,
+    not to a single zone. Older documents omit them and keep the defaults.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     zones: tuple[StoredDetectionZone, ...] = ()
+    block_size: int = 20
+    sensitivity: int = 50
+    direction: TravelDirection = TravelDirection.LEFT_TO_RIGHT
 
     @field_validator("zones", mode="before")
     @classmethod
@@ -93,6 +104,36 @@ class StoredDetection(BaseModel):
         if isinstance(value, list):
             return tuple(value)
         return value
+
+    @field_validator("block_size", mode="before")
+    @classmethod
+    def _block_size(cls, value: object) -> int:
+        try:
+            size = require_range("block_size", value, 1, 128)
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+        return size
+
+    @field_validator("sensitivity", mode="before")
+    @classmethod
+    def _sensitivity(cls, value: object) -> int:
+        try:
+            level = require_range("sensitivity", value, 0, 100)
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+        return level
+
+    @field_validator("direction", mode="before")
+    @classmethod
+    def _direction(cls, value: object) -> object:
+        if isinstance(value, TravelDirection):
+            return value
+        if isinstance(value, str):
+            try:
+                return TravelDirection(value)
+            except ValueError as error:
+                raise ValueError("direction must be a travel direction") from error
+        raise ValueError("direction must be a travel direction")
 
     @model_validator(mode="after")
     def _unique(self) -> StoredDetection:
@@ -168,6 +209,7 @@ def to_detector_settings(configuration: CameraConfiguration) -> DetectorSettings
         return None
     width = configuration.camera.width
     height = configuration.camera.height
+    detection = configuration.detection
     return DetectorSettings(
         tuple(
             DetectionZone(
@@ -176,7 +218,10 @@ def to_detector_settings(configuration: CameraConfiguration) -> DetectorSettings
                 roi_to_pixels(zone.roi, width, height),
             )
             for zone in zones
-        )
+        ),
+        block_size=detection.block_size,
+        sensitivity=detection.sensitivity,
+        direction=detection.direction,
     )
 
 
@@ -238,8 +283,10 @@ def scale_detector_settings(
         )
     return DetectorSettings(
         tuple(zones),
-        threshold=settings.threshold,
-        min_foreground_pixels=settings.min_foreground_pixels,
+        block_size=settings.block_size,
+        sensitivity=settings.sensitivity,
+        direction=settings.direction,
+        debug=settings.debug,
     )
 
 

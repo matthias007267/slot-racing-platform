@@ -75,10 +75,15 @@ def car(lane: int, x: int) -> GrayFrame:
     return blank().paint(DetectionRoi(x, y, 8, 6), 255)
 
 
-def with_cars(frame: GrayFrame, lanes: dict[int, int]) -> GrayFrame:
+def column(lane: int, x: int) -> GrayFrame:
+    """One tile column. The zone starts at ``x`` and the car leaves at ``x + 2``."""
+    return blank().paint(DetectionRoi(x, (lane - 1) * 10, 2, 10), 255)
+
+
+def columns(lanes: dict[int, int]) -> GrayFrame:
+    frame = blank()
     for lane, x in lanes.items():
-        y = (lane - 1) * 10 + 2
-        frame = frame.paint(DetectionRoi(x, y, 8, 6), 255)
+        frame = frame.paint(DetectionRoi(x, (lane - 1) * 10, 2, 10), 255)
     return frame
 
 
@@ -235,7 +240,8 @@ def test_a_crossing_becomes_one_sensor_event() -> None:
     source.poll()
     assert received == []
 
-    frames.submit(car(1, x=28), 2_000)
+    frames.submit(column(1, 30), 1_500)
+    frames.submit(column(1, 32), 2_000)
     source.poll()
     assert received == [
         SensorTriggered(
@@ -246,7 +252,7 @@ def test_a_crossing_becomes_one_sensor_event() -> None:
             lane=1,
         )
     ]
-    frames.submit(car(1, x=28), 3_000)
+    frames.submit(column(1, 32), 3_000)
     source.poll()
     assert len(received) == 1
 
@@ -258,7 +264,8 @@ def test_one_frame_with_two_lanes_emits_two_ordered_events() -> None:
         DetectionZone("start_finish", 1, lane_roi(1)),
     )
     source, frames, received = running(session, settings)
-    frames.submit(with_cars(blank(), {1: 28, 3: 28}), 123_456_789)
+    frames.submit(columns({1: 30, 3: 30}), 123_456_789)
+    frames.submit(columns({1: 32, 3: 32}), 123_456_789)
     source.poll()
     reported = [
         (event.lane, event.timestamp_ns, event.sensor_id, event.position_id) for event in received
@@ -280,8 +287,8 @@ def test_each_position_uses_the_sensor_from_the_setup() -> None:
         DetectionZone("start_finish", 1, lane_roi(1)),
     )
     source, frames, received = running(session, settings)
-    frame = with_cars(blank(), {1: 28}).paint(DetectionRoi(48, 2, 8, 6), 255)
-    frames.submit(frame, 5_000)
+    frames.submit(columns({1: 30}).paint(DetectionRoi(50, 0, 2, 10), 255), 4_000)
+    frames.submit(columns({1: 32}).paint(DetectionRoi(52, 0, 2, 10), 255), 5_000)
     source.poll()
     reported = [
         (event.position_id, event.sensor_id, event.lane, event.timestamp_ns) for event in received
@@ -329,12 +336,13 @@ def test_pause_suppresses_frames_and_resume_accepts_the_next_one() -> None:
     source, frames, received = running(
         session, monitored(DetectionZone("start_finish", 1, lane_roi(1)))
     )
-    frames.submit(car(1, x=28), 100)
+    frames.submit(column(1, 30), 50)
+    frames.submit(column(1, 32), 100)
     source.pause()
     source.poll()
     assert received == []
 
-    frames.submit(car(1, x=28), 200)
+    frames.submit(column(1, 32), 200)
     source.poll()
     assert received == []
 
@@ -344,7 +352,8 @@ def test_pause_suppresses_frames_and_resume_accepts_the_next_one() -> None:
 
     frames.submit(blank(), 250)
     source.poll()
-    frames.submit(car(1, x=28), 300)
+    frames.submit(column(1, 30), 280)
+    frames.submit(column(1, 32), 300)
     source.poll()
     assert [event.timestamp_ns for event in received] == [100, 300]
 
@@ -384,7 +393,8 @@ def test_a_synthetic_crossing_completes_a_lap_in_the_race_engine() -> None:
     engine.poll_sources()
     assert not any(isinstance(event, LapCompleted) for event in events)
 
-    frames.submit(car(1, x=28), 1_000_000_000)
+    frames.submit(column(1, 30), 900_000_000)
+    frames.submit(column(1, 32), 1_000_000_000)
     engine.poll_sources()
 
     triggered = [event for event in events if isinstance(event, SensorTriggered)]

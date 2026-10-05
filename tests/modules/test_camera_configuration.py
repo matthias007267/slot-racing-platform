@@ -22,8 +22,14 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredDetectionZone,
     pixels_to_roi,
     roi_to_pixels,
+    scale_detector_settings,
     to_camera_config,
     to_detector_settings,
+)
+from slot_racing.modules.timing_camera.detection import (
+    DetectionZone,
+    DetectorSettings,
+    TravelDirection,
 )
 from slot_racing.modules.timing_camera.frame_source import ManualFrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
@@ -170,6 +176,43 @@ def test_invalid_values_are_rejected() -> None:
         )
     with pytest.raises(ValidationError):
         CameraConfiguration(version=2)
+    with pytest.raises(ValidationError):
+        StoredDetection(block_size=0)
+    with pytest.raises(ValidationError):
+        StoredDetection(sensitivity=101)
+    with pytest.raises(ValidationError):
+        StoredDetection(direction="sideways")
+
+
+def test_an_older_document_gains_direction_and_sensitivity() -> None:
+    payload = sample().model_dump(mode="json")
+    detection = payload["detection"]
+    assert isinstance(detection, dict)
+    del detection["block_size"]
+    del detection["sensitivity"]
+    del detection["direction"]
+    loaded = CameraConfiguration.model_validate(payload)
+    assert loaded.detection.block_size == 20
+    assert loaded.detection.sensitivity == 50
+    assert loaded.detection.direction is TravelDirection.LEFT_TO_RIGHT
+    assert loaded.detection.zones == sample().detection.zones
+
+
+def test_scaling_keeps_sensitivity_direction_and_block_size() -> None:
+    settings = DetectorSettings(
+        (DetectionZone("start_finish", 1, DetectionRoi(10, 10, 20, 20)),),
+        block_size=12,
+        sensitivity=80,
+        direction=TravelDirection.BOTTOM_TO_TOP,
+        debug=True,
+    )
+    scaled = scale_detector_settings(settings, 100, 100, 200, 200)
+    assert scaled.block_size == 12
+    assert scaled.sensitivity == 80
+    assert scaled.direction is TravelDirection.BOTTOM_TO_TOP
+    assert scaled.debug is True
+    assert scaled.zones[0].roi == DetectionRoi(20, 20, 40, 40)
+    assert scale_detector_settings(settings, 100, 100, 100, 100) is settings
 
 
 def test_a_broken_document_is_reported_and_does_not_crash() -> None:
@@ -202,6 +245,9 @@ def test_normalized_zones_become_the_same_pixels_every_time() -> None:
 
     settings = to_detector_settings(sample())
     assert settings is not None
+    assert settings.block_size == 20
+    assert settings.sensitivity == 50
+    assert settings.direction is TravelDirection.LEFT_TO_RIGHT
     assert [(item.position_id, item.lane, item.roi) for item in settings.zones] == [
         ("sector_1", 1, DetectionRoi(20, 20, 10, 10)),
         ("start_finish", 2, DetectionRoi(20, 0, 10, 10)),
@@ -253,9 +299,11 @@ def test_the_factory_uses_the_saved_zones_for_every_track() -> None:
     guard.closed = True
     received: list[SensorTriggered] = []
     first.start(received.append)
-    frames.submit(_car(2), 1_000)
+    frames.submit(_half(20, 0, left=True), 900)
+    frames.submit(_half(20, 0, left=False), 1_000)
     first.poll()
-    frames.submit(_car(22), 2_000)
+    frames.submit(_half(20, 20, left=True), 1_900)
+    frames.submit(_half(20, 20, left=False), 2_000)
     second.start(received.append)
     second.poll()
     assert [(event.position_id, event.lane, event.timestamp_ns) for event in received] == [
@@ -303,8 +351,9 @@ def _blank() -> GrayFrame:
     return GrayFrame.blank(WIDTH, HEIGHT)
 
 
-def _car(y: int) -> GrayFrame:
-    return _blank().paint(DetectionRoi(22, y, 8, 6), 255)
+def _half(x: int, y: int, *, left: bool) -> GrayFrame:
+    origin = x if left else x + 5
+    return _blank().paint(DetectionRoi(origin, y, 5, 10), 255)
 
 
 def _session() -> TimingSessionSpec:

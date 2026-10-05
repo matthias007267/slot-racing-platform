@@ -66,6 +66,11 @@ def car(lane: int, x: int = 28) -> GrayFrame:
     return blank().paint(DetectionRoi(x, y, 8, 6), 255)
 
 
+def column(lane: int, x: int) -> GrayFrame:
+    """One tile column of the 4-pixel zone. A pass is x, then x + 2."""
+    return blank().paint(DetectionRoi(x, (lane - 1) * 10, 2, 10), 255)
+
+
 def session() -> TimingSessionSpec:
     setup = TimingSetup(
         TimingLayout.from_position_ids(["start_finish"]),
@@ -212,8 +217,9 @@ def test_grabbed_frames_keep_their_timestamp_until_poll() -> None:
     source, frames, received = started(capture)
     try:
         before = time.perf_counter_ns()
-        capture.push(car(1))
-        wait_for(lambda: frames.queued == 1)
+        capture.push(column(1, 30))
+        capture.push(column(1, 32))
+        wait_for(lambda: frames.queued == 2)
         time.sleep(0.03)
         polled_at = time.perf_counter_ns()
         assert received == []
@@ -233,10 +239,12 @@ def test_frames_are_processed_in_grab_order() -> None:
     capture = ScriptedCapture()
     source, frames, received = started(capture, zones(1, 3), queue_size=4)
     try:
-        capture.push(car(1))
-        capture.push(car(3))
-        capture.wait_until_reads(2)
-        wait_for(lambda: frames.queued == 2)
+        capture.push(column(1, 30))
+        capture.push(column(1, 32))
+        capture.push(column(3, 30))
+        capture.push(column(3, 32))
+        capture.wait_until_reads(4)
+        wait_for(lambda: frames.queued == 4)
         source.poll()
         assert [event.lane for event in received] == [1, 3]
         assert received[0].timestamp_ns < received[1].timestamp_ns
@@ -313,8 +321,9 @@ def test_pause_frames_are_not_counted_after_resume() -> None:
         source.poll()
         assert received == []
 
-        capture.push(car(1))
-        capture.wait_until_reads(3)
+        capture.push(column(1, 30))
+        capture.push(column(1, 32))
+        capture.wait_until_reads(4)
         source.poll()
         assert [event.lane for event in received] == [1]
     finally:
@@ -325,23 +334,24 @@ def test_a_car_already_in_the_zone_after_resume_is_not_a_new_crossing() -> None:
     capture = ScriptedCapture()
     source, _frames, received = started(capture)
     try:
-        capture.push(car(1))
-        capture.wait_until_reads(1)
+        capture.push(column(1, 30))
+        capture.push(column(1, 32))
+        capture.wait_until_reads(2)
         source.poll()
         assert len(received) == 1
 
         source.pause()
         capture.push(car(1))
-        capture.wait_until_reads(2)
+        capture.wait_until_reads(3)
         source.poll()
         assert len(received) == 1
 
         source.resume()
         capture.push(car(1))
-        capture.wait_until_reads(3)
+        capture.wait_until_reads(4)
         source.poll()
         capture.push(car(1))
-        capture.wait_until_reads(4)
+        capture.wait_until_reads(5)
         source.poll()
         assert len(received) == 1
     finally:
@@ -398,7 +408,8 @@ def test_capture_frames_complete_a_lap_through_the_race_engine() -> None:
     )
     engine.start()
     try:
-        capture.push(car(1))
+        capture.push(column(1, 30))
+        capture.push(column(1, 32))
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline and not any(
             isinstance(event, LapCompleted) for event in events
@@ -626,13 +637,18 @@ def test_regions_are_taken_from_the_delivered_frame() -> None:
         assert armed == (DetectionRoi(20, 5, 10, 5),)
         detector = source._detector
         assert detector is not None
-        assert detector.reference_pixels == 50
+        assert detector.reference_pixels == 2
         assert detector.reference_pixels < 50 * 25
         assert detector.pixels_compared == 0
-        frames.submit(GrayFrame(1, 1, b"\x00"), 2, crops=(GrayFrame.blank(10, 5, 255),))
+        left = GrayFrame.blank(10, 5).paint(DetectionRoi(0, 0, 5, 5), 255)
+        right = GrayFrame.blank(10, 5).paint(DetectionRoi(5, 0, 5, 5), 255)
+        frames.submit(GrayFrame(1, 1, b"\x00"), 2, crops=(left,))
+        source.poll()
+        assert received == []
+        frames.submit(GrayFrame(1, 1, b"\x00"), 3, crops=(right,))
         source.poll()
         assert [(event.position_id, event.lane) for event in received] == [("start_finish", 1)]
-        assert detector.pixels_compared == 50
+        assert detector.pixels_compared == 4
     finally:
         source.stop()
     assert source._detector is None
