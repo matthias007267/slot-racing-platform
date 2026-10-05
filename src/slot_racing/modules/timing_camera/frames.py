@@ -19,17 +19,27 @@ class GrayFrame:
 
     width: int
     height: int
-    pixels: tuple[int, ...]
+    pixels: tuple[int, ...] | bytes
 
     def __post_init__(self) -> None:
         width = require_range("width", self.width, 1)
         height = require_range("height", self.height, 1)
+        if isinstance(self.pixels, bytes):
+            if len(self.pixels) != width * height:
+                raise ValueError("pixel count must equal width * height")
+            return
         if not isinstance(self.pixels, tuple):
-            raise TypeError("pixels must be a tuple")
+            raise TypeError("pixels must be a tuple or bytes")
         if len(self.pixels) != width * height:
             raise ValueError("pixel count must equal width * height")
         for pixel in self.pixels:
             require_range("pixel", pixel, 0, 255)
+
+    def to_bytes(self) -> bytes:
+        """Packed grayscale bytes. Camera frames already store this form."""
+        if isinstance(self.pixels, bytes):
+            return self.pixels
+        return bytes(self.pixels)
 
     @classmethod
     def blank(cls, width: int, height: int, value: int = 0) -> GrayFrame:

@@ -28,7 +28,7 @@ from slot_racing.modules.timing_camera.store import (
     CameraConfigurationError,
     CameraConfigurationStore,
 )
-from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+from slot_racing.modules.timing_camera.ui.page import CameraSetupPage, zone_limit
 from slot_racing.modules.timing_camera.ui.stage import CameraStage
 from tests.modules.test_camera_configuration import database
 
@@ -52,6 +52,9 @@ class FakeFrames(FrameSource):
         if not self.running:
             return None
         return TimedFrame(self.frame, 1)
+
+    def poll_latest(self) -> TimedFrame | None:
+        return self.poll_frame()
 
 
 class FakeOpener:
@@ -114,9 +117,11 @@ def open_page(
     qtbot: QtBot,
     store: CameraConfigurationStore | RejectingStore,
     opener: FakeOpener | None = None,
+    lane_limit: int | None = None,
 ) -> tuple[CameraSetupPage, FakeOpener]:
     preview = opener if opener is not None else FakeOpener()
-    page = CameraSetupPage(translator(), store, preview)
+    limit = None if lane_limit is None else (lambda: lane_limit)
+    page = CameraSetupPage(translator(), store, preview, lane_limit=limit)
     page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     page.stage.setFixedSize(*FRAME)
     page.show()
@@ -141,7 +146,6 @@ def pixels(page: CameraSetupPage, index: int = 0) -> DetectionRoi:
 
 def draw_sample(qtbot: QtBot, page: CameraSetupPage) -> None:
     page.add_zone.click()
-    drag(qtbot, page.stage, 64, 120, 192, 168)
 
 
 def test_the_saved_configuration_and_its_zones_are_shown(qtbot: QtBot) -> None:
@@ -160,42 +164,47 @@ def test_the_saved_configuration_and_its_zones_are_shown(qtbot: QtBot) -> None:
     assert page.zones.item(0) is not None
     assert page.zones.item(0).text() == "Zone 1: start_finish – Lane 2"  # noqa: RUF001
     assert page.position.text() == "start_finish"
-    assert page.lane.value() == 2
 
 
-def test_a_drawn_zone_is_stored_as_normalized_coordinates(qtbot: QtBot) -> None:
+def test_adding_a_zone_assigns_the_next_lane_and_a_draggable_rectangle(qtbot: QtBot) -> None:
     page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
     draw_sample(qtbot, page)
     roi = page.stage.zones()[0]
-    assert roi.x == pytest.approx(0.1)
-    assert roi.y == pytest.approx(0.25)
-    assert roi.width == pytest.approx(0.2)
-    assert roi.height == pytest.approx(0.1)
-    assert page.position.text() == ""
+    assert 0 < roi.width < 1
+    assert 0 < roi.height < 1
+    assert page.position.text() == "start_finish"
     assert page.zones.item(0) is not None
-    assert "Neue Zone" in page.zones.item(0).text()
+    assert page.zones.item(0).text() == "Zone 1: start_finish – Lane 1"  # noqa: RUF001
     assert "Änderungen nicht gespeichert" in page.message.text()
 
 
-def test_a_zone_that_is_too_small_to_draw_is_rejected(qtbot: QtBot) -> None:
-    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+def test_a_zone_past_the_lane_count_is_rejected(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()), lane_limit=2)
     page.add_zone.click()
-    drag(qtbot, page.stage, 10, 10, 14, 14)
-    assert page.stage.zones() == ()
-    assert "zu klein" in page.message.text()
+    page.add_zone.click()
+    assert len(page.stage.zones()) == 2
+    page.add_zone.click()
+    assert len(page.stage.zones()) == 2
+    assert "keine weiteren Zonen" in page.message.text()
 
 
 def test_a_zone_can_be_moved_and_stays_inside_the_picture(qtbot: QtBot) -> None:
     page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
     draw_sample(qtbot, page)
-    drag(qtbot, page.stage, 128, 144, 160, 160)
+    origin = pixels(page)
+    center_x = origin.x + origin.width // 2
+    center_y = origin.y + origin.height // 2
+    drag(qtbot, page.stage, center_x, center_y, center_x + 32, center_y + 16)
     moved = pixels(page)
-    assert moved == DetectionRoi(96, 136, 128, 48)
-    drag(qtbot, page.stage, moved.x + 64, moved.y + 24, 0, moved.y + 24)
+    assert moved.x == origin.x + 32
+    assert moved.y == origin.y + 16
+    assert moved.width == origin.width
+    assert moved.height == origin.height
+    drag(qtbot, page.stage, moved.x + moved.width // 2, moved.y + moved.height // 2, 0, moved.y)
     bounded = pixels(page)
     assert bounded.x == 0
-    assert bounded.width == 128
-    assert bounded.height == 48
+    assert bounded.width == origin.width
+    assert bounded.height == origin.height
     assert 0 <= bounded.y <= FRAME[1] - bounded.height
 
 
@@ -204,10 +213,19 @@ def test_a_zone_can_be_resized_down_to_the_minimum_and_not_past_the_picture(
 ) -> None:
     page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
     draw_sample(qtbot, page)
-    drag(qtbot, page.stage, 192, 168, 256, 200)
+    origin = pixels(page)
+    drag(
+        qtbot,
+        page.stage,
+        origin.x + origin.width,
+        origin.y + origin.height,
+        origin.x + origin.width + 40,
+        origin.y + origin.height + 24,
+    )
     grown = pixels(page)
-    assert grown == DetectionRoi(64, 120, 192, 80)
-    drag(qtbot, page.stage, 256, 200, 66, 122)
+    assert grown.width > origin.width
+    assert grown.height > origin.height
+    drag(qtbot, page.stage, grown.x + grown.width, grown.y + grown.height, grown.x + 2, grown.y + 2)
     shrunk = pixels(page)
     assert shrunk.width >= 8
     assert shrunk.height >= 8
@@ -220,13 +238,12 @@ def test_a_zone_can_be_resized_down_to_the_minimum_and_not_past_the_picture(
     assert inside.width >= 8 and inside.height >= 8
 
 
-def test_position_and_lane_can_be_assigned_without_a_track(qtbot: QtBot) -> None:
+def test_position_can_be_renamed_and_the_lane_stays_automatic(qtbot: QtBot) -> None:
     page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
     draw_sample(qtbot, page)
     page.position.setText("sector_1")
-    page.lane.setValue(3)
     assert page.zones.item(0) is not None
-    assert page.zones.item(0).text() == "Zone 1: sector_1 – Lane 3"  # noqa: RUF001
+    assert page.zones.item(0).text() == "Zone 1: sector_1 – Lane 1"  # noqa: RUF001
 
 
 def test_deleting_a_zone_is_kept_only_after_save(qtbot: QtBot) -> None:
@@ -247,8 +264,6 @@ def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
     stored = database()
     page, _opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
     draw_sample(qtbot, page)
-    page.position.setText("start_finish")
-    page.lane.setValue(1)
     page.device.setCurrentIndex(1)
     page.fps.setCurrentIndex(page.fps.findData(30))
     page.save.click()
@@ -261,14 +276,11 @@ def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
     zone = loaded.detection.zones[0]
     assert zone.position_id == "start_finish"
     assert zone.lane == 1
-    assert zone.roi.x == pytest.approx(0.1)
-    assert zone.roi.y == pytest.approx(0.25)
-    assert zone.roi.width == pytest.approx(0.2)
-    assert zone.roi.height == pytest.approx(0.1)
+    assert zone.roi == page.stage.zones()[0]
     again, _preview = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
     assert again.device.currentData() == 1
     assert again.position.text() == "start_finish"
-    assert pixels(again) == DetectionRoi(64, 120, 128, 48)
+    assert pixels(again) == roi_to_pixels(zone.roi, *FRAME)
 
 
 def test_cancel_restores_the_saved_configuration(qtbot: QtBot) -> None:
@@ -276,14 +288,13 @@ def test_cancel_restores_the_saved_configuration(qtbot: QtBot) -> None:
     CameraConfigurationStore(stored).save(saved_configuration())
     page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
     page.position.setText("sector_9")
-    page.lane.setValue(4)
     page.cancel.click()
     assert page.position.text() == "start_finish"
-    assert page.lane.value() == 2
     assert "Änderungen nicht gespeichert" not in page.message.text()
     fresh, _preview = open_page(qtbot, CameraConfigurationStore(stored))
     assert fresh.position.text() == "start_finish"
-    assert fresh.lane.value() == 2
+    assert fresh.zones.item(0) is not None
+    assert "Lane 2" in fresh.zones.item(0).text()
     assert pixels(fresh) == DetectionRoi(64, 120, 128, 48)
 
 
@@ -331,6 +342,7 @@ def test_an_incomplete_zone_is_not_saved(qtbot: QtBot) -> None:
     stored = database()
     page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
     draw_sample(qtbot, page)
+    page.position.clear()
     page.save.click()
     assert "Position" in page.message.text()
     assert CameraConfigurationStore(stored).load().detection.zones == ()
@@ -340,11 +352,19 @@ def test_overlapping_zones_can_be_saved(qtbot: QtBot) -> None:
     stored = database()
     page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
     draw_sample(qtbot, page)
-    page.position.setText("start_finish")
     page.add_zone.click()
-    drag(qtbot, page.stage, 80, 130, 210, 190)
+    page.zones.setCurrentRow(1)
+    first_box = pixels(page, 0)
+    second_box = pixels(page, 1)
+    drag(
+        qtbot,
+        page.stage,
+        second_box.x + second_box.width // 2,
+        second_box.y + second_box.height // 2,
+        first_box.x + first_box.width // 2,
+        first_box.y + first_box.height // 2,
+    )
     page.position.setText("sector_1")
-    page.lane.setValue(2)
     page.save.click()
     loaded = CameraConfigurationStore(stored).load()
     assert len(loaded.detection.zones) == 2
@@ -387,21 +407,47 @@ def test_leaving_the_page_stops_the_preview_and_returning_opens_it_again(qtbot: 
     assert len(opener.sources) == 2
     assert opener.sources[1].running
     assert len(page.stage.zones()) == 1
-    assert page.position.text() == ""
+    assert page.position.text() == "start_finish"
 
 
-def test_duplicate_position_and_lane_are_rejected_by_the_existing_rules(qtbot: QtBot) -> None:
+def test_zones_follow_the_track_lane_count_and_keep_a_saved_lane(qtbot: QtBot) -> None:
     stored = database()
-    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
-    draw_sample(qtbot, page)
-    page.position.setText("start_finish")
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored), lane_limit=4)
+    assert page.zones.item(0) is not None
+    assert "Lane 2" in page.zones.item(0).text()
+    saved_roi = page.stage.zones()[0]
     page.add_zone.click()
-    drag(qtbot, page.stage, 300, 40, 420, 100)
-    page.position.setText("start_finish")
-    page.lane.setValue(1)
-    page.save.click()
-    assert "ungültig" in page.message.text()
-    assert CameraConfigurationStore(stored).load().detection.zones == ()
+    page.add_zone.click()
+    page.add_zone.click()
+    assert [index + 1 for index in range(page.zones.count())]
+    labels = [page.zones.item(index).text() for index in range(page.zones.count())]
+    assert labels[0].endswith("Lane 2")
+    assert "Lane 1" in labels[1]
+    assert "Lane 3" in labels[2]
+    assert "Lane 4" in labels[3]
+    assert page.stage.zones()[0] == saved_roi
+    page.add_zone.click()
+    assert page.zones.count() == 4
+    assert "keine weiteren Zonen" in page.message.text()
+
+
+def test_zone_limit_follows_the_widest_track_and_never_exceeds_four() -> None:
+    assert zone_limit(()) == 2
+    assert zone_limit((2,)) == 2
+    assert zone_limit((2, 3)) == 3
+    assert zone_limit((4,)) == 4
+    assert zone_limit((6, 2)) == 4
+    assert zone_limit((1,)) == 2
+
+
+def test_a_three_lane_track_accepts_three_zones(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()), lane_limit=3)
+    for _ in range(3):
+        page.add_zone.click()
+    assert [text[-1] for text in (page.zones.item(i).text() for i in range(3))] == ["1", "2", "3"]
+    page.add_zone.click()
+    assert page.zones.count() == 3
 
 
 def test_image_points_round_trip_through_the_stage(qtbot: QtBot) -> None:

@@ -23,6 +23,9 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 MIN_ZONE_PX = 8
 _HANDLE_PX = 10
 _COLORS = ("#1565c0", "#2e7d32", "#ef6c00", "#6a1b9a", "#00838f")
+# The live picture is scaled down to this edge. Zone coordinates stay in the
+# full camera frame, so detection is unaffected.
+_PREVIEW_MAX_EDGE = 960
 
 
 class CameraStage(QLabel):
@@ -60,7 +63,15 @@ class CameraStage(QLabel):
 
     def set_frame(self, frame: GrayFrame) -> None:
         self._frame_size = (frame.width, frame.height)
-        self._image = _gray_image(frame)
+        image = _gray_image(frame)
+        if image.width() > _PREVIEW_MAX_EDGE or image.height() > _PREVIEW_MAX_EDGE:
+            image = image.scaled(
+                _PREVIEW_MAX_EDGE,
+                _PREVIEW_MAX_EDGE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        self._image = image
         self._render()
 
     def frame_size(self) -> tuple[int, int]:
@@ -353,7 +364,7 @@ def _gray_image(frame: GrayFrame) -> QImage:
     """
     image = QImage(frame.width, frame.height, QImage.Format.Format_Grayscale8)
     view = cast(memoryview, image.bits())
-    raw = bytes(frame.pixels)
+    raw = frame.to_bytes()
     stride = image.bytesPerLine()
     try:
         if stride == frame.width:

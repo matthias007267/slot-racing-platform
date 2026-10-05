@@ -644,7 +644,24 @@ def test_wizard_blocks_empty_steps(qtbot: QtBot, env: Env) -> None:
     assert wizard.step == NAME
 
 
+def test_the_wizard_blocks_a_race_when_no_drivers_exist(qtbot: QtBot, env: Env) -> None:
+    env.track("Heimbahn")
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Leer")
+    assert wizard.go_next()
+    assert wizard.go_next()
+    assert wizard.go_next()
+    assert wizard.step == PARTICIPANTS
+    assert not wizard.go_next()
+    assert wizard.step == PARTICIPANTS
+    assert "keine Fahrer angelegt" in wizard.status.text()
+
+
 def test_starting_without_participants_shows_the_reason(qtbot: QtBot, env: Env) -> None:
+    env.driver("Anna")
     race = env.races.create_race("Leer", env.track_id(), 2)
     _, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)

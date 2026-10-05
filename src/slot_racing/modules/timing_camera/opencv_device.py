@@ -36,6 +36,8 @@ class OpenCVCapture:
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self._config.width))
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self._config.height))
             capture.set(cv2.CAP_PROP_FPS, float(self._config.fps))
+            # One buffered picture. A deeper driver queue would hand us stale frames.
+            capture.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
             self.actual_width = _reported_size(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.actual_height = _reported_size(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.actual_fps = _reported_fps(capture.get(cv2.CAP_PROP_FPS))
@@ -111,5 +113,15 @@ def _as_gray_frame(cv2: Any, image: Any) -> GrayFrame:
     if int(getattr(image, "ndim", 0)) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     height, width = image.shape[:2]
-    pixels = tuple(int(value) for value in image.reshape(-1))
-    return GrayFrame(int(width), int(height), pixels)
+    return GrayFrame(int(width), int(height), _pixel_bytes(image))
+
+
+def _pixel_bytes(image: Any) -> bytes:
+    """Packed grayscale bytes without building one Python int per pixel."""
+    tobytes = getattr(image, "tobytes", None)
+    if callable(tobytes):
+        raw = tobytes()
+        if isinstance(raw, bytes):
+            return raw
+    flat = image.reshape(-1)
+    return bytes(int(value) & 0xFF for value in flat)

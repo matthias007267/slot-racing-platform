@@ -138,6 +138,8 @@ class CameraFrameSource(FrameSource):
         self._running = False
         self._error: BaseException | None = None
         self._error_lock = threading.Lock()
+        self._captured = 0
+        self._last_read_ns = 0
 
     @property
     def queued(self) -> int:
@@ -146,6 +148,16 @@ class CameraFrameSource(FrameSource):
     @property
     def dropped(self) -> int:
         return self._queue.dropped
+
+    @property
+    def captured(self) -> int:
+        """Frames read from the device since ``start``. Safe to sample for a later display."""
+        return self._captured
+
+    @property
+    def last_read_ns(self) -> int:
+        """How long the most recent ``read`` took, in nanoseconds. Zero before the first frame."""
+        return self._last_read_ns
 
     @property
     def is_capturing(self) -> bool:
@@ -161,6 +173,8 @@ class CameraFrameSource(FrameSource):
         with self._error_lock:
             self._error = None
         self._queue.clear()
+        self._captured = 0
+        self._last_read_ns = 0
         if self._lease is not None and not self._lease.try_acquire(self._lease_owner):
             raise CameraBusyError("camera is in use")
         self._holding_lease = self._lease is not None
@@ -231,7 +245,9 @@ class CameraFrameSource(FrameSource):
         failures = 0
         while not self._stop.is_set():
             try:
+                started = time.perf_counter_ns()
                 image = self._device.read()
+                self._last_read_ns = time.perf_counter_ns() - started
             except CameraClosedError:
                 return
             except Exception as error:
@@ -243,6 +259,7 @@ class CameraFrameSource(FrameSource):
                     return
                 continue
             failures = 0
+            self._captured += 1
             # The stamp belongs to the grab, not to a later poll.
             timestamp_ns = time.perf_counter_ns()
             if self._paused or (self._resume_ns is not None and timestamp_ns < self._resume_ns):

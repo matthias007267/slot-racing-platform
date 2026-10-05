@@ -315,6 +315,8 @@ class RaceService:
         race = self.require_race(race_id)
         if race.status not in _EDITABLE:
             raise ValidationError("error.race.not_startable", status=race.status.value)
+        if not self._drivers.list_drivers():
+            raise ValidationError("error.race.no_drivers")
         if not race.participants:
             raise ValidationError("error.race.no_participants")
         track = None if race.track_id is None else self._tracks.get_track(race.track_id)

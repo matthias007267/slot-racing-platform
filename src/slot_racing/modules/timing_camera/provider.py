@@ -8,6 +8,7 @@ taken from the session setup.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
@@ -48,6 +49,9 @@ DeviceFactory = Callable[[CameraConfig], CaptureDevice]
 
 PROVIDER_ID = "camera"
 _SOURCE_ID = "camera"
+# A start click checks availability more than once. Reopening the device each
+# time stalls the window and can make the following open fail.
+_PROBE_TTL_NS = 2_000_000_000
 
 
 class CameraTimingProvider(TimingSource):
@@ -222,6 +226,7 @@ class CameraTimingFactory(TimingSourceFactory):
         self._devices = devices
         self._configurations = configurations
         self._lease = lease
+        self._probe_cache: tuple[tuple[int, int, int, int], int, ProviderAvailability] | None = None
 
     @property
     def provider_id(self) -> str:
@@ -232,13 +237,31 @@ class CameraTimingFactory(TimingSourceFactory):
         return ProviderCapabilities(supports_multiple_lanes=True, supports_test_mode=False)
 
     def availability(self) -> ProviderAvailability:
-        """Probe the device, then close it. An injected frame source is not hardware."""
+        """Probe the device, then close it. An injected frame source is not hardware.
+
+        A successful probe is reused for a short moment so the race wizard and
+        the following start do not open and close the camera three times.
+        """
         if self._frames is not None:
             return ProviderAvailability.unavailable("error.timing_provider.camera_not_connected")
+        try:
+            camera = self._session_camera()
+        except ProviderConfigurationError as error:
+            return ProviderAvailability.unavailable(error.key)
+        key = (camera.device_index, camera.width, camera.height, camera.fps)
+        cached = self._probe_cache
+        now = time.monotonic_ns()
+        if cached is not None and cached[0] == key and now - cached[1] < _PROBE_TTL_NS:
+            return cached[2]
+        result = self._probe_open(camera)
+        self._probe_cache = (key, now, result) if result.available else None
+        return result
+
+    def _probe_open(self, camera: CameraConfig) -> ProviderAvailability:
         if self._lease is not None and self._lease.holder() is not None:
             return ProviderAvailability.unavailable("error.timing_provider.camera_in_use")
         try:
-            device = self._make_device(self._session_camera())
+            device = self._make_device(camera)
         except ProviderConfigurationError as error:
             return ProviderAvailability.unavailable(error.key)
         opened = False

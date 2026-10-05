@@ -181,7 +181,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.race.driver_duplicate": "Der Fahrer „{driver}“ nimmt bereits teil.",
         "error.race.participant_unknown": "Der Teilnehmer existiert nicht.",
         "error.race.participant_required": "Bitte wählen Sie Fahrer, Fahrzeug und Spur aus.",
-        "error.race.no_participants": "Das Rennen hat noch keine Teilnehmer.",
+        "error.race.no_drivers": (
+            "Das Rennen kann nicht gestartet werden, da noch keine Fahrer angelegt wurden. "
+            "Legen Sie zuerst einen Fahrer an."
+        ),
+        "error.race.no_participants": (
+            "Das Rennen kann nicht gestartet werden, da keine Teilnehmer ausgewählt wurden."
+        ),
         "error.race.not_startable": (
             "Ein Rennen mit dem Status „{status}“ kann nicht gestartet werden."
         ),

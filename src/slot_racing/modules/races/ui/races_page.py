@@ -121,7 +121,7 @@ class RacesPage(QWidget):
         self.buttons["results"].clicked.connect(lambda: self.show_results_selected())
         self.buttons["delete"].clicked.connect(lambda: self.delete_selected())
         self.wizard.closed.connect(self.show_list)
-        self.wizard.start_requested.connect(lambda race_id: self.start_race(RaceId(race_id)))
+        self.wizard.start_requested.connect(self._start_from_wizard)
         self.live.race_over.connect(lambda race_id: self.show_results(RaceId(race_id)))
         self.live.back_requested.connect(self.show_list)
         self.results.back_requested.connect(self.show_list)
@@ -153,6 +153,15 @@ class RacesPage(QWidget):
 
     def start_race(self, race_id: RaceId) -> bool:
         return self._guard(lambda: self._start(race_id))
+
+    def _start_from_wizard(self, race_id: int) -> None:
+        if self.start_race(RaceId(race_id)):
+            return
+        # The list page is hidden while the wizard is open, so the reason has to
+        # appear on the step the user is looking at.
+        message = self.status.text()
+        if message:
+            self.wizard.show_error(message)
 
     def show_live(self) -> None:
         runner = self._controller.active
