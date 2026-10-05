@@ -181,7 +181,7 @@ def test_invalid_values_are_rejected() -> None:
     with pytest.raises(ValidationError):
         StoredDetection(sensitivity=101)
     with pytest.raises(ValidationError):
-        StoredDetection(direction="sideways")
+        StoredDetection.model_validate({"direction": "sideways"})
 
 
 def test_an_older_document_gains_direction_and_sensitivity() -> None:
