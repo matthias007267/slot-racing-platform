@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView, QWidget
+from PySide6.QtWidgets import (
+    QGraphicsItem,
+    QGraphicsScene,
+    QGraphicsSceneMouseEvent,
+    QGraphicsView,
+    QWidget,
+)
 
 from slot_racing.modules.track_planner.document import (
     CLOCKWISE,
@@ -21,11 +27,15 @@ from slot_racing.modules.track_planner.document import (
     span,
     travel_vector,
 )
+from slot_racing.modules.track_planner.parts import PartInstance, PartSpec
 from slot_racing.uikit.theme import COLORS
 
 CELL = 16
+# One millimetre on a part becomes this many pixels. A 345 mm straight is about 70 px.
+MM = 0.2
 
 Moved = Callable[[str, int, int], None]
+MovedFree = Callable[[str, float, float], None]
 
 
 class PlanCanvas(QGraphicsView):
@@ -35,9 +45,10 @@ class PlanCanvas(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setMinimumSize(480, 360)
         self._scene = PlanScene(self)
-        self._scene.setSceneRect(0, 0, GRID_LIMIT * CELL, 40 * CELL)
+        self._scene.setSceneRect(-200, -200, GRID_LIMIT * CELL + 400, 40 * CELL + 400)
         self.setScene(self._scene)
         self._on_moved: Moved | None = None
+        self._on_instance: MovedFree | None = None
         self._lane_count = 2
         self._direction = CLOCKWISE
         self._loading = False
@@ -45,15 +56,34 @@ class PlanCanvas(QGraphicsView):
     def set_listener(self, listener: Moved) -> None:
         self._on_moved = listener
 
-    def show_plan(self, plan: TrackPlan, lane_count: int, selected: str | None) -> None:
+    def set_instance_listener(self, listener: MovedFree) -> None:
+        self._on_instance = listener
+
+    def show_plan(
+        self,
+        plan: TrackPlan,
+        lane_count: int,
+        selected: str | None,
+        parts: Mapping[int, PartSpec] | None = None,
+    ) -> None:
         self._loading = True
         self._lane_count = lane_count
         self._direction = plan.direction
+        self._scene.grid_enabled = plan.grid_enabled
+        self._scene.grid_px = max(plan.grid_mm * MM, 4.0)
         self._scene.clear()
+        catalog = {} if parts is None else parts
+        for instance in plan.instances:
+            spec = catalog.get(instance.part_id)
+            if spec is None:
+                continue
+            placed = InstanceItem(instance, spec, self._report_free)
+            self._scene.addItem(placed)
+            placed.setSelected(placed.item_id == selected)
         for piece in plan.pieces:
-            item = PieceItem(piece, lane_count, plan.direction, self._report)
-            self._scene.addItem(item)
-            item.setSelected(item.item_id == selected)
+            piece_item = PieceItem(piece, lane_count, plan.direction, self._report)
+            self._scene.addItem(piece_item)
+            piece_item.setSelected(piece_item.item_id == selected)
         for marker in plan.markers:
             if marker.kind != START_FINISH:
                 continue
@@ -67,7 +97,7 @@ class PlanCanvas(QGraphicsView):
         if not selected:
             return None
         item = selected[0]
-        if isinstance(item, (PieceItem, StartItem)):
+        if isinstance(item, (PieceItem, StartItem, InstanceItem)):
             return item.item_id
         return None
 
@@ -76,24 +106,37 @@ class PlanCanvas(QGraphicsView):
             return
         self._on_moved(item_id, x, y)
 
+    def _report_free(self, item_id: str, x_mm: float, y_mm: float) -> None:
+        if self._loading or self._on_instance is None:
+            return
+        self._on_instance(item_id, x_mm, y_mm)
+
 
 class PlanScene(QGraphicsScene):
+    def __init__(self, parent: QGraphicsView) -> None:
+        super().__init__(parent)
+        self.grid_enabled = True
+        self.grid_px = float(CELL)
+
     def drawBackground(self, painter: QPainter, rect: QRectF | QRect) -> None:  # noqa: N802
         painter.fillRect(rect, QColor(COLORS.background))
+        if not self.grid_enabled:
+            return
         pen = QPen(QColor(COLORS.border))
         pen.setCosmetic(True)
         painter.setPen(pen)
         bounds = QRectF(rect)
-        left = int(bounds.left()) - int(bounds.left()) % CELL
-        top = int(bounds.top()) - int(bounds.top()) % CELL
+        step = max(int(self.grid_px), 4)
+        left = int(bounds.left()) - int(bounds.left()) % step
+        top = int(bounds.top()) - int(bounds.top()) % step
         x = left
         while x < bounds.right():
             painter.drawLine(x, int(bounds.top()), x, int(bounds.bottom()))
-            x += CELL
+            x += step
         y = top
         while y < bounds.bottom():
             painter.drawLine(int(bounds.left()), y, int(bounds.right()), y)
-            y += CELL
+            y += step
 
 
 class _GridItem(QGraphicsItem):
@@ -191,6 +234,44 @@ def _snap(value: QPointF, width: int, height: int) -> QPointF:
     x = min(max(x, 0), (GRID_LIMIT - width) * CELL)
     y = min(max(y, 0), (GRID_LIMIT - height) * CELL)
     return QPointF(x, y)
+
+
+class InstanceItem(QGraphicsItem):
+    """Top view of one library part. Dragging is free; the page decides whether to snap."""
+
+    def __init__(self, instance: PartInstance, spec: PartSpec, report: MovedFree) -> None:
+        super().__init__()
+        self.item_id = instance.id
+        self._report = report
+        self._ready = False
+        self._polygon = QPolygonF(
+            [QPointF(x * MM, y * MM) for x, y in spec.outline]
+            or [QPointF(-8, -8), QPointF(8, -8), QPointF(8, 8), QPointF(-8, 8)]
+        )
+        bounds = self._polygon.boundingRect().adjusted(-2, -2, 2, 2)
+        self._bounds = bounds
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            | QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.setTransformOriginPoint(0, 0)
+        self.setPos(instance.x_mm * MM, instance.y_mm * MM)
+        self.setRotation(instance.rotation_z_deg)
+        self._ready = True
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        return self._bounds
+
+    def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
+        painter.setPen(QPen(QColor(COLORS.accent if self.isSelected() else COLORS.border), 2))
+        painter.setBrush(QColor(COLORS.elevated))
+        painter.drawPolygon(self._polygon)
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
+        super().mouseReleaseEvent(event)
+        if self._ready:
+            self._report(self.item_id, self.pos().x() / MM, self.pos().y() / MM)
 
 
 def _triangle(origin: QPointF, tip: QPointF) -> QPolygonF:
