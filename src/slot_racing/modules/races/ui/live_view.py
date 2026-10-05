@@ -39,6 +39,7 @@ from slot_racing.modules.races.ui.formatting import (
     participant_status_key,
     start_number_text,
 )
+from slot_racing.modules.races.ui.heat_gate import HeatGate
 from slot_racing.modules.races.ui.hud_stage import HudStage
 from slot_racing.modules.races.ui.hud_widgets import (
     BestLapWidget,
@@ -52,6 +53,7 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceMessageWidget,
     RaceStatusWidget,
 )
+from slot_racing.modules.races.ui.lane_board import LiveLaneBoard
 from slot_racing.modules.races.ui.time_trial_board_view import TimeTrialBoardView
 from slot_racing.uikit import describe_error, fill_table, provider_label, selected_id
 from slot_racing.uikit.errors import is_expected
@@ -147,9 +149,14 @@ class LiveRaceView(QWidget):
 
         self.board = TimeTrialBoardView(translator)
         self.board.hide()
+        self.lane_board = LiveLaneBoard(translator)
+        self.heat_gate = HeatGate(translator)
 
         layout = QVBoxLayout(self)
         configure_page(layout)
+        layout.setSpacing(0)
+        layout.addWidget(self.lane_board)
+        layout.addWidget(self.heat_gate)
         layout.addWidget(self.stage, 1)
         layout.addWidget(self.board, 1)
 
@@ -166,6 +173,9 @@ class LiveRaceView(QWidget):
         self.board.stop_button.clicked.connect(lambda: self.stop_race())
         self.board.results_button.clicked.connect(lambda: self._show_results())
         self.board.back_button.clicked.connect(self.back_requested.emit)
+        self.heat_gate.start_requested.connect(self._start_next_heat)
+        self.heat_gate.postpone_requested.connect(self._postpone_driver)
+        self.heat_gate.disqualify_requested.connect(self._disqualify_driver)
         self.table.itemSelectionChanged.connect(self._show_detail)
         self._subscriptions = [self._listen(event_type) for event_type in _RACE_EVENTS]
         self.destroyed.connect(lambda *_args: self._unsubscribe())
@@ -187,6 +197,7 @@ class LiveRaceView(QWidget):
         self._runner = runner
         self._snapshot = None
         self._announced_end = False
+        self.heat_gate.hide()
         self._last_lap = None
         self._lap_notice = None
         self._announced_finishers = set()
@@ -348,12 +359,24 @@ class LiveRaceView(QWidget):
         self.board.setVisible(time_trial)
         if time_trial:
             self._show_time_trial(runner, snapshot, status_text, tone)
+        self.lane_board.show_snapshot(
+            snapshot, lane_count=runner.race.lane_count, mode=runner.race.mode
+        )
         self._update_buttons()
-        if snapshot.status is RaceStatus.FINISHED:
-            self._timer.stop()
-            if not self._announced_end:
-                self._announced_end = True
-                self.race_over.emit(snapshot.race_id)
+        if snapshot.status is not RaceStatus.FINISHED:
+            self.heat_gate.hide()
+            return
+        self._timer.stop()
+        # The engine session can end while another heat is still planned, or while the next
+        # heat has already been started and this runner has not been replaced yet.
+        if not self._stored_race_is_over(snapshot.race_id):
+            if self._pending_heats(snapshot.race_id) and not snapshot.aborted:
+                self._show_heat_gate(snapshot.race_id)
+            return
+        self.heat_gate.hide()
+        if not self._announced_end:
+            self._announced_end = True
+            self.race_over.emit(snapshot.race_id)
 
     def _show_time_trial(
         self, runner: RaceRunner, snapshot: RaceSnapshot, status_text: str, tone: str
@@ -510,6 +533,84 @@ class LiveRaceView(QWidget):
         self.results_button.setEnabled(finished)
         self.back_button.setEnabled(True)
         self.board.set_controls(pause=running, resume=paused, stop=active, results=finished)
+
+    def _stored_race_is_over(self, race_id: RaceId) -> bool:
+        if self._service is None:
+            return True
+        race = self._service.get_race(race_id)
+        return race is not None and race.is_over
+
+    def _pending_heats(self, race_id: RaceId) -> bool:
+        if self._service is None:
+            return False
+        return self._service.has_pending_heats(race_id)
+
+    def _show_heat_gate(self, race_id: RaceId) -> None:
+        if self._service is None:
+            return
+        briefing = self._service.heat_briefing(race_id)
+        if briefing is None:
+            self.heat_gate.hide()
+            return
+        self.heat_gate.show_briefing(briefing)
+
+    def _start_next_heat(self) -> None:
+        runner = self._runner
+        if runner is None:
+            return
+        try:
+            started = self._controller.start_race(runner.race.id)
+        except Exception as error:
+            if not is_expected(error):
+                logger.exception("Could not start the next heat")
+            self.messages.show_warning(describe_error(self.translator, error))
+            return
+        self.show_runner(started)
+
+    def _postpone_driver(self, participant_id: int) -> None:
+        self._change_heat(
+            lambda race_id: self._require_service().postpone_driver(race_id, participant_id)
+        )
+
+    def _disqualify_driver(self, participant_id: int) -> None:
+        name = self.heat_gate.driver_combo.currentText()
+        if not self.confirm(self.translator.format("race.heat.confirm_dq", driver=name)):
+            return
+        runner = self._runner
+        if runner is None or self._service is None:
+            return
+        try:
+            finished = self._service.disqualify_driver(runner.race.id, participant_id)
+        except Exception as error:
+            if not is_expected(error):
+                logger.exception("Could not disqualify the driver")
+            self.messages.show_warning(describe_error(self.translator, error))
+            return
+        if finished:
+            self.heat_gate.hide()
+            if not self._announced_end:
+                self._announced_end = True
+                self.race_over.emit(runner.race.id)
+            return
+        self._show_heat_gate(runner.race.id)
+
+    def _change_heat(self, action: Callable[[RaceId], object]) -> None:
+        runner = self._runner
+        if runner is None:
+            return
+        try:
+            action(runner.race.id)
+        except Exception as error:
+            if not is_expected(error):
+                logger.exception("Could not change the heat plan")
+            self.messages.show_warning(describe_error(self.translator, error))
+            return
+        self._show_heat_gate(runner.race.id)
+
+    def _require_service(self) -> RaceService:
+        if self._service is None:
+            raise RuntimeError("race service is not available")
+        return self._service
 
     def _guard(self, action: Callable[[], None]) -> None:
         try:

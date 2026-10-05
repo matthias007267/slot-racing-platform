@@ -23,7 +23,7 @@ from slot_racing.core.domain import DriverId, RaceId, RaceMode, TrackId, Vehicle
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
-from slot_racing.modules.races.service import MAX_LAPS, RaceService
+from slot_racing.modules.races.service import MAX_LAPS, RaceService, parse_duration_minutes
 from slot_racing.modules.races.types import RaceInfo
 from slot_racing.uikit import (
     StatusLabel,
@@ -100,12 +100,19 @@ class RaceWizard(QWidget):
         self.laps_spin.setObjectName("race-laps")
         self.laps_spin.setRange(1, MAX_LAPS)
         self.laps_spin.setValue(5)
+        self.duration_caption = QLabel(tr("race.wizard.duration"))
+        self.duration_caption.setObjectName("race-duration-label")
+        self.duration_edit = QLineEdit("5")
+        self.duration_edit.setObjectName("race-duration")
+        self.duration_unit = QLabel(tr("race.wizard.minutes"))
+        self.duration_unit.setObjectName("race-duration-unit")
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("race-driver")
         self.vehicle_combo = QComboBox()
         self.vehicle_combo.setObjectName("race-vehicle")
-        self.lane_combo = QComboBox()
+        self.lane_combo = QComboBox(self)
         self.lane_combo.setObjectName("race-lane")
+        self.lane_combo.hide()
         self.add_participant_button = QPushButton(tr("race.wizard.add_participant"))
         self.add_participant_button.setObjectName("race-add-participant")
         self.edit_participant_button = QPushButton(tr("race.wizard.edit_participant"))
@@ -114,7 +121,6 @@ class RaceWizard(QWidget):
         self.remove_participant_button.setObjectName("race-remove-participant")
         self.participant_table = make_table(
             [
-                tr("race.column.lane"),
                 tr("race.column.driver"),
                 tr("race.column.vehicle"),
             ],
@@ -123,6 +129,15 @@ class RaceWizard(QWidget):
         self.overview_label = QLabel()
         self.overview_label.setObjectName("race-overview")
         self.ready_label = QLabel(tr("race.wizard.ready"))
+        self.ready_label.setWordWrap(True)
+        self.heat_driver = QComboBox()
+        self.heat_driver.setObjectName("wizard-heat-driver")
+        self.postpone_button = QPushButton(tr("race.heat.postpone"))
+        self.postpone_button.setObjectName("wizard-heat-postpone")
+        self.disqualify_button = QPushButton(tr("race.heat.disqualify"))
+        self.disqualify_button.setObjectName("wizard-heat-disqualify")
+        set_role(self.postpone_button, "secondary")
+        set_role(self.disqualify_button, "danger")
         self.start_button = QPushButton(tr("race.wizard.start"))
         self.start_button.setObjectName("race-start")
 
@@ -165,6 +180,8 @@ class RaceWizard(QWidget):
         self.driver_combo.currentIndexChanged.connect(lambda _: self._reload_vehicles())
         self.provider_combo.currentIndexChanged.connect(lambda _: self._update_provider_status())
         self.mode_combo.currentIndexChanged.connect(lambda _: self._sync_lap_target())
+        self.postpone_button.clicked.connect(lambda: self._guard(self._postpone_selected))
+        self.disqualify_button.clicked.connect(lambda: self._guard(self._disqualify_selected))
         self._show_step(NAME)
 
     @property
@@ -184,11 +201,16 @@ class RaceWizard(QWidget):
             self.name_edit.clear()
             self.mode_combo.setCurrentIndex(self.mode_combo.findData(RaceMode.LAPS.value))
             self.laps_spin.setValue(5)
+            self.duration_edit.setText("5")
         else:
             self.name_edit.setText(self._race.name)
             self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._race.mode.value)))
             if self._race.mode is RaceMode.LAPS and self._race.laps >= 1:
                 self.laps_spin.setValue(self._race.laps)
+            if self._race.duration_minutes is not None:
+                self.duration_edit.setText(str(self._race.duration_minutes))
+            else:
+                self.duration_edit.setText("5")
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
         self._sync_lap_target()
         self._cancel_participant_edit()
@@ -241,12 +263,16 @@ class RaceWizard(QWidget):
                 layout.addWidget(self.mode_combo)
                 layout.addWidget(self.laps_caption)
                 layout.addWidget(self.laps_spin)
+                duration_row = QHBoxLayout()
+                duration_row.addWidget(self.duration_caption)
+                duration_row.addWidget(self.duration_edit, 1)
+                duration_row.addWidget(self.duration_unit)
+                layout.addLayout(duration_row)
             elif index == PARTICIPANTS:
                 row = QHBoxLayout()
                 for label, combo in (
                     ("race.wizard.driver", self.driver_combo),
                     ("race.wizard.vehicle", self.vehicle_combo),
-                    ("race.wizard.lane", self.lane_combo),
                 ):
                     column = QVBoxLayout()
                     column.addWidget(QLabel(tr(label)))
@@ -264,7 +290,11 @@ class RaceWizard(QWidget):
                 layout.addWidget(self.overview_label)
             else:
                 layout.addWidget(self.ready_label)
+                layout.addWidget(self.heat_driver)
+                layout.addWidget(self.postpone_button)
+                layout.addWidget(self.disqualify_button)
                 layout.addWidget(self.start_button)
+            self.lane_combo.hide()
             layout.addStretch(1)
             self.stack.addWidget(page)
 
@@ -358,6 +388,8 @@ class RaceWizard(QWidget):
             self._reload_providers()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
+        if step == START:
+            self._show_start_briefing()
 
     def _advance(self) -> None:
         step = self.step
@@ -376,6 +408,8 @@ class RaceWizard(QWidget):
                 raise ValidationError("error.race.no_drivers")
             if self._race is None or not self._race.participants:
                 raise ValidationError("error.race.no_participants")
+            self._service.plan_heats(self._race_id())
+            self._race = self._service.require_race(self._race_id())
         elif step == OVERVIEW:
             self._race = self._service.validate_startable(self._race_id())
         self.status.clear_message()
@@ -396,6 +430,9 @@ class RaceWizard(QWidget):
         show_laps = self._selected_mode() is RaceMode.LAPS
         self.laps_caption.setVisible(show_laps)
         self.laps_spin.setVisible(show_laps)
+        self.duration_caption.setVisible(not show_laps)
+        self.duration_edit.setVisible(not show_laps)
+        self.duration_unit.setVisible(not show_laps)
 
     def _save_basics(self) -> None:
         name = self.name_edit.text()
@@ -403,27 +440,34 @@ class RaceWizard(QWidget):
         provider = self._check_provider()
         mode = self._selected_mode()
         laps = self.laps_spin.value()
+        duration = (
+            None if mode is RaceMode.LAPS else parse_duration_minutes(self.duration_edit.text())
+        )
         if self._race is None:
             self._race = (
-                self._service.create_time_trial(name, track_id, provider)
+                self._service.create_time_trial(name, track_id, provider, duration)
                 if mode is RaceMode.TIME_TRIAL
                 else self._service.create_race(name, track_id, laps, provider)
             )
         else:
             self._race = self._service.update_race(
-                self._race.id, name, track_id, laps, provider, mode
+                self._race.id,
+                name,
+                track_id,
+                laps,
+                provider,
+                mode,
+                duration_minutes=duration,
+                set_duration=True,
             )
         self._refresh_participants()
 
     def _add_participant(self) -> None:
         driver_id = self.driver_combo.currentData()
         vehicle_id = self.vehicle_combo.currentData()
-        lane = self.lane_combo.currentData()
-        if driver_id is None or vehicle_id is None or lane is None:
+        if driver_id is None or vehicle_id is None:
             raise ValidationError("error.race.participant_required")
-        self._service.add_participant(
-            self._race_id(), DriverId(driver_id), VehicleId(vehicle_id), lane
-        )
+        self._service.enroll_driver(self._race_id(), DriverId(driver_id), VehicleId(vehicle_id))
         self._race = self._service.require_race(self._race_id())
         self._cancel_participant_edit()
         self._refresh_participants()
@@ -445,7 +489,6 @@ class RaceWizard(QWidget):
                 self.vehicle_combo.setCurrentIndex(
                     self.vehicle_combo.findData(participant.vehicle_id)
                 )
-            self.lane_combo.setCurrentIndex(self.lane_combo.findData(participant.lane))
             self._editing_participant_id = participant.id
             self.edit_participant_button.setText(
                 self.translator.translate("race.wizard.update_participant")
@@ -454,15 +497,13 @@ class RaceWizard(QWidget):
             return
         driver_id = self.driver_combo.currentData()
         vehicle_id = self.vehicle_combo.currentData()
-        lane = self.lane_combo.currentData()
-        if driver_id is None or vehicle_id is None or lane is None:
+        if driver_id is None or vehicle_id is None:
             raise ValidationError("error.race.participant_required")
-        self._service.update_participant(
+        self._service.update_enrolled(
             self._race_id(),
             self._editing_participant_id,
             DriverId(driver_id),
             VehicleId(vehicle_id),
-            lane,
         )
         self._race = self._service.require_race(self._race_id())
         self._cancel_participant_edit()
@@ -498,7 +539,7 @@ class RaceWizard(QWidget):
         participants = () if self._race is None else self._race.participants
         fill_table(
             self.participant_table,
-            [(str(p.lane), p.driver_label, p.vehicle_label) for p in participants],
+            [(p.driver_label, p.vehicle_label) for p in participants],
             [p.id for p in participants],
         )
 
@@ -511,7 +552,7 @@ class RaceWizard(QWidget):
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
             (
-                fmt("race.overview.time_trial")
+                fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
                 if race.mode is RaceMode.TIME_TRIAL
                 else fmt("race.overview.laps", laps=race.laps)
             ),
@@ -525,13 +566,66 @@ class RaceWizard(QWidget):
         lines.extend(
             fmt(
                 "race.overview.participant",
-                lane=p.lane,
                 driver=p.driver_label,
                 vehicle=p.vehicle_label,
             )
             for p in race.participants
         )
+        plan = self._service.heat_plan(race.id)
+        if plan:
+            lines.append("")
+            lines.append(self.translator.translate("race.overview.heats"))
+            names = {participant.id: participant.driver_label for participant in race.participants}
+            for heat in plan:
+                seated = ", ".join(
+                    fmt("race.heat.seat", lane=lane, driver=names.get(participant_id, ""))
+                    for participant_id, lane in heat.seats
+                )
+                lines.append(fmt("race.overview.heat", sequence=heat.sequence, seats=seated))
         return "\n".join(lines)
+
+    def _show_start_briefing(self) -> None:
+        race = self._race
+        if race is None:
+            return
+        briefing = self._service.heat_briefing(race.id)
+        if briefing is None:
+            self.ready_label.setText(self.translator.translate("race.wizard.ready"))
+            self.heat_driver.hide()
+            self.postpone_button.hide()
+            self.disqualify_button.hide()
+            return
+        fmt = self.translator.format
+        free = self.translator.translate("race.time_trial.free")
+        lines = [fmt("race.heat.title", sequence=briefing.sequence), ""]
+        for seat in briefing.seats:
+            lines.append(fmt("race.heat.seat", lane=seat.lane, driver=seat.driver_label or free))
+        lines.extend(["", self.translator.translate("race.heat.ready_hint")])
+        self.ready_label.setText("\n".join(lines))
+        self.heat_driver.show()
+        self.postpone_button.show()
+        self.disqualify_button.show()
+        self.heat_driver.clear()
+        for participant_id, label in briefing.drivers:
+            self.heat_driver.addItem(label, participant_id)
+
+    def _postpone_selected(self) -> None:
+        participant_id = self.heat_driver.currentData()
+        if participant_id is None:
+            raise ValidationError("error.race.participant_unknown")
+        self._service.postpone_driver(self._race_id(), int(participant_id))
+        self._race = self._service.require_race(self._race_id())
+        self._show_start_briefing()
+        self.status.clear_message()
+
+    def _disqualify_selected(self) -> None:
+        participant_id = self.heat_driver.currentData()
+        if participant_id is None:
+            raise ValidationError("error.race.participant_unknown")
+        self._service.disqualify_driver(self._race_id(), int(participant_id))
+        self._race = self._service.require_race(self._race_id())
+        self._show_start_briefing()
+        self.status.clear_message()
 
     def _guard(self, action: object) -> bool:
         assert callable(action)

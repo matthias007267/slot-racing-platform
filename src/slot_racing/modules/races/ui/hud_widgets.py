@@ -219,10 +219,13 @@ class RaceHeaderWidget(HudWidget):
 
     def _fit_header(self) -> None:
         """Fit status, track, field and timing source inside the rectangle the stage assigned."""
-        if self._fitting or self.width() < 8 or self.height() < 8:
+        if self._fitting or self.width() < 1 or self.height() < 1:
             return
         self._fitting = True
         try:
+            if self.width() < 8 or self.height() < 8:
+                self._stack_clipped()
+                return
             self._apply_meta_font(None)
             if self._place_facts():
                 return
@@ -231,9 +234,23 @@ class RaceHeaderWidget(HudWidget):
                 if self._place_facts():
                     return
             self._apply_meta_font(_MIN_TEXT_FONT)
-            self._place_facts()
+            if not self._place_facts():
+                self._stack_clipped()
         finally:
             self._fitting = False
+
+    def _stack_clipped(self) -> None:
+        """Keep every fact inside the panel when the full text no longer fits on its own row."""
+        labels = (self.name_label, *self._meta_labels)
+        margin = min(SPACE.xs, self.width() // 4, self.height() // 4)
+        inner_w = max(self.width() - 2 * margin, 1)
+        inner_h = max(self.height() - 2 * margin, 1)
+        slot = max(inner_h // len(labels), 1)
+        y = margin
+        for label in labels:
+            remaining = max(self.height() - y, 1)
+            label.setGeometry(margin, y, inner_w, min(slot, remaining))
+            y += min(slot, remaining)
 
     def _apply_meta_font(self, size: int | None) -> None:
         for label in self._meta_labels:

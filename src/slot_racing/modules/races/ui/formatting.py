@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from slot_racing.modules.races.runner import LiveRow
+
 
 def participant_status_key(*, finished: bool, paused: bool, ended: bool) -> str:
     """Translation key for one participant.
@@ -30,6 +35,46 @@ def format_progress_cell(current: int, target: int) -> str:
     if target < 1:
         return format_lap_progress(current, target)
     return f"{current}/{target}"
+
+
+def format_signed_seconds(delta_ns: int) -> str:
+    """``+0,137 s`` with a fixed three-digit millisecond part."""
+    sign = "+" if delta_ns >= 0 else "-"
+    millis_total = abs(delta_ns) // 1_000_000
+    seconds, millis = divmod(millis_total, 1000)
+    return f"{sign}{seconds},{millis:03d} s"
+
+
+@dataclass(frozen=True, slots=True)
+class LaneGap:
+    """Gap of one occupied lane. ``next_ns`` is set only when more than two lanes are occupied."""
+
+    leader_ns: int
+    next_ns: int | None = None
+
+
+def lane_gaps(rows: Sequence[LiveRow], *, by_best_lap: bool) -> dict[int, LaneGap]:
+    """Gap to the leader, and to the driver directly ahead when more than two lanes are occupied."""
+    timed = [row for row in rows if _gap_time(row, by_best_lap=by_best_lap) is not None]
+    ordered = sorted(timed, key=lambda row: row.position)
+    if not ordered:
+        return {}
+    leader_time = _gap_time(ordered[0], by_best_lap=by_best_lap)
+    assert leader_time is not None
+    show_next = len(ordered) > 2
+    gaps: dict[int, LaneGap] = {}
+    previous = leader_time
+    for index, row in enumerate(ordered):
+        current = _gap_time(row, by_best_lap=by_best_lap)
+        assert current is not None
+        next_gap = None if index == 0 or not show_next else current - previous
+        gaps[row.lane] = LaneGap(leader_ns=current - leader_time, next_ns=next_gap)
+        previous = current
+    return gaps
+
+
+def _gap_time(row: LiveRow, *, by_best_lap: bool) -> int | None:
+    return row.best_lap_ns if by_best_lap else row.total_time_ns
 
 
 def format_lap_progress(current: int, target: int) -> str:

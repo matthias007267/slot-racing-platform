@@ -15,8 +15,9 @@ class ParticipantInfo:
     driver_label: str
     vehicle_id: VehicleId | None
     vehicle_label: str
-    lane: int
+    lane: int | None
     start_number: int | str | None = None
+    disqualified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class RaceInfo:
     created_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
+    duration_minutes: int | None = None
 
     @property
     def is_editable(self) -> bool:
@@ -109,3 +111,40 @@ class LapRecord:
     lap_time_ns: int
     race_time_ns: int
     sector_times_ns: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HeatInfo:
+    """One stored heat. ``seats`` is ``(participant_id, lane)`` for drivers who are in it."""
+
+    sequence: int
+    status: str
+    seats: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HeatSeat:
+    lane: int
+    participant_id: int | None
+    driver_label: str
+
+
+@dataclass(frozen=True, slots=True)
+class LaneChange:
+    """Where a driver goes for the next heat. ``from_lane`` is empty when they did not just race."""
+
+    driver_label: str
+    from_lane: int | None
+    to_lane: int
+
+
+@dataclass(frozen=True, slots=True)
+class HeatBriefing:
+    """Who is needed before the next heat, including lanes that stay empty."""
+
+    race_id: RaceId
+    sequence: int
+    heat_count: int
+    seats: tuple[HeatSeat, ...]
+    changes: tuple[LaneChange, ...]
+    drivers: tuple[tuple[int, str], ...]
