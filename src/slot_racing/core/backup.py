@@ -63,6 +63,8 @@ REQUIRED_TABLES = frozenset(
         "timing_sensors",
         "races",
         "race_participants",
+        "race_heats",
+        "race_heat_entries",
         "laps",
         "sectors",
         "time_measurements",

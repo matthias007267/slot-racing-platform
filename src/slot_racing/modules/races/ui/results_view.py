@@ -273,14 +273,14 @@ class ResultsView(QWidget):
             ],
             keep_selection=False,
         )
-        drivers = {row.lane: row.driver_label for row in results}
+        drivers = {row.participant_id: row.driver_label for row in results}
         laps = self._service.get_laps(race_id)
         fill_table(
             self.laps_table,
             [
                 (
                     str(lap.lane),
-                    drivers.get(lap.lane, ""),
+                    drivers.get(lap.participant_id, ""),
                     str(lap.lap_number),
                     format_duration(lap.lap_time_ns),
                     " | ".join(format_duration(t) for t in lap.sector_times_ns),

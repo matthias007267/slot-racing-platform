@@ -89,8 +89,9 @@ def build_time_trial_board(
             bucket.append(row)
     assigned: dict[int, ParticipantInfo] = {}
     for entry in participants:
-        if entry.lane in by_lane:
-            assigned[entry.lane] = entry
+        lane = entry.lane
+        if lane is not None and lane in by_lane:
+            assigned[lane] = entry
 
     records: list[LaneRecordLine] = []
     active: list[ActiveLaneLine] = []

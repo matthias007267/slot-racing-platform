@@ -506,7 +506,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert wizard.step == OVERVIEW
     overview = wizard.overview_label.text()
     assert "Finale" in overview and "Heimbahn" in overview
-    assert "Spur 1: Anna auf Porsche 911" in overview
+    assert "Anna mit Porsche 911" in overview
     assert wizard.go_next()
     assert wizard.step == START
     assert not wizard.next_button.isEnabled()
@@ -540,20 +540,28 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     for _ in range(100):
         env.clock.advance(100_000_000)
         live.refresh()
-        if not live.runner or not live.runner.is_active:
+        if not live.heat_gate.isHidden():
+            break
+    assert not live.heat_gate.isHidden()
+    assert "Spurwechsel" in live.heat_gate.body_label.text()
+    live.heat_gate.start_button.click()
+    assert live.runner is not None and live.runner.is_active
+
+    for _ in range(160):
+        env.clock.advance(100_000_000)
+        live.refresh()
+        if isinstance(page.current_view(), ResultsView):
             break
     assert isinstance(page.current_view(), ResultsView)
     results = page.results
     assert results.table.rowCount() == 2
     assert column_text(results.table, 0, "Platz") == "1"
-    assert column_text(results.table, 0, "Fahrer") == "Anna"
-    assert column_text(results.table, 0, "Fahrzeug") == "Porsche 911"
-    assert column_text(results.table, 0, "Spur") == "1"
-    assert column_text(results.table, 0, "Runden") == "2"
+    assert column_text(results.table, 0, "Fahrer") in {"Anna", "Ben"}
+    assert column_text(results.table, 0, "Runden") == "4"
     assert column_text(results.table, 0, "Status") == "Fertig"
     for header in ("Gesamtzeit", "Beste Runde", "Letzte Runde", "Durchschnitt"):
         assert column_text(results.table, 0, header) != "-"
-    assert results.laps_table.rowCount() == 4
+    assert results.laps_table.rowCount() == 8
     assert results.records_table.isHidden()
     assert results.records_heading.isHidden()
 
@@ -591,21 +599,18 @@ def test_wizard_reports_rule_violations_and_keeps_going(qtbot: QtBot, env: Env) 
     configure_race(page, env)
     wizard = page.wizard
 
-    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
     assert not wizard.add_participant()
-    assert "Spuren" in wizard.status.text()  # track is full
+    assert "nimmt bereits teil" in wizard.status.text()
     assert wizard.participant_table.rowCount() == 2
 
     wizard.participant_table.selectRow(0)
     assert wizard.remove_selected_participant()
     assert wizard.participant_table.rowCount() == 1
 
-    wizard.driver_combo.setCurrentIndex(
-        wizard.driver_combo.findData(env.drivers.list_drivers()[0].id)
-    )
-    wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(2))
-    assert not wizard.add_participant()  # lane 2 is taken
-    assert "Spur 2 ist bereits vergeben" in wizard.status.text()
+    removed = env.drivers.list_drivers()[0]
+    wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(removed.id))
+    assert wizard.add_participant()
+    assert wizard.participant_table.rowCount() == 2
 
 
 def test_wizard_offers_lap_racing_and_a_time_trial(qtbot: QtBot, env: Env) -> None:

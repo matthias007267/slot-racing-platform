@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime
 
 from sqlalchemy import func, select, update
@@ -22,8 +23,11 @@ from slot_racing.core.domain.scoring import scoring_for, time_trial_stored_key
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database, utc_now
 from slot_racing.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProviderRegistry
+from slot_racing.modules.races import heats
 from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector, TimeMeasurement
 from slot_racing.modules.races.types import (
+    HeatBriefing,
+    HeatInfo,
     LaneRanking,
     LapRecord,
     ParticipantInfo,
@@ -34,6 +38,7 @@ from slot_racing.modules.races.types import (
 )
 
 MAX_LAPS = 999
+MAX_DURATION_MINUTES = 999
 MAX_PROVIDER_ID_LENGTH = 64
 
 _EDITABLE = (RaceStatus.CREATED, RaceStatus.READY)
@@ -44,6 +49,25 @@ _MISSING_LAP_TIME = 2**62
 def _measurement_order(row: TimeMeasurement) -> tuple[int, datetime, int]:
     """Faster times win. An equal time keeps the earlier measurement."""
     return (row.time_ns, row.recorded_at, row.id)
+
+
+def parse_duration_minutes(text: str) -> int:
+    """Whole minutes from a free-text field. Decimals, zero and text are rejected."""
+    clean = text.strip()
+    if not clean.isdigit():
+        raise ValidationError("error.race.duration_invalid")
+    minutes = int(clean)
+    if not 1 <= minutes <= MAX_DURATION_MINUTES:
+        raise ValidationError("error.race.duration_invalid")
+    return minutes
+
+
+def _shown_lane(current: int | None, laps: Sequence[Lap]) -> int:
+    if current is not None:
+        return current
+    if laps and laps[-1].lane is not None:
+        return laps[-1].lane
+    return 0
 
 
 def _best_row(rows: Sequence[TimeMeasurement]) -> TimeMeasurement | None:
@@ -76,9 +100,10 @@ def _stored_standing_key(
     """
     completed = len(laps)
     last_time = laps[-1].race_time_ns if laps else _MISSING_LAP_TIME
+    lane = participant.lane or 0
     if completed >= target_laps:
-        return (0, last_time, participant.lane, 0)
-    return (1, -completed, last_time, participant.lane)
+        return (0, last_time, lane, 0)
+    return (1, -completed, last_time, lane)
 
 
 class RaceService:
@@ -125,6 +150,7 @@ class RaceService:
                 target_laps=laps,
                 mode=RaceMode.LAPS.value,
                 timing_provider=provider,
+                duration_minutes=None,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
@@ -132,12 +158,22 @@ class RaceService:
             return self._race_info(session, race)
 
     def create_time_trial(
-        self, name: str, track_id: TrackId, timing_provider: str | None = None
+        self,
+        name: str,
+        track_id: TrackId,
+        timing_provider: str | None = None,
+        duration_minutes: int | None = None,
     ) -> RaceInfo:
-        """A time trial has no lap target. Each measured lap is stored as its own result."""
+        """A time trial has no lap target. Each measured lap is stored as its own result.
+
+        ``duration_minutes`` limits one heat. ``None`` keeps the session open until it is stopped,
+        which is how time trials created before a duration existed behave.
+        """
         clean_name = self._validate_name(name)
         provider = self._validate_provider(timing_provider or self.default_provider_id())
         self._require_active_track(track_id)
+        if duration_minutes is not None:
+            self._validate_duration(duration_minutes)
         with self._database.session() as session:
             race = Race(
                 name=clean_name,
@@ -145,6 +181,7 @@ class RaceService:
                 target_laps=0,
                 mode=RaceMode.TIME_TRIAL.value,
                 timing_provider=provider,
+                duration_minutes=duration_minutes,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
@@ -159,6 +196,9 @@ class RaceService:
         laps: int,
         timing_provider: str | None = None,
         mode: RaceMode | None = None,
+        *,
+        duration_minutes: int | None = None,
+        set_duration: bool = False,
     ) -> RaceInfo:
         """Change the configuration. ``timing_provider=None`` keeps the stored provider.
 
@@ -177,16 +217,30 @@ class RaceService:
                 self._validate_laps(laps)
             if track_id != race.track_id:
                 track = self._require_active_track(track_id)
-                lanes = self._participant_lanes(session, race.id)
-                if len(lanes) > track.lane_count or any(lane > track.lane_count for lane in lanes):
+                lanes = [
+                    lane for lane in self._participant_lanes(session, race.id) if lane is not None
+                ]
+                planned = heats.uses_heats(session, race.id)
+                too_many = not planned and len(lanes) > track.lane_count
+                if too_many or any(lane > track.lane_count for lane in lanes):
                     raise ValidationError("error.race.track_too_small", lanes=track.lane_count)
                 race.track_id = track_id
             race.name = clean_name
             race.mode = chosen.value
             race.target_laps = laps if chosen is RaceMode.LAPS else 0
+            if chosen is RaceMode.LAPS:
+                race.duration_minutes = None
+            elif set_duration:
+                if duration_minutes is not None:
+                    self._validate_duration(duration_minutes)
+                race.duration_minutes = duration_minutes
             if provider is not None:
                 race.timing_provider = provider
             session.flush()
+            if heats.uses_heats(session, race.id) and not heats.has_completed(session, race.id):
+                current = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+                if current is not None:
+                    heats.replace_open_plan(session, race, current.lane_count)
             return self._race_info(session, race)
 
     def add_participant(
@@ -226,6 +280,152 @@ class RaceService:
             session.flush()
             self._update_readiness(session, race)
             return self._participant_info(participant)
+
+    def enroll_driver(
+        self, race_id: RaceId, driver_id: DriverId, vehicle_id: VehicleId
+    ) -> ParticipantInfo:
+        """Add a driver without a lane. The heat plan assigns every lane later."""
+        driver = self._drivers.get_driver(driver_id)
+        if driver is None:
+            raise ValidationError("error.race.driver_unknown")
+        if not driver.is_active:
+            raise ValidationError("error.race.driver_inactive", driver=driver.label)
+        vehicle = self._vehicles.get_vehicle(vehicle_id)
+        if vehicle is None:
+            raise ValidationError("error.race.vehicle_unknown")
+        if not vehicle.is_active:
+            raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+        with self._database.session() as session:
+            race = self._load_editable(session, race_id)
+            if race.track_id is None or self._tracks.get_track(TrackId(race.track_id)) is None:
+                raise ValidationError("error.race.no_track")
+            existing = list(
+                session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
+            )
+            if any(p.driver_id == driver_id for p in existing):
+                raise ValidationError("error.race.driver_duplicate", driver=driver.label)
+            participant = RaceParticipant(
+                race_id=race.id, driver_id=driver_id, vehicle_id=vehicle_id, lane=None
+            )
+            session.add(participant)
+            session.flush()
+            self._update_readiness(session, race)
+            return self._participant_info(participant)
+
+    def update_enrolled(
+        self,
+        race_id: RaceId,
+        participant_id: int,
+        driver_id: DriverId,
+        vehicle_id: VehicleId,
+    ) -> ParticipantInfo:
+        """Change driver or vehicle and leave the lane to the heat plan."""
+        driver = self._drivers.get_driver(driver_id)
+        if driver is None:
+            raise ValidationError("error.race.driver_unknown")
+        if not driver.is_active:
+            raise ValidationError("error.race.driver_inactive", driver=driver.label)
+        vehicle = self._vehicles.get_vehicle(vehicle_id)
+        if vehicle is None:
+            raise ValidationError("error.race.vehicle_unknown")
+        if not vehicle.is_active:
+            raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+        with self._database.session() as session:
+            race = self._load_editable(session, race_id)
+            participant = session.get(RaceParticipant, participant_id)
+            if participant is None or participant.race_id != race.id:
+                raise ValidationError("error.race.participant_unknown")
+            others = [
+                other
+                for other in session.scalars(
+                    select(RaceParticipant).where(RaceParticipant.race_id == race.id)
+                )
+                if other.id != participant.id
+            ]
+            if any(other.driver_id == driver_id for other in others):
+                raise ValidationError("error.race.driver_duplicate", driver=driver.label)
+            participant.driver_id = driver_id
+            participant.vehicle_id = vehicle_id
+            session.flush()
+            return self._participant_info(participant)
+
+    def plan_heats(self, race_id: RaceId) -> list[HeatInfo]:
+        """Build or rebuild the open heats from the current drivers and the track's lane count."""
+        with self._database.session() as session:
+            race = self._load_editable(session, race_id)
+            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+            if track is None:
+                raise ValidationError("error.race.no_track")
+            heats.replace_open_plan(session, race, track.lane_count)
+            return heats.list_heats(session, race.id)
+
+    def heat_plan(self, race_id: RaceId) -> list[HeatInfo]:
+        with self._database.session() as session:
+            self._load(session, race_id)
+            return heats.list_heats(session, race_id)
+
+    def heat_briefing(self, race_id: RaceId) -> HeatBriefing | None:
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+            lane_count = track.lane_count if track else 0
+            names = {
+                participant.id: self._participant_info(participant).driver_label
+                for participant in session.scalars(
+                    select(RaceParticipant).where(RaceParticipant.race_id == race.id)
+                )
+            }
+            return heats.briefing(session, race, lane_count, names)
+
+    def has_pending_heats(self, race_id: RaceId) -> bool:
+        with self._database.session() as session:
+            return heats.has_pending(session, race_id)
+
+    def postpone_driver(self, race_id: RaceId, participant_id: int) -> HeatBriefing | None:
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if RaceStatus(race.status) not in _EDITABLE:
+                raise ValidationError("error.race.not_editable")
+            track = self._require_race_track(session, race)
+            heats.postpone(session, race, participant_id, track.lane_count)
+            return self._briefing_in_session(session, race, track.lane_count)
+
+    def disqualify_driver(self, race_id: RaceId, participant_id: int) -> bool:
+        """Drop the driver from heats that have not started.
+
+        Returns True when that was the last open heat and the race is now over.
+        """
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if RaceStatus(race.status) not in _EDITABLE:
+                raise ValidationError("error.race.not_editable")
+            track = self._require_race_track(session, race)
+            finished = heats.disqualify(session, race, participant_id, track.lane_count)
+            if finished:
+                race.status = RaceStatus.FINISHED.value
+                race.finished_at = race.finished_at or utc_now()
+            return finished
+
+    def activate_next_heat(self, race_id: RaceId) -> RaceInfo:
+        """Seat the next heat. A race without heats is returned unchanged."""
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if heats.uses_heats(session, race.id) and not heats.assign_next(session, race):
+                raise ValidationError("error.race.not_startable", status=race.status)
+            info = self._race_info(session, race)
+        if not info.participants:
+            return info
+        seated = tuple(
+            participant for participant in info.participants if participant.lane is not None
+        )
+        if len(seated) == len(info.participants):
+            return info
+        return replace(info, participants=seated)
+
+    def cancel_heat_start(self, race_id: RaceId) -> None:
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            heats.revert_running_heat(session, race)
 
     def update_participant(
         self,
@@ -317,7 +517,10 @@ class RaceService:
             raise ValidationError("error.race.not_startable", status=race.status.value)
         if not self._drivers.list_drivers():
             raise ValidationError("error.race.no_drivers")
-        if not race.participants:
+        competing = tuple(
+            participant for participant in race.participants if not participant.disqualified
+        )
+        if not competing:
             raise ValidationError("error.race.no_participants")
         track = None if race.track_id is None else self._tracks.get_track(race.track_id)
         if track is None:
@@ -325,8 +528,12 @@ class RaceService:
         if not track.is_active:
             raise ValidationError("error.race.track_inactive", track=track.name)
         if self._providers is not None:
-            self._providers.check(race.timing_provider, lane_count=len(race.participants))
-        for participant in race.participants:
+            self._providers.check(
+                race.timing_provider, lane_count=self._provider_lane_count(race, len(competing))
+            )
+        if self.has_heat_plan(race.id) and not self.has_pending_heats(race.id):
+            raise ValidationError("error.race.not_startable", status=race.status.value)
+        for participant in competing:
             driver = self._drivers.get_driver(participant.driver_id)
             if driver is None or not driver.is_active:
                 raise ValidationError("error.race.driver_inactive", driver=participant.driver_label)
@@ -363,7 +570,7 @@ class RaceService:
                         position=participant.final_position,
                         driver_label=info.driver_label,
                         vehicle_label=info.vehicle_label,
-                        lane=participant.lane,
+                        lane=_shown_lane(participant.lane, laps),
                         start_number=info.start_number,
                         laps_completed=participant.laps_completed,
                         finished=participant.finished,
@@ -389,6 +596,7 @@ class RaceService:
                 .order_by(RaceParticipant.lane, Lap.lap_number)
             )
             for lap, lane in session.execute(query):
+                shown_lane = lap.lane if lap.lane is not None else (lane or 0)
                 sectors = session.scalars(
                     select(Sector.sector_time_ns)
                     .where(Sector.lap_id == lap.id)
@@ -397,7 +605,7 @@ class RaceService:
                 records.append(
                     LapRecord(
                         participant_id=lap.participant_id,
-                        lane=lane,
+                        lane=shown_lane,
                         lap_number=lap.lap_number,
                         lap_time_ns=lap.lap_time_ns,
                         race_time_ns=lap.race_time_ns,
@@ -516,20 +724,26 @@ class RaceService:
             )
             if participant is None:
                 raise ValidationError("error.race.participant_unknown")
+            stored_number = lap_number
+            race_time = race_time_ns
+            if heats.uses_heats(session, race_id):
+                stored_number = heats.stored_lap_number(session, participant.id, lap_number)
+                race_time = heats.heat_time_base(session, race_id, participant) + race_time_ns
             lap = Lap(
                 race_id=race_id,
                 participant_id=participant.id,
-                lap_number=lap_number,
+                lane=lane,
+                lap_number=stored_number,
                 lap_time_ns=lap_time_ns,
-                race_time_ns=race_time_ns,
+                race_time_ns=race_time,
             )
             session.add(lap)
             session.flush()
             session.add_all(
-                Sector(lap_id=lap.id, sector_number=number, sector_time_ns=time_ns)
-                for number, time_ns in sorted(sector_times_ns.items())
+                Sector(lap_id=lap.id, sector_number=sector_number, sector_time_ns=time_ns)
+                for sector_number, time_ns in sorted(sector_times_ns.items())
             )
-            participant.laps_completed = lap_number
+            participant.laps_completed = stored_number
             if participant.best_lap_ns is None or lap_time_ns < participant.best_lap_ns:
                 participant.best_lap_ns = lap_time_ns
             race = self._load(session, race_id)
@@ -540,7 +754,7 @@ class RaceService:
                         track_id=race.track_id,
                         driver_id=participant.driver_id,
                         vehicle_id=participant.vehicle_id,
-                        lane=participant.lane,
+                        lane=lane,
                         time_ns=lap_time_ns,
                         recorded_at=utc_now(),
                     )
@@ -551,6 +765,15 @@ class RaceService:
     ) -> None:
         with self._database.session() as session:
             race = self._load(session, race_id)
+            if heats.uses_heats(session, race.id):
+                for result in results:
+                    heats.accumulate_heat_time(session, race.id, result.lane, result.total_time_ns)
+                if heats.finish_heat(session, race, aborted=aborted):
+                    race.status = RaceStatus.READY.value
+                    return
+                race.status = (RaceStatus.ABORTED if aborted else RaceStatus.FINISHED).value
+                race.finished_at = utc_now()
+                return
             for result in results:
                 session.execute(
                     update(RaceParticipant)
@@ -620,7 +843,7 @@ class RaceService:
                 stored,
                 key=lambda item: time_trial_stored_key(
                     min((lap.lap_time_ns for lap in item[1]), default=None),
-                    item[0].lane,
+                    item[0].lane or 0,
                 ),
             )
         else:
@@ -668,6 +891,40 @@ class RaceService:
         if not 1 <= laps <= MAX_LAPS:
             raise ValidationError("error.race.laps", maximum=MAX_LAPS)
 
+    @staticmethod
+    def _validate_duration(minutes: int) -> None:
+        if not 1 <= minutes <= MAX_DURATION_MINUTES:
+            raise ValidationError("error.race.duration_invalid")
+
+    def has_heat_plan(self, race_id: RaceId) -> bool:
+        with self._database.session() as session:
+            return heats.uses_heats(session, race_id)
+
+    def _provider_lane_count(self, race: RaceInfo, competing: int) -> int:
+        briefing = self.heat_briefing(race.id)
+        if briefing is None:
+            return competing
+        seated = sum(1 for seat in briefing.seats if seat.participant_id is not None)
+        return seated or competing
+
+    def _require_race_track(self, session: Session, race: Race) -> TrackInfo:
+        del session
+        track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+        if track is None:
+            raise ValidationError("error.race.no_track")
+        return track
+
+    def _briefing_in_session(
+        self, session: Session, race: Race, lane_count: int
+    ) -> HeatBriefing | None:
+        names = {
+            participant.id: self._participant_info(participant).driver_label
+            for participant in session.scalars(
+                select(RaceParticipant).where(RaceParticipant.race_id == race.id)
+            )
+        }
+        return heats.briefing(session, race, lane_count, names)
+
     def _require_active_track(self, track_id: TrackId) -> TrackInfo:
         track = self._tracks.get_track(track_id)
         if track is None:
@@ -686,6 +943,8 @@ class RaceService:
     def _load_editable(self, session: Session, race_id: int) -> Race:
         race = self._load(session, race_id)
         if RaceStatus(race.status) not in _EDITABLE:
+            raise ValidationError("error.race.not_editable")
+        if heats.has_completed(session, race.id):
             raise ValidationError("error.race.not_editable")
         return race
 
@@ -784,6 +1043,7 @@ class RaceService:
             ),
             lane=participant.lane,
             start_number=driver.start_number if driver else None,
+            disqualified=participant.disqualified,
         )
 
     def _race_info(self, session: Session, race: Race) -> RaceInfo:
@@ -791,7 +1051,7 @@ class RaceService:
         participants = session.scalars(
             select(RaceParticipant)
             .where(RaceParticipant.race_id == race.id)
-            .order_by(RaceParticipant.lane)
+            .order_by(RaceParticipant.lane, RaceParticipant.id)
         )
         return RaceInfo(
             id=RaceId(race.id),
@@ -807,4 +1067,5 @@ class RaceService:
             created_at=race.created_at,
             started_at=race.started_at,
             finished_at=race.finished_at,
+            duration_minutes=race.duration_minutes,
         )

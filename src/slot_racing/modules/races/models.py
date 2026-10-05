@@ -35,6 +35,8 @@ class Race(Base):
         String(64), default=DEFAULT_TIMING_PROVIDER, server_default=DEFAULT_TIMING_PROVIDER
     )
     """Id of the timing provider that times this race. Resolved to a factory at the start."""
+    duration_minutes: Mapped[int | None]
+    """Length of one time-trial heat. Empty means the session ends only when it is stopped."""
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -51,7 +53,9 @@ class RaceParticipant(Base):
     race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
     driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="RESTRICT"))
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="RESTRICT"))
-    lane: Mapped[int]
+    lane: Mapped[int | None]
+    """Lane of the heat that is on track now. Empty while the driver is waiting for a heat."""
+    disqualified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     final_position: Mapped[int | None]
     laps_completed: Mapped[int] = mapped_column(default=0, server_default="0")
     finished: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
@@ -68,6 +72,8 @@ class Lap(Base):
     participant_id: Mapped[int] = mapped_column(
         ForeignKey("race_participants.id", ondelete="CASCADE")
     )
+    lane: Mapped[int | None]
+    """Lane this lap was driven on. Kept even after the driver moves to another heat."""
     lap_number: Mapped[int]
     lap_time_ns: Mapped[int] = mapped_column(BigInteger)
     race_time_ns: Mapped[int] = mapped_column(BigInteger)
@@ -100,3 +106,33 @@ class Sector(Base):
     lap_id: Mapped[int] = mapped_column(ForeignKey("laps.id", ondelete="CASCADE"))
     sector_number: Mapped[int]
     sector_time_ns: Mapped[int] = mapped_column(BigInteger)
+
+
+class RaceHeat(Base):
+    """One planned or finished passage. A driver's lane belongs to this heat."""
+
+    __tablename__ = "race_heats"
+    __table_args__ = (UniqueConstraint("race_id", "sequence"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
+    sequence: Mapped[int]
+    status: Mapped[str] = mapped_column(String(16), default="planned", server_default="planned")
+
+
+class RaceHeatEntry(Base):
+    """One driver on one lane in one heat. Postponed entries are not seated in that heat."""
+
+    __tablename__ = "race_heat_entries"
+    __table_args__ = (
+        UniqueConstraint("heat_id", "lane"),
+        UniqueConstraint("heat_id", "participant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    heat_id: Mapped[int] = mapped_column(ForeignKey("race_heats.id", ondelete="CASCADE"))
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("race_participants.id", ondelete="CASCADE")
+    )
+    lane: Mapped[int]
+    state: Mapped[str] = mapped_column(String(16), default="assigned", server_default="assigned")

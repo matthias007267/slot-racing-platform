@@ -301,6 +301,7 @@ def test_the_wizard_starts_a_time_trial_and_keeps_favorites(qtbot: QtBot, env: E
     stored = env.races.require_race(wizard.race.id) if wizard.race is not None else None
     assert stored is not None and stored.mode is RaceMode.TIME_TRIAL
     assert [item.vehicle_id for item in stored.participants] == [spare.id, spare.id]
+    env.races.activate_next_heat(stored.id)
     page.show_results(stored.id)
     assert page.results.measurements_table.rowCount() == 0
     assert not page.results.table.isVisible()

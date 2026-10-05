@@ -78,7 +78,10 @@ class RaceRunner:
         self.race = race
         self._engine = engine
         self._storage_errors = storage_errors
-        self._participants = {p.lane: p for p in race.participants}
+        self._participants: dict[int, ParticipantInfo] = {}
+        for participant in race.participants:
+            if participant.lane is not None:
+                self._participants[participant.lane] = participant
         self._lap_times_ns: dict[int, list[int]] = {}
         self._aborted = False
         self._subscriptions: list[Subscription] = [
@@ -117,6 +120,14 @@ class RaceRunner:
 
     def tick(self) -> None:
         self._engine.poll_sources()
+        self._stop_when_duration_elapsed()
+
+    def _stop_when_duration_elapsed(self) -> None:
+        minutes = self.race.duration_minutes
+        if minutes is None or not self.is_active:
+            return
+        if self._engine.elapsed_ns() >= minutes * 60 * 1_000_000_000:
+            self.stop()
 
     def close(self) -> None:
         for subscription in self._subscriptions:
@@ -206,12 +217,28 @@ class RaceController:
         :class:`ValidationError` (provider problems are :class:`TimingProviderError`)."""
         if self.active is not None and self.active.is_active:
             raise ValidationError("error.race.already_running")
-        race = self._service.validate_startable(race_id)
+        race = self._service.activate_next_heat(self._service.validate_startable(race_id).id)
         setup = self._timing_setup(race.track_id)
         source_laps = race.laps if race.mode is RaceMode.LAPS else TIME_TRIAL_TIMING_LAPS
+        lanes: list[int] = []
+        domain_participants: list[Participant] = []
+        for participant in race.participants:
+            lane = participant.lane
+            if lane is None:
+                continue
+            lanes.append(lane)
+            domain_participants.append(
+                Participant(
+                    driver_id=participant.driver_id,
+                    lane=lane,
+                    vehicle_id=participant.vehicle_id,
+                )
+            )
+        if not lanes:
+            raise ValidationError("error.race.no_participants")
         spec = TimingSessionSpec(
             setup=setup,
-            lanes=tuple(p.lane for p in race.participants),
+            lanes=tuple(lanes),
             laps=source_laps,
             race_id=race.id,
             track_id=race.track_id,
@@ -220,10 +247,7 @@ class RaceController:
         config = RaceConfig(
             race_id=race.id,
             laps=race.laps,
-            participants=tuple(
-                Participant(driver_id=p.driver_id, lane=p.lane, vehicle_id=p.vehicle_id)
-                for p in race.participants
-            ),
+            participants=tuple(domain_participants),
             layout=setup.layout,
             mode=race.mode,
         )
@@ -233,6 +257,7 @@ class RaceController:
             runner.start()
         except Exception:
             runner.close()
+            self._service.cancel_heat_start(race.id)
             self._service.abort_race(race.id)
             raise
         if self.active is not None:
