@@ -6,10 +6,10 @@ fractions of the frame, the same numbers the camera configuration keeps.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import cast
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QResizeEvent
 from PySide6.QtWidgets import QLabel, QWidget
 
@@ -23,6 +23,9 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 MIN_ZONE_PX = 8
 _HANDLE_PX = 10
 _COLORS = ("#1565c0", "#2e7d32", "#ef6c00", "#6a1b9a", "#00838f")
+# Brief confirmation that this zone saw a car. It is not the saved appearance.
+HIGHLIGHT_MS = 400
+_HIGHLIGHT = "#2FBF71"
 # The live picture is scaled down to this edge. Zone coordinates stay in the
 # full camera frame, so detection is unaffected.
 _PREVIEW_MAX_EDGE = 960
@@ -47,6 +50,12 @@ class CameraStage(QLabel):
         self._zones: list[NormalizedRoi] = []
         self._labels: list[str] = []
         self._selected = -1
+        self._highlights: set[int] = set()
+        self._highlight_timers: dict[int, QTimer] = {}
+        # PySide does not keep a lambda connected to a signal alive. The page
+        # can run long enough for that callable to be collected, which would
+        # leave the zone lit. The callback stays referenced until the flash ends.
+        self._highlight_callbacks: dict[int, Callable[[], None]] = {}
         self._armed = False
         self._gesture: str | None = None
         self._corner = ""
@@ -82,10 +91,46 @@ class CameraStage(QLabel):
         self._labels = [label for _zone, label in zones]
         if self._selected >= len(self._zones):
             self._selected = len(self._zones) - 1
+        self._clear_highlights()
         self._render()
 
     def zones(self) -> tuple[NormalizedRoi, ...]:
         return tuple(self._zones)
+
+    def highlighted(self) -> tuple[int, ...]:
+        """Zones that are briefly lit after a detection, in zone order."""
+        return tuple(index for index in range(len(self._zones)) if index in self._highlights)
+
+    def highlight(self, index: int, duration_ms: int = HIGHLIGHT_MS) -> None:
+        """Flash one zone, then restore its normal outline. Other zones stay as they are."""
+        if index < 0 or index >= len(self._zones):
+            return
+        if duration_ms < 0:
+            raise ValueError("duration_ms must not be negative")
+        previous = self._highlight_timers.pop(index, None)
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+        self._highlights.add(index)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def end(index: int = index) -> None:
+            self._end_highlight(index)
+
+        timer.timeout.connect(end)
+        self._highlight_callbacks[index] = end
+        self._highlight_timers[index] = timer
+        timer.start(duration_ms)
+        self._render()
+
+    def _end_highlight(self, index: int) -> None:
+        self._highlights.discard(index)
+        self._highlight_callbacks.pop(index, None)
+        timer = self._highlight_timers.pop(index, None)
+        if timer is not None:
+            timer.deleteLater()
+        self._render()
 
     def selected_index(self) -> int:
         return self._selected
@@ -277,6 +322,14 @@ class CameraStage(QLabel):
         self.geometry_changed.emit()
         self._render()
 
+    def _clear_highlights(self) -> None:
+        self._highlights.clear()
+        self._highlight_callbacks.clear()
+        for timer in self._highlight_timers.values():
+            timer.stop()
+            timer.deleteLater()
+        self._highlight_timers.clear()
+
     def _pixels(self, index: int) -> tuple[int, int, int, int]:
         roi = roi_to_pixels(self._zones[index], *self._frame_size)
         return roi.x, roi.y, roi.width, roi.height
@@ -324,11 +377,20 @@ class CameraStage(QLabel):
         top_left = self.image_to_widget(x, y)
         bottom_right = self.image_to_widget(x + width, y + height)
         rect = QRect(top_left, bottom_right)
-        color = QColor("#f9a825" if selected else _COLORS[index % len(_COLORS)])
+        lit = index in self._highlights
+        if lit:
+            color = QColor(_HIGHLIGHT)
+            pen_width = 4
+        elif selected:
+            color = QColor("#f9a825")
+            pen_width = 3
+        else:
+            color = QColor(_COLORS[index % len(_COLORS)])
+            pen_width = 2
         pen = QPen(color)
-        pen.setWidth(3 if selected else 2)
+        pen.setWidth(pen_width)
         painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setBrush(QColor(47, 191, 113, 80) if lit else Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
         painter.drawText(
             rect.adjusted(4, 4, -4, -4),

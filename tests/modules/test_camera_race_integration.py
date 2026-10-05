@@ -35,7 +35,10 @@ from slot_racing.core.events import (
 )
 from slot_racing.core.storage import Setting
 from slot_racing.core.timing import TimingSetupService, TimingSourceFactory
+from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.runner import RaceRunner
 from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import MAX_FRAMES_PER_POLL, MAX_QUEUED_FRAMES
@@ -56,6 +59,7 @@ from slot_racing.modules.timing_camera.store import (
     CAMERA_CONFIGURATION_KEY,
     CameraConfigurationStore,
 )
+from slot_racing.modules.timing_camera.ui.stage import CameraStage
 from tests.modules.conftest import Env
 from tests.modules.test_camera_capture import ScriptedCapture
 from tests.modules.test_ui_management import column_text
@@ -808,6 +812,8 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
     live.show()
     try:
         live.show_runner(runner)
+        assert not live.cue_label.isVisible()
+        assert live.findChildren(CameraStage) == []
         device = hub.live()
         consume(device, blank())
         live.refresh()
@@ -854,3 +860,156 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         assert " | " in lap_row[4]
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize(
+    ("stored_width", "stored_height", "frame_width", "frame_height"),
+    [
+        (1280, 720, 640, 480),
+        (640, 480, 1920, 1080),
+        (800, 600, 320, 240),
+    ],
+)
+def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
+    env: Env,
+    stored_width: int,
+    stored_height: int,
+    frame_width: int,
+    frame_height: int,
+) -> None:
+    """A smaller or larger picture must not reject lane 1 or move the zone."""
+    normalized = NormalizedRoi(x=0.80, y=0.10, width=0.15, height=0.20)
+    reference = roi_to_pixels(normalized, stored_width, stored_height)
+    actual = roi_to_pixels(normalized, frame_width, frame_height)
+    if frame_width < stored_width or frame_height < stored_height:
+        outside = (
+            reference.x + reference.width > frame_width
+            or reference.y + reference.height > frame_height
+        )
+        assert outside
+    assert actual != reference
+    assert actual.x + actual.width <= frame_width
+    assert actual.y + actual.height <= frame_height
+    hub = DeviceHub()
+    save_document(
+        env,
+        (
+            zone("start_finish", 1, x=0.80, y=0.10, width=0.15, height=0.20),
+            zone("start_finish", 2, x=0.80, y=0.55, width=0.15, height=0.20),
+        ),
+        StoredCamera(device_index=4, width=stored_width, height=stored_height, fps=12),
+    )
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    events = listen(env)
+    runner = env.controller.start_race(race_id)
+    try:
+        device = hub.live()
+        consume(device, blank(frame_width, frame_height))
+        runner.tick()
+        assert runner.snapshot().source_errors == ()
+        assert of_type(events, SensorTriggered) == []
+        car = DetectionRoi(
+            actual.x + 1,
+            actual.y + 1,
+            max(1, actual.width // 5),
+            max(1, actual.height // 5),
+        )
+        assert car.x + car.width <= actual.x + actual.width
+        assert car.y + car.height <= actual.y + actual.height
+        consume(device, painted((car,), frame_width, frame_height))
+        runner.tick()
+        snapshot = runner.snapshot()
+        assert snapshot.source_errors == ()
+        triggered = of_type(events, SensorTriggered)
+        assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)]
+        assert of_type(events, LapCompleted)
+        assert runner.status is RaceStatus.FINISHED
+    finally:
+        runner.close()
+
+
+def engine_status(runner: RaceRunner) -> RaceStatus:
+    """Read the engine status. A direct ``is`` check would stick for mypy."""
+    return runner.status
+
+
+def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    events = listen(env)
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 60_000
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    runner = env.controller.prepare_race(race_id)
+    try:
+        live.show()
+        live.open_for_start(runner)
+        assert live.cue_label.text() == "3"
+        assert live.cue_label.isVisible()
+        assert runner.status is RaceStatus.CREATED
+        assert not any(device.opened for device in hub.created)
+        env.clock.advance(5_000_000_000)
+        live.refresh()
+        assert runner.snapshot().elapsed_ns == 0
+        assert of_type(events, LapCompleted) == []
+        live.advance_start_cue()
+        assert live.cue_label.text() == "2"
+        assert runner.status is RaceStatus.CREATED
+        live.advance_start_cue()
+        assert live.cue_label.text() == "1"
+        assert runner.status is RaceStatus.CREATED
+        live.advance_start_cue()
+        assert live.cue_label.text() == "GO"
+        assert engine_status(runner) is RaceStatus.RUNNING
+        env.clock.advance(2_000_000_000)
+        live.refresh()
+        assert runner.snapshot().elapsed_ns == 2_000_000_000
+        device = hub.live()
+        consume(device, blank())
+        runner.tick()
+        consume(device, painted((CAR_IN_ZONE,)))
+        runner.tick()
+        assert runner.snapshot().source_errors == ()
+        assert of_type(events, LapCompleted)
+        assert live.findChildren(CameraStage) == []
+    finally:
+        live.advance_start_cue()
+        runner.close()
+
+
+def test_the_races_page_counts_down_only_for_a_camera_race(qtbot: QtBot, env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    page = RacesPage(
+        env.runtime.translator,
+        env.races,
+        env.controller,
+        env.drivers,
+        env.vehicles,
+        env.tracks,
+        env.runtime.services.get(TimingProviderRegistry),
+    )
+    page.live.cue_interval_ms = 60_000
+    page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(page)
+    page.show()
+    try:
+        assert page.start_race(race_id)
+        assert page.stack.currentWidget() is page.live
+        assert page.live.cue_label.text() == "3"
+        assert page.live.cue_label.isVisible()
+        active = env.controller.active
+        assert active is not None
+        assert active.status is RaceStatus.CREATED
+        assert active.snapshot().elapsed_ns == 0
+        assert not any(device.opened for device in hub.created)
+    finally:
+        page.live.advance_start_cue()
+        if env.controller.active is not None:
+            env.controller.active.close()

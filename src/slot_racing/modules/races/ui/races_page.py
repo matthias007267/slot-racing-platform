@@ -24,6 +24,7 @@ from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.results_view import ResultsView
+from slot_racing.modules.races.ui.start_cue import uses_start_cue
 from slot_racing.modules.races.ui.wizard import RaceWizard
 from slot_racing.uikit import (
     StatusLabel,
@@ -201,8 +202,12 @@ class RacesPage(QWidget):
         self.stack.setCurrentWidget(self.wizard)
 
     def _start(self, race_id: RaceId) -> None:
-        runner = self._controller.start_race(race_id)
-        self.live.show_runner(runner)
+        info = self._service.get_race(race_id)
+        if info is not None and uses_start_cue(info.timing_provider):
+            runner = self._controller.prepare_race(race_id)
+        else:
+            runner = self._controller.start_race(race_id)
+        self.live.open_for_start(runner)
         self.stack.setCurrentWidget(self.live)
 
     def _delete(self, race_id: RaceId) -> None:

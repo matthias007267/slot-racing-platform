@@ -166,11 +166,18 @@ def test_a_valid_camera_provider_starts_the_race(qtbot: QtBot, env: Env) -> None
     wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
     assert wizard.add_participant()
     assert wizard.go_next() and wizard.go_next()
+    page.live.cue_interval_ms = 20
     wizard.start_button.click()
     assert isinstance(page.current_view(), LiveRaceView)
     race = wizard.race
     assert race is not None
-    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+    assert page.live.cue_label.text() == "3"
+    assert not page.live.cue_label.isHidden()
+    assert env.races.require_race(race.id).status is RaceStatus.READY
+    qtbot.waitUntil(
+        lambda: env.races.require_race(race.id).status is RaceStatus.RUNNING,
+        timeout=3000,
+    )
     assert env.races.require_race(race.id).timing_provider == "camera"
 
 

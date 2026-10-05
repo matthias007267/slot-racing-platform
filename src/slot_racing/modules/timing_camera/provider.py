@@ -30,6 +30,7 @@ from slot_racing.modules.timing_camera.capture import (
 )
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
+    scale_detector_settings,
     to_camera_config,
     to_detector_settings,
 )
@@ -69,6 +70,7 @@ class CameraTimingProvider(TimingSource):
         settings: DetectorSettings | None = None,
         background: GrayFrame | None = None,
         source_id: str = _SOURCE_ID,
+        zone_frame: tuple[int, int] | None = None,
     ) -> None:
         if not isinstance(spec, TimingSessionSpec):
             raise TypeError("spec must be a TimingSessionSpec")
@@ -78,11 +80,14 @@ class CameraTimingProvider(TimingSource):
             raise TypeError("settings must be DetectorSettings")
         if not isinstance(source_id, str) or source_id.strip() == "":
             raise ValueError("source_id must be a non-empty string")
+        if zone_frame is not None and not _positive_frame(zone_frame):
+            raise ValueError("zone_frame must be a positive width and height")
         self._spec = spec
         self._frames = frames
         self._settings = settings
         self._background = background
         self._source_id = source_id
+        self._zone_frame = zone_frame
         self._sensors = {
             sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active
         }
@@ -155,6 +160,10 @@ class CameraTimingProvider(TimingSource):
             processed += 1
             if detector is None:
                 continue
+            self._match_delivered_frame(delivered.frame)
+            detector = self._detector
+            if detector is None:
+                continue
             if self._resync:
                 detector.synchronize(delivered.frame)
                 self._resync = False
@@ -172,6 +181,29 @@ class CameraTimingProvider(TimingSource):
                         lane=crossing.lane,
                     )
                 )
+
+    def _match_delivered_frame(self, frame: GrayFrame) -> None:
+        """Map saved zones onto the picture the camera actually delivered.
+
+        Pixel zones are built for the resolution stored with them. Drivers often
+        ignore that request. The fractions stay the same; only the pixel grid
+        changes. An injected zone list without ``zone_frame`` is left alone, so
+        tests that already speak in pixels keep those pixels.
+        """
+        reference = self._zone_frame
+        settings = self._settings
+        if reference is None or settings is None:
+            return
+        if (frame.width, frame.height) == reference:
+            return
+        scaled = scale_detector_settings(
+            settings, reference[0], reference[1], frame.width, frame.height
+        )
+        background = _background_for_frame(self._background, frame.width, frame.height)
+        self._settings = scaled
+        self._zone_frame = (frame.width, frame.height)
+        self._background = background
+        self._detector = LaneCrossingDetector(scaled, background=background)
 
     def _reset_detector(self) -> None:
         settings = self._settings
@@ -288,7 +320,7 @@ class CameraTimingFactory(TimingSourceFactory):
         The returned source keeps that snapshot. Later reads of the saved
         document do not affect it, and the capture thread does not load it.
         """
-        camera, settings = self._prepare(spec)
+        camera, settings, zone_frame = self._prepare(spec)
         if self._frames is not None:
             frames = self._frames
         else:
@@ -297,24 +329,28 @@ class CameraTimingFactory(TimingSourceFactory):
                 lease=self._lease,
                 lease_owner=CameraLease.RACE,
             )
-        return CameraTimingProvider(spec, frames, settings, self._background)
+        return CameraTimingProvider(spec, frames, settings, self._background, zone_frame=zone_frame)
 
-    def _prepare(self, spec: TimingSessionSpec) -> tuple[CameraConfig, DetectorSettings | None]:
+    def _prepare(
+        self, spec: TimingSessionSpec
+    ) -> tuple[CameraConfig, DetectorSettings | None, tuple[int, int] | None]:
         if len(set(spec.lanes)) != len(spec.lanes):
             raise ProviderConfigurationError("error.timing_provider.lanes_duplicate")
         stored = self._stored_configuration()
         camera = self._camera if self._camera is not None else _camera_or_default(stored)
+        zone_frame: tuple[int, int] | None = None
         if self._settings is not None:
             settings: DetectorSettings | None = self._settings
         elif stored is not None:
             settings = _zones_from_stored(stored)
+            zone_frame = (stored.camera.width, stored.camera.height)
         else:
             settings = None
         _require_known_positions(
             settings,
             {sensor.position_id: sensor.id for sensor in spec.setup.sensors if sensor.active},
         )
-        return camera, settings
+        return camera, settings, zone_frame
 
     def _stored_configuration(self) -> CameraConfiguration | None:
         """The saved document when this factory still needs something from it."""
@@ -341,6 +377,33 @@ class CameraTimingFactory(TimingSourceFactory):
         from slot_racing.modules.timing_camera.opencv_device import OpenCVCapture
 
         return OpenCVCapture(camera)
+
+
+def _positive_frame(zone_frame: tuple[int, int]) -> bool:
+    if not isinstance(zone_frame, tuple) or len(zone_frame) != 2:
+        return False
+    return all(
+        isinstance(side, int) and not isinstance(side, bool) and side >= 1 for side in zone_frame
+    )
+
+
+def _background_for_frame(
+    background: GrayFrame | None, width: int, height: int
+) -> GrayFrame | None:
+    """Keep an empty reference when the camera picture is a different size.
+
+    A uniform background means "empty track" at the resolution it was built for.
+    The same fill at the delivered size is that reference. A background that
+    already contains a picture cannot be reinterpreted, so the size mismatch
+    stays visible.
+    """
+    if background is None or (background.width, background.height) == (width, height):
+        return background
+    raw = background.to_bytes()
+    fill = raw[0]
+    if any(pixel != fill for pixel in raw):
+        raise ValueError("frame size must match the background")
+    return GrayFrame.blank(width, height, fill)
 
 
 def _camera_or_default(stored: CameraConfiguration | None) -> CameraConfig:
