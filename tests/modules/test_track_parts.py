@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pytestqt.qtbot import QtBot
+from sqlalchemy import text
 
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.backup import create_backup, restore_backup
@@ -138,10 +139,10 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
         angle_deg=None,
         lane_count=2,
     )
-    assert known.scale is None
+    assert known.scale == "1:32"
     assert implied_scale(known.system) == "1:32"
     stored = planner.add_part(known)
-    assert planner.library.require(stored.id).spec.scale is None
+    assert planner.library.require(stored.id).spec.scale == "1:32"
     with pytest.raises(ValidationError) as duplicate:
         planner.add_part(known)
     assert duplicate.value.key == "error.planner.part_exists"
@@ -219,7 +220,8 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     assert straight.length_mm == pytest.approx(345)
     assert straight.radius_mm is None
     assert straight.angle_deg == pytest.approx(0)
-    assert straight.scale is None
+    assert straight.scale == "1:32"
+    assert {spec.scale for spec in by_article.values()} == {"1:32"}
     assert by_article["20020611"].length_mm == pytest.approx(115)
     assert by_article["20020612"].length_mm == pytest.approx(86)
     curve = by_article["20020572"]
@@ -509,6 +511,13 @@ def test_parts_and_plans_survive_reopening_the_database(tmp_path: Path) -> None:
         assert restored.article_number == "EB-KEEP"
         assert restored.lane_count == 4
         assert restored.scale == "1:32"
+        seeded = next(
+            record.spec
+            for record in planner.list_parts()
+            if record.spec.article_number == "20020601"
+        )
+        assert seeded.system == "Carrera Digital 132"
+        assert seeded.scale == "1:32"
         loaded = planner.load(track_id)
         assert loaded.instances[0].rotation_z_deg == pytest.approx(82)
         assert loaded.instances[0].part_id == part_id
@@ -566,6 +575,12 @@ def test_backup_restores_the_library_and_the_plan(tmp_path: Path) -> None:
         )
         assert restored.spec.system == "Eigenbau"
         assert restored.spec.scale == "1:43"
+        seeded = next(
+            record.spec
+            for record in planner.list_parts()
+            if record.spec.article_number == "20020601"
+        )
+        assert seeded.scale == "1:32"
         assert restored.spec.lane_count == 3
         assert restored.spec.length_mm == pytest.approx(200)
         assert len(restored.spec.connectors) == 2
@@ -590,6 +605,7 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     qtbot.addWidget(dialog)
     dialog.system.setCurrentText("Carrera Digital 132")
     assert not dialog.scale.isEnabled()
+    assert dialog.scale.currentData() == "1:32"
     dialog.system.setCurrentText("Eigenbau")
     assert dialog.scale.isEnabled()
     dialog.article.setText("EB-DLG")
@@ -630,6 +646,60 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     assert page.plan().instances == ()
     assert page.library.count() == before
     assert planner.library.require(stored.id).spec.name == "Dialoggerade"
+    carrera = PartDialog(env.runtime.translator, planner)
+    qtbot.addWidget(carrera)
+    carrera.article.setText("20577")
+    carrera.name.setText("Carrera aus Dialog")
+    carrera.length.setValue(200)
+    carrera.accept()
+    assert carrera.created is not None
+    assert carrera.created.system == "Carrera Digital 132"
+    assert carrera.created.scale == "1:32"
+    saved = next(record for record in planner.list_parts() if record.spec.article_number == "20577")
+    assert saved.spec.scale == "1:32"
+
+
+def test_every_scale_is_stored_and_an_invalid_scale_is_rejected(env: Env) -> None:
+    planner = _planner(env)
+    for scale in ("1:24", "1:32", "1:43"):
+        created = planner.add_part(_straight_spec(f"EB-{scale}", lanes=2, scale=scale))
+        loaded = planner.library.require(created.id).spec
+        assert created.spec.scale == scale
+        assert loaded.scale == scale
+        assert loaded.system == "Eigenbau"
+    for scale in ("1:18", "1:64", "32", ""):
+        with pytest.raises(ValidationError) as caught:
+            _straight_spec(f"EB-{scale}", lanes=2, scale=scale)
+        assert caught.value.key == "error.planner.scale"
+
+
+def test_carrera_systems_store_their_scale_explicitly(env: Env) -> None:
+    planner = _planner(env)
+    systems = (
+        ("Carrera Digital 132", "1:32"),
+        ("Carrera Digital 124", "1:24"),
+        ("Carrera Evolution", "1:32"),
+        ("Carrera GO!!!", "1:43"),
+    )
+    for system, scale in systems:
+        omitted = _straight_spec("20599", lanes=2, scale=None, system=system)
+        explicit = _straight_spec("20598", lanes=2, scale=scale, system=system)
+        assert omitted.scale == scale
+        assert explicit.scale == scale
+        stored = planner.add_part(omitted)
+        assert planner.library.require(stored.id).spec.scale == scale
+    again = _straight_spec("20599", lanes=2, scale=None, system="Carrera Digital 132")
+    with pytest.raises(ValidationError) as caught:
+        planner.add_part(again)
+    assert caught.value.key == "error.planner.part_exists"
+    with env.runtime.database.engine.connect() as connection:
+        sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'track_part_definitions'"
+            )
+        ).scalar_one()
+    assert "uq_track_part_definitions_system_article_number_scale" in str(sql)
 
 
 def _straight_spec(

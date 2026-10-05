@@ -24,7 +24,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("system", sa.String(length=80), nullable=False),
         sa.Column("article_number", sa.String(length=40), nullable=False),
-        sa.Column("scale", sa.String(length=8), nullable=True),
+        sa.Column("scale", sa.String(length=8), nullable=False),
         sa.Column("name", sa.String(length=120), nullable=False),
         sa.Column("category", sa.String(length=32), nullable=False),
         sa.Column("length_mm", sa.Float(), nullable=True),
@@ -35,6 +35,12 @@ def upgrade() -> None:
         sa.Column("lane_count", sa.Integer(), nullable=False),
         sa.Column("outline", sa.JSON(), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_track_part_definitions")),
+        sa.UniqueConstraint(
+            "system",
+            "article_number",
+            "scale",
+            name=op.f("uq_track_part_definitions_system_article_number_scale"),
+        ),
     )
     op.create_table(
         "track_part_connectors",

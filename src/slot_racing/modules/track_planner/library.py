@@ -18,6 +18,7 @@ from slot_racing.modules.track_planner.parts import (
     PartRecord,
     PartSpec,
     identity_key,
+    resolved_scale,
     standard_catalog,
 )
 
@@ -112,7 +113,7 @@ class PartLibrary:
         definition = TrackPartDefinition(
             system=spec.system,
             article_number=spec.article_number,
-            scale=spec.scale,
+            scale=resolved_scale(spec.system, spec.scale),
             name=spec.name,
             category=spec.category,
             length_mm=spec.length_mm,

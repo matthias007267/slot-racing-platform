@@ -1,6 +1,6 @@
 """Track pieces: one definition, many placed instances.
 
-A definition is an original part (system and article number, measures, connectors, outline).
+A definition is an original part (system, article number, scale, measures, connectors, outline).
 An instance is that part used once on a plan, with its own position and rotation. Editing an
 instance never changes the definition.
 
@@ -21,12 +21,12 @@ from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 
 SCALES = ("1:24", "1:32", "1:43")
-# The scale is part of the system name, so it is not stored again on the part.
+# These systems have one scale. The part still stores that scale; it is not left empty.
 IMPLIED_SCALE: dict[str, str] = {
     "Carrera Digital 132": "1:32",
     "Carrera Digital 124": "1:24",
     "Carrera Evolution": "1:32",
-    "Carrera GO": "1:43",
+    "Carrera GO!!!": "1:43",
 }
 
 STRAIGHT = "straight"
@@ -77,11 +77,11 @@ class ConnectorSpec:
 
 @dataclass(frozen=True, slots=True)
 class PartSpec:
-    """The original part. ``scale`` is empty when :data:`IMPLIED_SCALE` already names it."""
+    """The original part. ``scale`` is always one of :data:`SCALES`, even for a known system."""
 
     system: str
     article_number: str
-    scale: str | None
+    scale: str
     name: str
     category: str
     length_mm: float | None
@@ -128,23 +128,30 @@ def implied_scale(system: str) -> str | None:
 
 
 def resolved_scale(system: str, scale: str | None) -> str:
-    """The scale a part is built in. A known system wins over a typed value."""
+    """Scale stored on the part. A known system still stores its own scale."""
     known = implied_scale(system)
+    typed = _typed_scale(scale)
     if known is not None:
-        if scale is not None and scale != known:
+        if typed is not None and typed != known:
             raise ValidationError("error.planner.scale")
         return known
-    if scale not in SCALES:
+    if typed is None or typed not in SCALES:
         raise ValidationError("error.planner.scale")
-    return scale
+    return typed
 
 
-def stored_scale(system: str, scale: str | None) -> str | None:
-    """``None`` when the system already determines the scale."""
-    if implied_scale(system) is not None:
-        resolved_scale(system, scale)
-        return None
+def stored_scale(system: str, scale: str | None) -> str:
+    """The scale written on every part. It is never left empty."""
     return resolved_scale(system, scale)
+
+
+def _typed_scale(scale: str | None) -> str | None:
+    if scale is None:
+        return None
+    if not isinstance(scale, str):
+        raise ValidationError("error.planner.scale")
+    text = scale.strip()
+    return text or None
 
 
 def identity_key(system: str, article_number: str, scale: str | None) -> tuple[str, str, str]:
@@ -335,6 +342,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
     centre radii 300 / 500 / 700 / 900 mm. Packs that only repeat a piece are not a second part.
     """
     system = "Carrera Digital 132"
+    scale = resolved_scale(system, None)
     specs: list[PartSpec] = []
 
     def add(spec: PartSpec) -> None:
@@ -346,7 +354,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             PartSpec(
                 system,
                 article,
-                None,
+                scale,
                 name,
                 category,
                 length,
@@ -376,7 +384,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         PartSpec(
             system,
             "20030341",
-            None,
+            scale,
             "Pitlane-Gerade",
             PITLANE,
             345.0,
@@ -406,7 +414,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             PartSpec(
                 system,
                 article,
-                None,
+                scale,
                 name,
                 CURVE,
                 None,
@@ -423,7 +431,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         PartSpec(
             system,
             "20020574",
-            None,
+            scale,
             "Steilkurve R1 30°",
             SPECIAL,
             None,
@@ -440,7 +448,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         PartSpec(
             system,
             "20020587",
-            None,
+            scale,
             "Kreuzung",
             CROSSING,
             345.0,
@@ -458,7 +466,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         PartSpec(
             system,
             "20020560",
-            None,
+            scale,
             "Randstreifen Standardgerade",
             BORDER,
             345.0,
@@ -490,7 +498,7 @@ def pit_end(system: str, article: str, name: str, *, pit_side: float) -> PartSpe
     return PartSpec(
         system,
         article,
-        None,
+        resolved_scale(system, None),
         name,
         PITLANE,
         length,

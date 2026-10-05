@@ -69,7 +69,7 @@ class PartDialog(FormDialog):
         spec = build_part(
             system=self.system.currentText(),
             article_number=self.article.text(),
-            scale=None if not self.scale.isEnabled() else (None if scale is None else str(scale)),
+            scale=None if scale is None else str(scale),
             name=self.name.text(),
             category=str(self.category.currentData()),
             length_mm=_optional(self.length),

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, String
+from sqlalchemy import JSON, Float, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from slot_racing.core.storage.base import Base
@@ -15,12 +15,13 @@ from slot_racing.core.storage.base import Base
 
 class TrackPartDefinition(Base):
     __tablename__ = "track_part_definitions"
+    __table_args__ = (UniqueConstraint("system", "article_number", "scale"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     system: Mapped[str] = mapped_column(String(80))
     article_number: Mapped[str] = mapped_column(String(40))
-    # Empty when the system already names the scale. No manufacturer column.
-    scale: Mapped[str | None] = mapped_column(String(8))
+    # Always 1:24, 1:32 or 1:43. A known system still stores its scale. No manufacturer.
+    scale: Mapped[str] = mapped_column(String(8))
     name: Mapped[str] = mapped_column(String(120))
     category: Mapped[str] = mapped_column(String(32))
     length_mm: Mapped[float | None] = mapped_column(Float)
