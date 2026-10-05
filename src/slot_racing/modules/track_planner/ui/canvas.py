@@ -13,6 +13,7 @@ from PySide6.QtGui import (
     QDropEvent,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPolygonF,
     QWheelEvent,
@@ -39,7 +40,16 @@ from slot_racing.modules.track_planner.document import (
     span,
     travel_vector,
 )
-from slot_racing.modules.track_planner.parts import PartInstance, PartSpec, rotate_xy
+from slot_racing.modules.track_planner.parts import (
+    ConnectorSpec,
+    PartInstance,
+    PartSpec,
+    connector_occupied,
+    connectors_compatible,
+    join_pose,
+    rotate_xy,
+    world_xy,
+)
 from slot_racing.modules.track_planner.ui.library_view import PART_MIME
 from slot_racing.uikit.theme import COLORS
 
@@ -54,6 +64,7 @@ Moved = Callable[[str, int, int], None]
 MovedGroup = Callable[[str, list[tuple[str, float, float]]], None]
 Rotated = Callable[[list[str], float, float, float], None]
 Dropped = Callable[[int, float, float], None]
+Docked = Callable[[str, int], None]
 
 
 def rect_fully_inside(inner: QRectF, outer: QRectF) -> bool:
@@ -88,10 +99,15 @@ class PlanCanvas(QGraphicsView):
         self._scene.setSceneRect(-8000, -8000, 20000, 20000)
         self.setScene(self._scene)
         self.centerOn(0, 0)
+        self._scene.selectionChanged.connect(self._on_selection)
         self._on_moved: Moved | None = None
         self._on_group: MovedGroup | None = None
         self._on_rotated: Rotated | None = None
         self._on_dropped: Dropped | None = None
+        self._on_docked: Docked | None = None
+        self._expanding = False
+        self._placing = False
+        self._pluses: list[PlusItem] = []
         self._lane_count = 2
         self._direction = CLOCKWISE
         self._loading = False
@@ -122,6 +138,13 @@ class PlanCanvas(QGraphicsView):
     def set_drop_listener(self, listener: Dropped) -> None:
         self._on_dropped = listener
 
+    def set_dock_listener(self, listener: Docked) -> None:
+        self._on_docked = listener
+
+    def center_on_mm(self, x_mm: float, y_mm: float) -> None:
+        """Move the view so one plan point sits in the middle. Coordinates stay put."""
+        self.centerOn(x_mm * MM, y_mm * MM)
+
     def show_plan(
         self,
         plan: TrackPlan,
@@ -138,6 +161,7 @@ class PlanCanvas(QGraphicsView):
         self.rotation_handle.hide()
         if self.rotation_handle.scene() is self._scene:
             self._scene.removeItem(self.rotation_handle)
+        self._pluses = []
         self._scene.clear()
         self._scene.addItem(self.rotation_handle)
         catalog = {} if parts is None else parts
@@ -159,7 +183,10 @@ class PlanCanvas(QGraphicsView):
             self._scene.addItem(start)
             start.setSelected(start.item_id in chosen)
         self._loading = False
-        self._place_handle()
+        self.expand_groups()
+        self._place_extras()
+        self._scene.invalidate(self._scene.sceneRect(), QGraphicsScene.SceneLayer.BackgroundLayer)
+        self.viewport().update()
 
     def selected_id(self) -> str | None:
         ids = self.selected_ids()
@@ -180,7 +207,8 @@ class PlanCanvas(QGraphicsView):
                 continue
             if rect_fully_inside(item.sceneBoundingRect(), area):
                 item.setSelected(True)
-        self._place_handle()
+        self.expand_groups()
+        self._place_extras()
 
     def zoom_at(self, view_pos: QPointF, delta_y: int) -> None:
         """Scale around a viewport point. The scene point under it stays put."""
@@ -215,6 +243,11 @@ class PlanCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             hit = self.itemAt(event.position().toPoint())
+            if isinstance(hit, PlusItem):
+                if self._on_docked is not None:
+                    self._on_docked(hit.instance_id, hit.connector_index)
+                event.accept()
+                return
             if isinstance(hit, RotationHandle):
                 self.rotation_handle.begin(self.mapToScene(event.position().toPoint()))
                 event.accept()
@@ -243,7 +276,7 @@ class PlanCanvas(QGraphicsView):
             event.accept()
             return
         super().mouseMoveEvent(event)
-        self._place_handle()
+        self._place_extras()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton and self._panning:
@@ -267,7 +300,7 @@ class PlanCanvas(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
-        self._place_handle()
+        self._place_extras()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasFormat(PART_MIME):
@@ -338,6 +371,66 @@ class PlanCanvas(QGraphicsView):
         self._rotate_ids = []
         self._on_rotated(ids, origin[0], origin[1], delta)
 
+    def expand_groups(self) -> None:
+        """Selecting one member selects the whole persistent group."""
+        if self._expanding:
+            return
+        groups = {
+            item.group_id
+            for item in self._scene.items()
+            if isinstance(item, InstanceItem) and item.isSelected() and item.group_id
+        }
+        if not groups:
+            return
+        self._expanding = True
+        for item in self._scene.items():
+            if isinstance(item, InstanceItem) and item.group_id in groups:
+                item.setSelected(True)
+        self._expanding = False
+
+    def _on_selection(self) -> None:
+        if self._loading or self._expanding or self._placing:
+            return
+        self._place_extras()
+
+    def _place_extras(self) -> None:
+        self._place_handle()
+        self._place_pluses()
+
+    def _place_pluses(self) -> None:
+        if self._placing:
+            return
+        self._placing = True
+        self._replace_pluses()
+        self._placing = False
+
+    def _replace_pluses(self) -> None:
+        for plus in self._pluses:
+            if plus.scene() is self._scene:
+                self._scene.removeItem(plus)
+        self._pluses = []
+        if self._loading:
+            return
+        selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
+        if len(selected) != 1:
+            return
+        item = selected[0]
+        placed = [(_live_instance(other), other.spec) for other in self._instances()]
+        live = _live_instance(item)
+        for index, connector in enumerate(item.spec.connectors):
+            if connector_occupied(live, connector, placed):
+                continue
+            if not _same_part_can_join(item.spec, live, connector):
+                continue
+            point = world_xy(live, connector.x_mm, connector.y_mm)
+            plus = PlusItem(item.item_id, index, _plus_offset(live, connector))
+            self._scene.addItem(plus)
+            plus.setPos(point[0] * MM, point[1] * MM)
+            self._pluses.append(plus)
+
+    def _instances(self) -> list[InstanceItem]:
+        return [item for item in self._scene.items() if isinstance(item, InstanceItem)]
+
     def _place_handle(self) -> None:
         selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
         if not selected or self._loading:
@@ -353,7 +446,7 @@ class PlanCanvas(QGraphicsView):
 class PlanScene(QGraphicsScene):
     def __init__(self, parent: QGraphicsView) -> None:
         super().__init__(parent)
-        self.grid_enabled = True
+        self.grid_enabled = False
         self.grid_px = float(CELL)
 
     def drawBackground(self, painter: QPainter, rect: QRectF | QRect) -> None:  # noqa: N802
@@ -482,6 +575,8 @@ class InstanceItem(QGraphicsItem):
     def __init__(self, instance: PartInstance, spec: PartSpec, report: MovedGroup) -> None:
         super().__init__()
         self.item_id = instance.id
+        self.spec = spec
+        self.group_id = instance.group_id
         self._report = report
         self._ready = False
         self._press: QPointF | None = None
@@ -521,13 +616,16 @@ class InstanceItem(QGraphicsItem):
         self._ready = True
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        view = self.scene().views()
+        if view and isinstance(view[0], PlanCanvas):
+            view[0].expand_groups()
         self._press = self.pos()
         self._starts = {
             item.item_id: item.pos()
             for item in self.scene().selectedItems()
             if isinstance(item, InstanceItem)
         }
-        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
         super().mouseMoveEvent(event)
@@ -585,6 +683,12 @@ class RotationHandle(QGraphicsItem):
     def boundingRect(self) -> QRectF:  # noqa: N802
         return self._bounds
 
+    def shape(self) -> QPainterPath:
+        """Only the knob starts a rotation. The part body underneath stays a move target."""
+        path = QPainterPath()
+        path.addEllipse(self._knob, 8, 8)
+        return path
+
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
         painter.setPen(QPen(QColor(COLORS.accent), 2))
         painter.drawLine(QPointF(0, 0), self._knob)
@@ -616,6 +720,61 @@ class RotationHandle(QGraphicsItem):
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
         self.finish(event.scenePos())
         event.accept()
+
+
+class PlusItem(QGraphicsItem):
+    """Click target outside one free joint. The part body underneath stays a move target."""
+
+    def __init__(self, instance_id: str, connector_index: int, offset: QPointF) -> None:
+        super().__init__()
+        self.instance_id = instance_id
+        self.connector_index = connector_index
+        self.offset = offset
+        self._bounds = QRectF(offset.x() - 10, offset.y() - 10, 20, 20)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setZValue(90)
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        return self._bounds
+
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        path.addEllipse(self.offset, 8, 8)
+        return path
+
+    def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
+        painter.setPen(QPen(QColor(COLORS.accent), 2))
+        painter.setBrush(QColor(COLORS.elevated))
+        painter.drawEllipse(self.offset, 7, 7)
+        painter.drawLine(self.offset + QPointF(-5, 0), self.offset + QPointF(5, 0))
+        painter.drawLine(self.offset + QPointF(0, -5), self.offset + QPointF(0, 5))
+
+
+def _live_instance(item: InstanceItem) -> PartInstance:
+    return PartInstance(
+        item.item_id,
+        0,
+        item.pos().x() / MM,
+        item.pos().y() / MM,
+        rotation_z_deg=item.rotation(),
+    )
+
+
+def _plus_offset(instance: PartInstance, connector: ConnectorSpec) -> QPointF:
+    """Pixels outside the joint, so the symbol does not cover the part body."""
+    direction = math.radians(connector.direction_deg + instance.rotation_z_deg)
+    return QPointF(math.cos(direction) * 22, math.sin(direction) * 22)
+
+
+def _same_part_can_join(spec: PartSpec, live: PartInstance, connector: ConnectorSpec) -> bool:
+    for source in spec.connectors:
+        if not connectors_compatible(source, connector):
+            continue
+        pose = join_pose(live, connector, source)
+        distance = ((pose.x_mm - live.x_mm) ** 2 + (pose.y_mm - live.y_mm) ** 2) ** 0.5
+        if distance >= 1.0:
+            return True
+    return False
 
 
 def _triangle(origin: QPointF, tip: QPointF) -> QPolygonF:

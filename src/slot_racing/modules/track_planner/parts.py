@@ -114,6 +114,8 @@ class PartInstance:
     rotation_x_deg: float = 0.0
     rotation_y_deg: float = 0.0
     rotation_z_deg: float = 0.0
+    start_straight: bool = False
+    group_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +264,63 @@ def crossing_connectors(length_mm: float, lane_count: int) -> tuple[ConnectorSpe
 def connectors_compatible(left: ConnectorSpec, right: ConnectorSpec) -> bool:
     """Same joint kind and the same lane order. A reversed lane list does not fit."""
     return left.kind == right.kind and left.lanes == right.lanes and left.kind in CONNECTOR_KINDS
+
+
+def join_pose(
+    target: PartInstance, target_joint: ConnectorSpec, source_joint: ConnectorSpec
+) -> Pose:
+    """Pose that seats ``source_joint`` on ``target_joint``. The math is the snap join."""
+    target_point = world_xy(target, target_joint.x_mm, target_joint.y_mm)
+    target_dir = normalize_deg(target_joint.direction_deg + target.rotation_z_deg)
+    rotation = normalize_deg(target_dir + 180.0 - source_joint.direction_deg)
+    rotated = rotate_xy(source_joint.x_mm, source_joint.y_mm, rotation)
+    return Pose(target_point[0] - rotated[0], target_point[1] - rotated[1], rotation)
+
+
+def connector_occupied(
+    instance: PartInstance,
+    connector: ConnectorSpec,
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+    *,
+    tolerance_mm: float = 1.0,
+) -> bool:
+    """True when another compatible joint already meets this one."""
+    point = world_xy(instance, connector.x_mm, connector.y_mm)
+    direction = normalize_deg(connector.direction_deg + instance.rotation_z_deg)
+    for other, spec in placed:
+        if other.id == instance.id:
+            continue
+        for candidate in spec.connectors:
+            if not connectors_compatible(connector, candidate):
+                continue
+            other_point = world_xy(other, candidate.x_mm, candidate.y_mm)
+            distance = math.hypot(point[0] - other_point[0], point[1] - other_point[1])
+            if distance > tolerance_mm:
+                continue
+            other_dir = normalize_deg(candidate.direction_deg + other.rotation_z_deg)
+            turn = abs(((direction - other_dir) % 360.0) - 180.0)
+            if turn <= 20.0:
+                return True
+    return False
+
+
+def can_dock(
+    candidate: PartSpec,
+    target: PartInstance,
+    target_spec: PartSpec,
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+) -> bool:
+    """Whether ``candidate`` can be joined to a free compatible joint of ``target``."""
+    for connector in target_spec.connectors:
+        if connector_occupied(target, connector, placed):
+            continue
+        for source in candidate.connectors:
+            if not connectors_compatible(source, connector):
+                continue
+            pose = join_pose(target, connector, source)
+            if math.hypot(pose.x_mm - target.x_mm, pose.y_mm - target.y_mm) >= 1.0:
+                return True
+    return False
 
 
 def quantize(value: float, step_mm: float) -> float:
@@ -453,6 +512,107 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             CROSSING,
             345.0,
             track_width(2),
+            None,
+            None,
+            90.0,
+            2,
+            crossing_connectors(345.0, 2),
+            rectangle(345.0, 345.0),
+        )
+    )
+    border_width = 40.0
+    add(
+        PartSpec(
+            system,
+            "20020560",
+            scale,
+            "Randstreifen Standardgerade",
+            BORDER,
+            345.0,
+            border_width,
+            None,
+            None,
+            0.0,
+            2,
+            straight_connectors(345.0, 2, kind=BORDER_JOINT),
+            rectangle(345.0, border_width),
+        )
+    )
+    return tuple(specs) + evolution_catalog()
+
+
+def evolution_catalog() -> tuple[PartSpec, ...]:
+    """Carrera Evolution rails. The same articles fit Digital 132; the system is separate.
+
+    Carrera sells 20020601 (two 345 mm straights) and 20020571 (three 60° curves) for
+    EVOLUTION as well as Digital 124/132. The other numbers are the same rail family
+    already measured for Digital 132: straights 345 / 115 / 86 mm and centre radii
+    300 / 500 / 700 / 900 mm. The stored scale is 1:32, the scale kept for this system.
+    """
+    system = "Carrera Evolution"
+    scale = resolved_scale(system, "1:32")
+    specs: list[PartSpec] = []
+
+    def add(spec: PartSpec) -> None:
+        specs.append(spec)
+
+    def straight(article: str, name: str, length: float) -> None:
+        width = track_width(2)
+        add(
+            PartSpec(
+                system,
+                article,
+                scale,
+                name,
+                STRAIGHT,
+                length,
+                width,
+                None,
+                None,
+                0.0,
+                2,
+                straight_connectors(length, 2),
+                rectangle(length, width),
+            )
+        )
+
+    straight("20020601", "Standardgerade", 345.0)
+    straight("20020611", "1/3-Gerade", 115.0)
+    straight("20020612", "1/4-Gerade", 86.0)
+    width = track_width(2)
+    for article, name, radius, angle in (
+        ("20020577", "Kurve R1 30°", 300.0, 30.0),
+        ("20020571", "Kurve R1 60°", 300.0, 60.0),
+        ("20020572", "Kurve R2 30°", 500.0, 30.0),
+        ("20020573", "Kurve R3 30°", 700.0, 30.0),
+        ("20020578", "Kurve R4 15°", 900.0, 15.0),
+    ):
+        add(
+            PartSpec(
+                system,
+                article,
+                scale,
+                name,
+                CURVE,
+                None,
+                width,
+                None,
+                radius,
+                angle,
+                2,
+                curve_connectors(radius, angle, 2),
+                arc_outline(radius, angle, width),
+            )
+        )
+    add(
+        PartSpec(
+            system,
+            "20020587",
+            scale,
+            "Kreuzung",
+            CROSSING,
+            345.0,
+            width,
             None,
             None,
             90.0,

@@ -6,8 +6,9 @@ each piece sits on the grid and where later timing points can attach to a piece 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -16,9 +17,13 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner.parts import (
     DEFAULT_GRID_MM,
     DEFAULT_SNAP_MM,
+    STRAIGHT,
     PartInstance,
     PartSpec,
     Pose,
+    connector_occupied,
+    connectors_compatible,
+    join_pose,
     rotate_xy,
     snap_pose,
 )
@@ -87,7 +92,7 @@ class TrackPlan:
     direction: str
     pieces: tuple[Piece, ...]
     markers: tuple[Marker, ...]
-    grid_enabled: bool = True
+    grid_enabled: bool = False
     grid_mm: float = DEFAULT_GRID_MM
     snap_mm: float = DEFAULT_SNAP_MM
     instances: tuple[PartInstance, ...] = ()
@@ -300,7 +305,7 @@ def parse_plan(track_id: TrackId, payload: object) -> TrackPlan:
             direction=str(direction),
             pieces=pieces,
             markers=markers,
-            grid_enabled=_flag(payload.get("grid_enabled", True)),
+            grid_enabled=_flag(payload.get("grid_enabled", False)),
             grid_mm=_millimetre(payload.get("grid_mm", DEFAULT_GRID_MM)),
             snap_mm=_millimetre(payload.get("snap_mm", DEFAULT_SNAP_MM)),
             instances=tuple(_parse_instance(item) for item in raw_instances),
@@ -351,15 +356,11 @@ def rotate_instances_around(
             continue
         dx, dy = rotate_xy(instance.x_mm - center_x, instance.y_mm - center_y, delta_deg)
         updated.append(
-            PartInstance(
-                instance.id,
-                instance.part_id,
-                center_x + dx,
-                center_y + dy,
-                instance.z_mm,
-                instance.rotation_x_deg,
-                instance.rotation_y_deg,
-                (instance.rotation_z_deg + delta_deg) % 360.0,
+            replace(
+                instance,
+                x_mm=center_x + dx,
+                y_mm=center_y + dy,
+                rotation_z_deg=(instance.rotation_z_deg + delta_deg) % 360.0,
             )
         )
     return _replace(plan, instances=tuple(updated))
@@ -372,20 +373,22 @@ def duplicate_instances(
     wanted = set(instance_ids)
     created: list[str] = []
     extra: list[PartInstance] = []
+    group_map: dict[str, str] = {}
     for instance in plan.instances:
         if instance.id not in wanted:
             continue
         identifier = new_id()
+        group_id = instance.group_id
+        if group_id is not None and group_id not in group_map:
+            group_map[group_id] = new_id()
         extra.append(
-            PartInstance(
-                identifier,
-                instance.part_id,
-                instance.x_mm + dx_mm,
-                instance.y_mm + dy_mm,
-                instance.z_mm,
-                instance.rotation_x_deg,
-                instance.rotation_y_deg,
-                instance.rotation_z_deg,
+            replace(
+                instance,
+                id=identifier,
+                x_mm=instance.x_mm + dx_mm,
+                y_mm=instance.y_mm + dy_mm,
+                start_straight=False,
+                group_id=None if group_id is None else group_map[group_id],
             )
         )
         created.append(identifier)
@@ -398,16 +401,7 @@ def move_instance(plan: TrackPlan, instance_id: str, x_mm: float, y_mm: float) -
     return _update_instance(
         plan,
         instance_id,
-        lambda instance: PartInstance(
-            instance.id,
-            instance.part_id,
-            x_mm,
-            y_mm,
-            instance.z_mm,
-            instance.rotation_x_deg,
-            instance.rotation_y_deg,
-            instance.rotation_z_deg,
-        ),
+        lambda instance: replace(instance, x_mm=x_mm, y_mm=y_mm),
     )
 
 
@@ -415,16 +409,7 @@ def rotate_instance(plan: TrackPlan, instance_id: str, rotation_z_deg: float) ->
     return _update_instance(
         plan,
         instance_id,
-        lambda instance: PartInstance(
-            instance.id,
-            instance.part_id,
-            instance.x_mm,
-            instance.y_mm,
-            instance.z_mm,
-            instance.rotation_x_deg,
-            instance.rotation_y_deg,
-            rotation_z_deg,
-        ),
+        lambda instance: replace(instance, rotation_z_deg=rotation_z_deg),
     )
 
 
@@ -433,6 +418,123 @@ def remove_instance(plan: TrackPlan, instance_id: str) -> TrackPlan:
     if len(instances) == len(plan.instances):
         raise ValidationError("error.planner.piece")
     return _replace(plan, instances=instances)
+
+
+def set_start_straight(
+    plan: TrackPlan, instance_id: str, enabled: bool, catalog: dict[int, PartSpec]
+) -> TrackPlan:
+    """Mark one straight instance as the start straight. Any previous mark is cleared."""
+    current = _require_instance(plan, instance_id)
+    spec = catalog.get(current.part_id)
+    if enabled and (spec is None or spec.category != STRAIGHT):
+        raise ValidationError("error.planner.start_straight")
+    instances: list[PartInstance] = []
+    for instance in plan.instances:
+        if instance.id == instance_id:
+            instances.append(replace(instance, start_straight=enabled))
+        elif enabled and instance.start_straight:
+            instances.append(replace(instance, start_straight=False))
+        else:
+            instances.append(instance)
+    return _replace(plan, instances=tuple(instances))
+
+
+def toggle_group(plan: TrackPlan, instance_ids: Sequence[str]) -> TrackPlan:
+    """Group the selection, or dissolve it when the selection already is that group."""
+    wanted = [instance_id for instance_id in instance_ids if _has_instance(plan, instance_id)]
+    if len(wanted) < 2:
+        return plan
+    selected = [instance for instance in plan.instances if instance.id in set(wanted)]
+    group_ids = {instance.group_id for instance in selected}
+    if len(group_ids) == 1 and None not in group_ids:
+        group_id = next(iter(group_ids))
+        members = {instance.id for instance in plan.instances if instance.group_id == group_id}
+        if members == set(wanted):
+            cleared = tuple(
+                replace(instance, group_id=None) if instance.group_id == group_id else instance
+                for instance in plan.instances
+            )
+            return _replace(plan, instances=cleared)
+    fresh = new_id()
+    chosen = set(wanted)
+    grouped = tuple(
+        replace(instance, group_id=fresh) if instance.id in chosen else instance
+        for instance in plan.instances
+    )
+    return _replace(plan, instances=grouped)
+
+
+def dock_copy(
+    plan: TrackPlan, instance_id: str, connector_index: int, catalog: dict[int, PartSpec]
+) -> TrackPlan:
+    """Place another instance of the same definition on one free joint."""
+    current = _require_instance(plan, instance_id)
+    spec = catalog.get(current.part_id)
+    if spec is None or not 0 <= connector_index < len(spec.connectors):
+        raise ValidationError("error.planner.part")
+    target = spec.connectors[connector_index]
+    placed = _placed(plan, catalog)
+    if connector_occupied(current, target, placed):
+        raise ValidationError("error.planner.part")
+    best: tuple[float, Pose] | None = None
+    for source in spec.connectors:
+        if not connectors_compatible(source, target):
+            continue
+        pose = join_pose(current, target, source)
+        if _pose_distance(pose, current) < 1.0:
+            continue
+        turn = _rotation_delta(pose.rotation_z_deg, current.rotation_z_deg)
+        if best is None or turn < best[0]:
+            best = (turn, pose)
+    if best is None:
+        raise ValidationError("error.planner.part")
+    pose = best[1]
+    return place_instance(
+        plan, current.part_id, spec, pose.x_mm, pose.y_mm, pose.rotation_z_deg, catalog
+    )
+
+
+def clone_plan(plan: TrackPlan, track_id: TrackId) -> TrackPlan:
+    """A new plan with new instance ids and the same definitions, poses and markers."""
+    group_map: dict[str, str] = {}
+    instances: list[PartInstance] = []
+    for instance in plan.instances:
+        group_id = instance.group_id
+        if group_id is not None and group_id not in group_map:
+            group_map[group_id] = new_id()
+        instances.append(
+            replace(
+                instance,
+                id=new_id(),
+                group_id=None if group_id is None else group_map[group_id],
+            )
+        )
+    return _validate(
+        TrackPlan(
+            track_id=track_id,
+            version=plan.version,
+            direction=plan.direction,
+            pieces=plan.pieces,
+            markers=plan.markers,
+            grid_enabled=plan.grid_enabled,
+            grid_mm=plan.grid_mm,
+            snap_mm=plan.snap_mm,
+            instances=tuple(instances),
+        )
+    )
+
+
+def _has_instance(plan: TrackPlan, instance_id: str) -> bool:
+    return any(instance.id == instance_id for instance in plan.instances)
+
+
+def _rotation_delta(left: float, right: float) -> float:
+    delta = abs(left - right) % 360.0
+    return min(delta, 360.0 - delta)
+
+
+def _pose_distance(pose: Pose, instance: PartInstance) -> float:
+    return math.hypot(pose.x_mm - instance.x_mm, pose.y_mm - instance.y_mm)
 
 
 def set_plan_grid(plan: TrackPlan, *, enabled: bool, grid_mm: float, snap_mm: float) -> TrackPlan:
@@ -496,15 +598,8 @@ def reposition_instance(
         _replace(
             plan,
             instances=tuple(
-                PartInstance(
-                    instance.id,
-                    instance.part_id,
-                    pose.x_mm,
-                    pose.y_mm,
-                    instance.z_mm,
-                    instance.rotation_x_deg,
-                    instance.rotation_y_deg,
-                    pose.rotation_z_deg,
+                replace(
+                    instance, x_mm=pose.x_mm, y_mm=pose.y_mm, rotation_z_deg=pose.rotation_z_deg
                 )
                 if instance.id == instance_id
                 else instance
@@ -554,6 +649,8 @@ def _instance_document(instance: PartInstance) -> dict[str, Any]:
         "rotation_x": instance.rotation_x_deg,
         "rotation_y": instance.rotation_y_deg,
         "rotation_z": instance.rotation_z_deg,
+        "start_straight": instance.start_straight,
+        "group_id": instance.group_id,
     }
 
 
@@ -563,6 +660,7 @@ def _parse_instance(payload: object) -> PartInstance:
     part_id = payload.get("part_id")
     if isinstance(part_id, bool) or not isinstance(part_id, int) or part_id < 1:
         raise ValidationError("error.planner.invalid")
+    group_id = payload.get("group_id")
     return PartInstance(
         id=_identity(payload.get("id")),
         part_id=part_id,
@@ -572,6 +670,8 @@ def _parse_instance(payload: object) -> PartInstance:
         rotation_x_deg=_angle(payload.get("rotation_x", 0)),
         rotation_y_deg=_angle(payload.get("rotation_y", 0)),
         rotation_z_deg=_angle(payload.get("rotation_z", 0)),
+        start_straight=_optional_flag(payload.get("start_straight", False)),
+        group_id=None if group_id is None else _identity(group_id),
     )
 
 
@@ -589,6 +689,10 @@ def _check_instance(instance: PartInstance) -> None:
             raise ValidationError("error.planner.position")
     for value in (instance.rotation_x_deg, instance.rotation_y_deg, instance.rotation_z_deg):
         _angle(value)
+    if not isinstance(instance.start_straight, bool):
+        raise ValidationError("error.planner.part")
+    if instance.group_id is not None:
+        _identity(instance.group_id)
 
 
 def _millimetre(value: object) -> float:
@@ -608,6 +712,12 @@ def _flag(value: object) -> bool:
     if not isinstance(value, bool):
         raise ValidationError("error.planner.invalid")
     return value
+
+
+def _optional_flag(value: object) -> bool:
+    if value is None:
+        return False
+    return _flag(value)
 
 
 def _parse_piece(payload: object) -> Piece:
@@ -657,6 +767,9 @@ def _validate(plan: TrackPlan) -> TrackPlan:
         _check_instance(instance)
     if not isinstance(plan.grid_enabled, bool) or plan.grid_mm <= 0 or plan.snap_mm < 0:
         raise ValidationError("error.planner.invalid")
+    instances = _dissolve_small_groups(plan.instances)
+    if sum(instance.start_straight for instance in instances) > 1:
+        raise ValidationError("error.planner.invalid")
     marker_ids: set[str] = set()
     starts = 0
     for marker in plan.markers:
@@ -674,7 +787,34 @@ def _validate(plan: TrackPlan) -> TrackPlan:
             raise ValidationError("error.planner.lane")
     if starts > 1:
         raise ValidationError("error.planner.invalid")
-    return plan
+    if instances == plan.instances:
+        return plan
+    return TrackPlan(
+        track_id=plan.track_id,
+        version=plan.version,
+        direction=plan.direction,
+        pieces=plan.pieces,
+        markers=plan.markers,
+        grid_enabled=plan.grid_enabled,
+        grid_mm=plan.grid_mm,
+        snap_mm=plan.snap_mm,
+        instances=instances,
+    )
+
+
+def _dissolve_small_groups(instances: tuple[PartInstance, ...]) -> tuple[PartInstance, ...]:
+    counts: dict[str, int] = {}
+    for instance in instances:
+        if instance.group_id is not None:
+            counts[instance.group_id] = counts.get(instance.group_id, 0) + 1
+    if all(count >= 2 for count in counts.values()):
+        return instances
+    return tuple(
+        replace(instance, group_id=None)
+        if instance.group_id is not None and counts[instance.group_id] < 2
+        else instance
+        for instance in instances
+    )
 
 
 def _check_piece(piece: Piece) -> None:

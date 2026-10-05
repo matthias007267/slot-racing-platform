@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, String, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from slot_racing.core.storage.base import Base
@@ -64,3 +64,7 @@ class TrackPlanInstance(Base):
     rotation_x_deg: Mapped[float] = mapped_column(Float, default=0.0)
     rotation_y_deg: Mapped[float] = mapped_column(Float, default=0.0)
     rotation_z_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    # One straight on the plan may be the start straight. The definition stays unmarked.
+    is_start_straight: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Instances that share a group id move and select together. Empty means ungrouped.
+    group_id: Mapped[str | None] = mapped_column(String(40))

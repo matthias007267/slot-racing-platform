@@ -74,5 +74,27 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.category.special": "Sonderteil",
         "planner.category.border": "Randstreifen",
         "planner.category.support": "Stütze",
+        "planner.save_as": "Als neue Strecke speichern",
+        "planner.save_as.title": "Neue Strecke",
+        "planner.save_as.prompt": "Name der neuen Strecke",
+        "planner.saved_as": "Die Strecke wurde als eigene Strecke gespeichert.",
+        "planner.jump_start": "Zur Startgeraden springen",
+        "planner.start_straight": "Startgerade",
+        "planner.start_straight.missing": "Es ist keine Startgerade markiert.",
+        "planner.filter.scale": "Maßstab",
+        "planner.filter.all": "Alle",
+        "planner.filter.compatible": "Nur kompatible Bauteile anzeigen",
+        "planner.filter.reset": "Filter zurücksetzen",
+        "planner.library.manage": "Bibliothek verwalten",
+        "planner.library.delete": "Löschen",
+        "planner.library.edit": "Bauteil bearbeiten",
+        "planner.library.search": "Suchen",
+        "planner.library.updated": "Bauteil gespeichert.",
+        "planner.library.deleted": "Bauteil gelöscht.",
+        "error.planner.part_in_use": (
+            "Dieses Bauteil wird noch von {count} Platzierungen verwendet "
+            "und kann nicht gelöscht werden."
+        ),
+        "error.planner.start_straight": "Nur eine normale Gerade kann die Startgerade sein.",
     }
 }
