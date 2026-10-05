@@ -110,11 +110,23 @@ class LaneCrossingDetector:
     def __init__(self, settings: DetectorSettings, background: GrayFrame | None = None) -> None:
         if not isinstance(settings, DetectorSettings):
             raise TypeError("settings must be DetectorSettings")
-        if background is not None:
-            self._check_frame(background, settings, background)
         self._settings = settings
-        self._background = background
         self._states = {(zone.position_id, zone.lane): ZoneState.CLEAR for zone in settings.zones}
+        self._width: int | None = None
+        self._height: int | None = None
+        self._crops: tuple[GrayFrame, ...] | None = None
+        self.pixels_compared = 0
+        if background is not None:
+            self._check_frame(background)
+            self._remember(background)
+
+    @property
+    def reference_pixels(self) -> int:
+        """Pixels retained from the empty track. Only the zones, never the whole picture."""
+        crops = self._crops
+        if crops is None:
+            return 0
+        return sum(crop.width * crop.height for crop in crops)
 
     def zone_state(self, position_id: str, lane: int) -> ZoneState:
         """Current state of one configured zone."""
@@ -133,14 +145,77 @@ class LaneCrossingDetector:
         method does not read a clock.
         """
         require_range("timestamp_ns", timestamp_ns, 0)
-        self._check_frame(frame, self._settings, self._background)
-        if self._background is None:
-            self._background = frame
+        self._check_frame(frame)
+        if self._crops is None:
+            self._remember(frame)
             return ()
+        return self._crossings(self._counts(frame), timestamp_ns)
+
+    def observe_crops(
+        self, crops: tuple[GrayFrame, ...], timestamp_ns: int
+    ) -> tuple[LaneCrossing, ...]:
+        """Update every zone from images that are already cut to the zone size.
+
+        ``crops`` follows the configured zone order. The first call stores them
+        as the background and reports no crossing.
+        """
+        require_range("timestamp_ns", timestamp_ns, 0)
+        self._check_crops(crops)
+        if self._crops is None:
+            self._crops = crops
+            return ()
+        return self._crossings(self._crop_counts(crops), timestamp_ns)
+
+    def synchronize(self, frame: GrayFrame) -> None:
+        """Match every zone to ``frame`` without emitting a crossing.
+
+        The reference background stays unchanged. A car that is already inside a
+        zone is occupied afterwards, so the following frames do not treat it as
+        a new entry. Used once after a pause, on the first frame grabbed after
+        the resume.
+        """
+        self._check_frame(frame)
+        if self._crops is None:
+            self._remember(frame)
+            return
+        self._apply(self._counts(frame))
+
+    def synchronize_crops(self, crops: tuple[GrayFrame, ...]) -> None:
+        """Match every zone to pre-cut images without emitting a crossing."""
+        self._check_crops(crops)
+        if self._crops is None:
+            self._crops = crops
+            return
+        self._apply(self._crop_counts(crops))
+
+    def _counts(self, frame: GrayFrame) -> tuple[int, ...]:
+        crops = self._crops
+        if crops is None:
+            raise RuntimeError("detection has no background")
+        threshold = self._settings.threshold
+        counts: list[int] = []
+        for zone, reference in zip(self._settings.zones, crops, strict=True):
+            counts.append(_foreground_pixels(frame, reference, zone.roi, threshold))
+            self.pixels_compared += zone.roi.area
+        return tuple(counts)
+
+    def _crop_counts(self, crops: tuple[GrayFrame, ...]) -> tuple[int, ...]:
+        reference = self._crops
+        if reference is None:
+            raise RuntimeError("detection has no background")
+        threshold = self._settings.threshold
+        counts = tuple(
+            _foreground_crops(crop, stored, threshold)
+            for crop, stored in zip(crops, reference, strict=True)
+        )
+        self.pixels_compared += sum(crop.width * crop.height for crop in crops)
+        return counts
+
+    def _crossings(self, counts: tuple[int, ...], timestamp_ns: int) -> tuple[LaneCrossing, ...]:
         crossings: list[LaneCrossing] = []
-        for zone in self._settings.zones:
-            count = _foreground_pixels(frame, self._background, zone.roi, self._settings.threshold)
-            occupied = count >= self._settings.min_foreground_pixels
+        minimum = self._settings.min_foreground_pixels
+        for zone, count in zip(self._settings.zones, counts, strict=True):
+            occupied = count >= minimum
             key = (zone.position_id, zone.lane)
             if self._states[key] is ZoneState.CLEAR and occupied:
                 self._states[key] = ZoneState.OCCUPIED
@@ -157,53 +232,67 @@ class LaneCrossingDetector:
         crossings.sort(key=_crossing_order)
         return tuple(crossings)
 
-    def synchronize(self, frame: GrayFrame) -> None:
-        """Match every zone to ``frame`` without emitting a crossing.
-
-        The reference background stays unchanged. A car that is already inside a
-        zone is occupied afterwards, so the following frames do not treat it as
-        a new entry. Used once after a pause, on the first frame grabbed after
-        the resume.
-        """
-        self._check_frame(frame, self._settings, self._background)
-        if self._background is None:
-            self._background = frame
-            return
+    def _apply(self, counts: tuple[int, ...]) -> None:
         minimum = self._settings.min_foreground_pixels
-        for zone in self._settings.zones:
-            count = _foreground_pixels(frame, self._background, zone.roi, self._settings.threshold)
+        for zone, count in zip(self._settings.zones, counts, strict=True):
             state = ZoneState.OCCUPIED if count >= minimum else ZoneState.CLEAR
             self._states[(zone.position_id, zone.lane)] = state
 
-    @staticmethod
-    def _check_frame(
-        frame: GrayFrame, settings: DetectorSettings, background: GrayFrame | None
-    ) -> None:
+    def _remember(self, frame: GrayFrame) -> None:
+        self._width = frame.width
+        self._height = frame.height
+        self._crops = tuple(frame.crop(zone.roi) for zone in self._settings.zones)
+
+    def _check_frame(self, frame: GrayFrame) -> None:
         if not isinstance(frame, GrayFrame):
             raise TypeError("frame must be a GrayFrame")
-        if background is not None and (
-            frame.width != background.width or frame.height != background.height
-        ):
+        if self._width is not None and (frame.width != self._width or frame.height != self._height):
             raise ValueError("frame size must match the background")
-        for zone in settings.zones:
+        self._check_zones(frame.width, frame.height)
+
+    def _check_zones(self, width: int, height: int) -> None:
+        for zone in self._settings.zones:
             roi = zone.roi
-            if roi.x + roi.width > frame.width or roi.y + roi.height > frame.height:
+            if roi.x + roi.width > width or roi.y + roi.height > height:
                 raise ValueError(
                     f"zone {zone.position_id!r} lane {zone.lane} extends outside the frame"
                 )
+
+    def _check_crops(self, crops: tuple[GrayFrame, ...]) -> None:
+        if not isinstance(crops, tuple) or any(not isinstance(crop, GrayFrame) for crop in crops):
+            raise TypeError("crops must be a tuple of GrayFrame")
+        zones = self._settings.zones
+        if len(crops) != len(zones):
+            raise ValueError("crop count must match the detection zones")
+        for crop, zone in zip(crops, zones, strict=True):
+            if (crop.width, crop.height) != (zone.roi.width, zone.roi.height):
+                raise ValueError("frame size must match the background")
 
 
 def _foreground_pixels(
     frame: GrayFrame, background: GrayFrame, roi: DetectionRoi, threshold: int
 ) -> int:
+    """Count foreground in ``roi`` only. ``background`` is already that rectangle."""
     count = 0
     width = frame.width
+    reference = background.pixels
+    index = 0
     for y in range(roi.y, roi.y + roi.height):
-        row = y * width
-        for x in range(roi.x, roi.x + roi.width):
-            index = row + x
-            if abs(frame.pixels[index] - background.pixels[index]) >= threshold:
+        row = y * width + roi.x
+        for offset in range(roi.width):
+            if abs(frame.pixels[row + offset] - reference[index]) >= threshold:
                 count += 1
+            index += 1
+    return count
+
+
+def _foreground_crops(frame: GrayFrame, background: GrayFrame, threshold: int) -> int:
+    count = 0
+    current = frame.pixels
+    reference = background.pixels
+    for index, pixel in enumerate(current):
+        if abs(pixel - reference[index]) >= threshold:
+            count += 1
     return count
 
 

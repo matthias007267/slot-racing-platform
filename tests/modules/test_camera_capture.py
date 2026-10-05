@@ -35,9 +35,14 @@ from slot_racing.modules.timing_camera.capture import (
     CameraReadError,
     CaptureDevice,
     FrameQueue,
+    _timed,
 )
 from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
-from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
+from slot_racing.modules.timing_camera.frame_source import (
+    FrameSource,
+    ManualFrameSource,
+    TimedFrame,
+)
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
@@ -467,6 +472,15 @@ class _Image:
         assert size == -1
         return [pixel for row in self._rows for pixel in row]
 
+    def __getitem__(self, key: object) -> _Image:
+        if not isinstance(key, tuple) or len(key) < 2:
+            raise TypeError("image slices are two-dimensional")
+        y_key, x_key = key[0], key[1]
+        if not isinstance(y_key, slice) or not isinstance(x_key, slice):
+            raise TypeError("image slices are two-dimensional")
+        rows = [row[x_key] for row in self._rows[y_key]]
+        return _Image(rows, color=self.ndim == 3)
+
 
 class _FakeCv2:
     CAP_PROP_FRAME_WIDTH = 3
@@ -481,6 +495,7 @@ class _FakeCv2:
         self.actual = actual
         self.instances: list[_FakeCap] = []
         self.converted = False
+        self.converted_shapes: list[tuple[int, ...]] = []
         self.image: _Image | None = _Image([[1, 2], [3, 4]])
 
     def VideoCapture(self, index: int) -> _FakeCap:  # noqa: N802
@@ -491,6 +506,7 @@ class _FakeCv2:
     def cvtColor(self, image: _Image, code: int) -> _Image:  # noqa: N802
         assert code == self.COLOR_BGR2GRAY
         self.converted = True
+        self.converted_shapes.append(image.shape)
         return _Image(image._rows)
 
 
@@ -544,6 +560,117 @@ def test_opencv_requests_size_and_fps_and_records_the_driver_values(
     finally:
         device.close()
     assert api.instances[0].released
+
+
+def test_opencv_converts_only_the_zones_once_regions_are_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [[column for column in range(8)] for _ in range(6)]
+    api = _FakeCv2()
+    api.image = _Image(rows, color=True)
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    device = OpenCVCapture(CameraConfig())
+    device.open()
+    try:
+        assert device.read_zoned() is None
+        full = device.read()
+        assert len(full.pixels) == 8 * 6
+        assert api.converted_shapes == [(6, 8, 3)]
+        device.set_regions((DetectionRoi(1, 2, 3, 2), DetectionRoi(5, 0, 2, 1)))
+        zoned = device.read_zoned()
+        assert zoned is not None
+        width, height, crops = zoned
+        assert (width, height) == (8, 6)
+        assert [(crop.width, crop.height) for crop in crops] == [(3, 2), (2, 1)]
+        converted = sum(shape[0] * shape[1] for shape in api.converted_shapes[1:])
+        assert converted == 3 * 2 + 2 * 1
+        assert converted < len(full.pixels)
+        assert sum(len(crop.pixels) for crop in crops) == converted
+        device.set_regions((DetectionRoi(7, 0, 2, 1),))
+        with pytest.raises(ValueError, match="outside"):
+            device.read_zoned()
+    finally:
+        device.close()
+
+
+def test_grab_queues_zone_crops_instead_of_the_full_picture() -> None:
+    device = _RegionDevice()
+    source = CameraFrameSource(device)
+    full = source._grab()
+    assert isinstance(full, GrayFrame)
+    assert len(full.pixels) == 8 * 6
+    source.use_regions((DetectionRoi(1, 1, 2, 2),))
+    crops = source._grab()
+    assert isinstance(crops, tuple)
+    delivered = _timed(crops, 1)
+    assert delivered.crops is not None
+    assert len(delivered.crops[0].pixels) == 4
+    assert len(delivered.frame.pixels) == 1
+    assert device.full_reads == 1
+    assert device.zoned_reads == 1
+
+
+def test_regions_are_taken_from_the_delivered_frame() -> None:
+    saved = DetectorSettings((DetectionZone("start_finish", 1, DetectionRoi(40, 10, 20, 10)),))
+    frames = _RecordingFrames()
+    source = CameraTimingProvider(session(), frames, saved, zone_frame=(100, 50))
+    received: list[SensorTriggered] = []
+    source.start(received.append)
+    try:
+        armed = frames.regions
+        assert armed is not None and len(armed) == 0
+        frames.submit(GrayFrame.blank(50, 25), 1)
+        source.poll()
+        assert received == []
+        armed = frames.regions
+        assert armed == (DetectionRoi(20, 5, 10, 5),)
+        detector = source._detector
+        assert detector is not None
+        assert detector.reference_pixels == 50
+        assert detector.reference_pixels < 50 * 25
+        assert detector.pixels_compared == 0
+        frames.submit(GrayFrame(1, 1, b"\x00"), 2, crops=(GrayFrame.blank(10, 5, 255),))
+        source.poll()
+        assert [(event.position_id, event.lane) for event in received] == [("start_finish", 1)]
+        assert detector.pixels_compared == 50
+    finally:
+        source.stop()
+    assert source._detector is None
+
+
+class _RecordingFrames(ManualFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.regions: tuple[DetectionRoi, ...] | None = None
+
+    def use_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
+        self.regions = regions
+
+
+class _RegionDevice:
+    def __init__(self) -> None:
+        self.regions: tuple[DetectionRoi, ...] = ()
+        self.full_reads = 0
+        self.zoned_reads = 0
+
+    def open(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def set_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
+        self.regions = regions
+
+    def read(self) -> GrayFrame:
+        self.full_reads += 1
+        return GrayFrame.blank(8, 6, 3)
+
+    def read_zoned(self) -> tuple[int, int, tuple[GrayFrame, ...]] | None:
+        if not self.regions:
+            return None
+        self.zoned_reads += 1
+        return (8, 6, (GrayFrame.blank(2, 2, 9),))
 
 
 def test_opencv_converts_color_frames_to_gray(monkeypatch: pytest.MonkeyPatch) -> None:

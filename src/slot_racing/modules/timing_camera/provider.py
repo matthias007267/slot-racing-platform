@@ -36,10 +36,12 @@ from slot_racing.modules.timing_camera.configuration import (
 )
 from slot_racing.modules.timing_camera.detection import (
     DetectorSettings,
+    LaneCrossing,
     LaneCrossingDetector,
 )
-from slot_racing.modules.timing_camera.frame_source import FrameSource
+from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 from slot_racing.modules.timing_camera.store import (
     CameraConfigurationError,
@@ -96,6 +98,7 @@ class CameraTimingProvider(TimingSource):
         self._sink: SensorSink | None = None
         self._paused = False
         self._resync = False
+        self._regions_armed = False
         self._reset_detector()
 
     @property
@@ -112,6 +115,8 @@ class CameraTimingProvider(TimingSource):
         self._reset_detector()
         self._paused = False
         self._resync = False
+        self._regions_armed = False
+        self._publish_regions(())
         try:
             self._frames.start()
         except CameraBusyError as error:
@@ -128,6 +133,10 @@ class CameraTimingProvider(TimingSource):
     def stop(self) -> None:
         self._sink = None
         self._paused = False
+        self._resync = False
+        self._regions_armed = False
+        self._detector = None
+        self._publish_regions(())
         self._frames.stop()
 
     def pause(self) -> None:
@@ -151,24 +160,13 @@ class CameraTimingProvider(TimingSource):
         self._frames.check()
         if self._sink is None or self._paused:
             return
-        detector = self._detector
         processed = 0
         while self._sink is not None and not self._paused and processed < MAX_FRAMES_PER_POLL:
             delivered = self._frames.poll_frame()
             if delivered is None:
                 return
             processed += 1
-            if detector is None:
-                continue
-            self._match_delivered_frame(delivered.frame)
-            detector = self._detector
-            if detector is None:
-                continue
-            if self._resync:
-                detector.synchronize(delivered.frame)
-                self._resync = False
-                continue
-            for crossing in detector.observe(delivered.frame, delivered.timestamp_ns):
+            for crossing in self._crossings(delivered):
                 sink = self._sink
                 if sink is None:
                     return
@@ -204,6 +202,51 @@ class CameraTimingProvider(TimingSource):
         self._zone_frame = (frame.width, frame.height)
         self._background = background
         self._detector = LaneCrossingDetector(scaled, background=background)
+        # The next picture may have a different grid, so the crops are prepared again.
+        self._regions_armed = False
+
+    def _crossings(self, delivered: TimedFrame) -> tuple[LaneCrossing, ...]:
+        crops = delivered.crops
+        if crops is not None:
+            detector = self._detector
+            if detector is None:
+                return ()
+            if self._resync:
+                detector.synchronize_crops(crops)
+                self._resync = False
+                return ()
+            return detector.observe_crops(crops, delivered.timestamp_ns)
+        frame = delivered.frame
+        self._match_delivered_frame(frame)
+        self._arm_regions()
+        detector = self._detector
+        if detector is None:
+            return ()
+        if self._resync:
+            detector.synchronize(frame)
+            self._resync = False
+            return ()
+        return detector.observe(frame, delivered.timestamp_ns)
+
+    def _arm_regions(self) -> None:
+        """Cut later frames to the zones of the picture that was just measured.
+
+        The first frame is still the whole picture: its size is what the saved
+        fractions are mapped onto. Only the frames after that skip the rest.
+        """
+        if self._regions_armed:
+            return
+        settings = self._settings
+        if settings is None:
+            self._regions_armed = True
+            return
+        self._publish_regions(tuple(zone.roi for zone in settings.zones))
+        self._regions_armed = True
+
+    def _publish_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
+        prepare = getattr(self._frames, "use_regions", None)
+        if callable(prepare):
+            prepare(regions)
 
     def _reset_detector(self) -> None:
         settings = self._settings

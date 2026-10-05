@@ -789,6 +789,55 @@ class RaceService:
             race.status = (RaceStatus.ABORTED if aborted else RaceStatus.FINISHED).value
             race.finished_at = utc_now()
 
+    def restart_aborted(self, race_id: RaceId) -> RaceInfo:
+        """Open a new race from an aborted one and leave the aborted race in the history.
+
+        Mode, track, participants, lanes and the lap or time target are copied.
+        Laps, times and the aborted status are not. A heat race gets a fresh
+        plan from the same drivers instead of the heats that were already driven.
+        """
+        with self._database.session() as session:
+            source = self._load(session, race_id)
+            if RaceStatus(source.status) is not RaceStatus.ABORTED:
+                raise ValidationError("error.race.not_restartable")
+            if source.track_id is None:
+                raise ValidationError("error.race.no_track")
+            track = self._require_active_track(TrackId(source.track_id))
+            race = Race(
+                name=source.name,
+                track_id=source.track_id,
+                track_layout_id=source.track_layout_id,
+                target_laps=source.target_laps,
+                mode=source.mode,
+                timing_provider=source.timing_provider,
+                duration_minutes=source.duration_minutes,
+                status=RaceStatus.CREATED.value,
+            )
+            session.add(race)
+            session.flush()
+            previous = list(
+                session.scalars(
+                    select(RaceParticipant)
+                    .where(RaceParticipant.race_id == source.id)
+                    .order_by(RaceParticipant.id)
+                )
+            )
+            planned = heats.uses_heats(session, source.id)
+            for old in previous:
+                session.add(
+                    RaceParticipant(
+                        race_id=race.id,
+                        driver_id=old.driver_id,
+                        vehicle_id=old.vehicle_id,
+                        lane=None if planned else old.lane,
+                    )
+                )
+            session.flush()
+            if planned:
+                heats.replace_open_plan(session, race, track.lane_count)
+            self._update_readiness(session, race)
+            return self._race_info(session, race)
+
     def abort_race(self, race_id: RaceId) -> None:
         """Mark a race that is recorded as running as aborted. Other races are left alone."""
         with self._database.session() as session:

@@ -479,6 +479,11 @@ def _two_lane_configuration() -> CameraConfiguration:
 
 
 def test_a_detection_flashes_only_that_zone_and_then_clears(qtbot: QtBot) -> None:
+    """Preview keeps the picture and does not run lane detection on it.
+
+    The stage can still flash one zone on its own. That timer is not fed by the
+    preview, so a car in the picture leaves every zone dark.
+    """
     stored = database()
     CameraConfigurationStore(stored).save(_two_lane_configuration())
     page, opener = open_page(qtbot, CameraConfigurationStore(stored))
@@ -487,8 +492,11 @@ def test_a_detection_flashes_only_that_zone_and_then_clears(qtbot: QtBot) -> Non
     lane_one = roi_to_pixels(page.stage.zones()[0], *FRAME)
     source.frame = GrayFrame.blank(*FRAME, 30).paint(lane_one, 255)
     page._pull_frame()
+    page._pull_frame()
+    assert page.stage.highlighted() == ()
+    assert not hasattr(page, "_detector")
+    page.stage.highlight(0, duration_ms=40)
     assert page.stage.highlighted() == (0,)
-    # The preview keeps polling. Expiry belongs to the zone timer alone.
     page._timer.stop()
     qtbot.waitUntil(lambda: page.stage.highlighted() == (), timeout=1000)
     assert page.stage.highlighted() == ()

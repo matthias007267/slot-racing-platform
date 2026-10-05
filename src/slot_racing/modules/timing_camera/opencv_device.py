@@ -11,6 +11,7 @@ from typing import Any
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, CameraReadError
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.geometry import DetectionRoi
 
 
 class OpenCVCapture:
@@ -24,6 +25,38 @@ class OpenCVCapture:
         self.actual_width: int | None = None
         self.actual_height: int | None = None
         self.actual_fps: float | None = None
+        self._regions: tuple[DetectionRoi, ...] = ()
+
+    def set_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
+        """Later reads convert only these rectangles. Empty restores the full frame."""
+        if not isinstance(regions, tuple) or any(
+            not isinstance(region, DetectionRoi) for region in regions
+        ):
+            raise TypeError("regions must be a tuple of DetectionRoi")
+        self._regions = regions
+
+    def read_zoned(self) -> tuple[int, int, tuple[GrayFrame, ...]] | None:
+        """Zone crops of the next picture, or ``None`` when the full frame is still required.
+
+        ``None`` does not read the camera. The caller then uses :meth:`read`.
+        A zone that sticks out of the delivered picture is rejected and not clipped.
+        """
+        regions = self._regions
+        if not regions:
+            return None
+        capture = self._capture
+        if capture is None:
+            raise CameraReadError("camera is not open")
+        cv2 = _cv2()
+        ok, image = capture.read()
+        if not ok or image is None:
+            raise CameraReadError("camera frame is missing")
+        height, width = image.shape[:2]
+        return (
+            int(width),
+            int(height),
+            tuple(_crop_gray(cv2, image, int(width), int(height), roi) for roi in regions),
+        )
 
     def open(self) -> None:
         cv2 = _cv2()
@@ -114,6 +147,16 @@ def _as_gray_frame(cv2: Any, image: Any) -> GrayFrame:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     height, width = image.shape[:2]
     return GrayFrame(int(width), int(height), _pixel_bytes(image))
+
+
+def _crop_gray(cv2: Any, image: Any, width: int, height: int, roi: DetectionRoi) -> GrayFrame:
+    if roi.x + roi.width > width or roi.y + roi.height > height:
+        raise ValueError("zone extends outside the frame")
+    view = image[roi.y : roi.y + roi.height, roi.x : roi.x + roi.width]
+    if int(getattr(view, "ndim", 0)) == 3:
+        view = cv2.cvtColor(view, cv2.COLOR_BGR2GRAY)
+    crop_height, crop_width = view.shape[:2]
+    return GrayFrame(int(crop_width), int(crop_height), _pixel_bytes(view))
 
 
 def _pixel_bytes(image: Any) -> bytes:

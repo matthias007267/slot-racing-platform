@@ -16,15 +16,27 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 
 @dataclass(frozen=True, slots=True)
 class TimedFrame:
-    """One grayscale frame stamped by whoever captured or synthesized it."""
+    """One grayscale frame stamped by whoever captured or synthesized it.
+
+    ``crops`` is set once a race has cut the picture down to the detection zones.
+    Each crop follows the zone order and contains only that rectangle. ``frame``
+    is then only a size token and is not scanned.
+    """
 
     frame: GrayFrame
     timestamp_ns: int
+    crops: tuple[GrayFrame, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.frame, GrayFrame):
             raise TypeError("frame must be a GrayFrame")
         require_range("timestamp_ns", self.timestamp_ns, 0)
+        if self.crops is None:
+            return
+        if not isinstance(self.crops, tuple) or any(
+            not isinstance(crop, GrayFrame) for crop in self.crops
+        ):
+            raise TypeError("crops must be a tuple of GrayFrame")
 
 
 class FrameSource(ABC):
@@ -105,9 +117,14 @@ class ManualFrameSource(FrameSource):
             self._paused = False
         return False
 
-    def submit(self, frame: GrayFrame, timestamp_ns: int) -> None:
+    def submit(
+        self,
+        frame: GrayFrame,
+        timestamp_ns: int,
+        crops: tuple[GrayFrame, ...] | None = None,
+    ) -> None:
         """Queue one frame. Ignored while this source is stopped or paused."""
-        delivered = TimedFrame(frame, timestamp_ns)
+        delivered = TimedFrame(frame, timestamp_ns, crops=crops)
         if self._running and not self._paused:
             self._pending.append(delivered)
 

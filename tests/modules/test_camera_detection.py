@@ -373,6 +373,32 @@ def test_geometry_and_settings_reject_invalid_values() -> None:
         LaneCrossingDetector(DetectorSettings((outside,)), background=blank())
 
 
+def test_detection_compares_only_the_zone_pixels() -> None:
+    found = LaneCrossingDetector(settings(1, 2), background=blank())
+    zone_pixels = sum(zone.roi.area for zone in settings(1, 2).zones)
+    assert found.reference_pixels == zone_pixels
+    assert found.reference_pixels < WIDTH * HEIGHT
+    assert found.pixels_compared == 0
+    assert len(found.observe(car_at(1, x=38), 1)) == 1
+    assert found.pixels_compared == zone_pixels
+    with pytest.raises(ValueError, match="outside"):
+        blank().crop(DetectionRoi(WIDTH - 1, 0, 2, 1))
+
+
+def test_precut_zones_detect_without_the_full_frame() -> None:
+    configured = settings(1)
+    found = LaneCrossingDetector(configured, background=blank())
+    roi = configured.zones[0].roi
+    carrier = GrayFrame(1, 1, b"\x00")
+    crops = (GrayFrame.blank(roi.width, roi.height, CAR),)
+    crossings = found.observe_crops(crops, 7)
+    assert len(crossings) == 1
+    assert crossings[0].foreground_pixels == roi.area
+    assert found.pixels_compared == roi.area
+    assert found.pixels_compared < carrier.width * WIDTH * HEIGHT
+    assert len(carrier.pixels) == 1
+
+
 def test_detection_modules_do_not_know_races_events_or_ui() -> None:
     root = Path("src/slot_racing/modules/timing_camera")
     forbidden = (

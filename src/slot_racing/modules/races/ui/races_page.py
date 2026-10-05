@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
-from slot_racing.core.domain import RaceId, RaceMode
+from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
@@ -35,7 +35,7 @@ from slot_racing.uikit import (
 )
 from slot_racing.uikit.errors import is_expected
 from slot_racing.uikit.theme import SPACE, configure_page, set_role
-from slot_racing.uikit.widgets import format_datetime
+from slot_racing.uikit.widgets import ID_ROLE, format_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -81,14 +81,17 @@ class RacesPage(QWidget):
             "new": "primary",
             "edit": "secondary",
             "start": "primary",
+            "restart": "secondary",
             "live": "secondary",
             "results": "secondary",
             "delete": "danger",
         }
-        for key in ("new", "edit", "start", "live", "results", "delete"):
+        for key in ("new", "edit", "start", "restart", "live", "results", "delete"):
             button = QPushButton(tr(f"race.list.{key}"))
             button.setObjectName(f"races-{key}")
             set_role(button, roles[key])
+            if key == "restart":
+                button.setVisible(False)
             self.buttons[key] = button
             button_row.addWidget(button)
         button_row.addStretch(1)
@@ -118,6 +121,7 @@ class RacesPage(QWidget):
         self.buttons["new"].clicked.connect(lambda: self.new_race())
         self.buttons["edit"].clicked.connect(lambda: self.edit_selected())
         self.buttons["start"].clicked.connect(lambda: self.start_selected())
+        self.buttons["restart"].clicked.connect(lambda: self.restart_selected())
         self.buttons["live"].clicked.connect(lambda: self.show_live())
         self.buttons["results"].clicked.connect(lambda: self.show_results_selected())
         self.buttons["delete"].clicked.connect(lambda: self.delete_selected())
@@ -151,6 +155,11 @@ class RacesPage(QWidget):
         race_id = selected_id(self.table)
         if race_id is not None:
             self.start_race(RaceId(race_id))
+
+    def restart_selected(self) -> None:
+        race_id = selected_id(self.table)
+        if race_id is not None:
+            self._guard(lambda: self._restart(RaceId(race_id)))
 
     def start_race(self, race_id: RaceId) -> bool:
         return self._guard(lambda: self._start(race_id))
@@ -210,6 +219,20 @@ class RacesPage(QWidget):
         self.live.open_for_start(runner)
         self.stack.setCurrentWidget(self.live)
 
+    def _restart(self, race_id: RaceId) -> None:
+        created = self._service.restart_aborted(race_id)
+        self._reload()
+        self._select(created.id)
+        self.status.show_info(self.translator.translate("race.list.restarted"))
+
+    def _select(self, race_id: RaceId) -> None:
+        target = int(race_id)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(ID_ROLE) == target:
+                self.table.selectRow(row)
+                return
+
     def _delete(self, race_id: RaceId) -> None:
         self._service.delete_race(race_id)
         self._reload()
@@ -245,6 +268,9 @@ class RacesPage(QWidget):
         selected = None if race_id is None else self._service.get_race(RaceId(race_id))
         self.buttons["edit"].setEnabled(selected is not None and selected.is_editable)
         self.buttons["start"].setEnabled(selected is not None and selected.is_editable)
+        aborted = selected is not None and selected.status is RaceStatus.ABORTED
+        self.buttons["restart"].setVisible(aborted)
+        self.buttons["restart"].setEnabled(aborted)
         self.buttons["results"].setEnabled(selected is not None)
         self.buttons["delete"].setEnabled(selected is not None)
         self.buttons["live"].setEnabled(self._controller.active is not None)

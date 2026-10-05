@@ -1,10 +1,10 @@
 """Global camera setup page.
 
 The page edits the saved camera document: device, resolution, frame rate and
-detection zones. The picture is a configuration preview. A detection on that
-preview only flashes the zone that saw it. The page does not start a race and
-does not publish sensor events. Leaving the page stops the preview and releases
-the device.
+detection zones. The picture is a configuration preview. It is not scanned for
+cars: lane detection starts with the camera race, not while the page is open.
+The page does not start a race and does not publish sensor events. Leaving the
+page stops the preview and releases the device.
 """
 
 from __future__ import annotations
@@ -41,12 +41,6 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredCamera,
     StoredDetection,
     StoredDetectionZone,
-    roi_to_pixels,
-)
-from slot_racing.modules.timing_camera.detection import (
-    DetectionZone,
-    DetectorSettings,
-    LaneCrossingDetector,
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
@@ -120,9 +114,6 @@ class CameraSetupPage(QWidget):
         self._error_key: str | None = None
         self._detail: str | None = None
         self._camera_state = "unknown"
-        self._detector: LaneCrossingDetector | None = None
-        self._detector_key: object = None
-        self._seen_ns = 0
         self._timer = QTimer(self)
         self._timer.setInterval(_PREVIEW_INTERVAL_MS)
         self._timer.timeout.connect(self._pull_frame)
@@ -630,66 +621,6 @@ class CameraSetupPage(QWidget):
             return
         if delivered is not None:
             self.stage.set_frame(delivered.frame)
-            self._watch_frame(delivered.frame)
-
-    def _watch_frame(self, frame: GrayFrame) -> None:
-        """Run the race detector on the preview and flash only the zone that fired.
-
-        The first frame of a setup is the empty background, same as in a race.
-        Nothing here is published, and the race view never calls this.
-        """
-        watched = tuple(
-            (index, draft)
-            for index, draft in enumerate(self._drafts)
-            if _complete(draft.position_id)
-        )
-        if not watched:
-            self._detector = None
-            self._detector_key = None
-            return
-        key = (
-            frame.width,
-            frame.height,
-            tuple(
-                (
-                    draft.position_id,
-                    draft.lane,
-                    draft.roi.x,
-                    draft.roi.y,
-                    draft.roi.width,
-                    draft.roi.height,
-                )
-                for _index, draft in watched
-            ),
-        )
-        detector = self._detector
-        if key != self._detector_key or detector is None:
-            try:
-                settings = DetectorSettings(
-                    tuple(
-                        DetectionZone(
-                            draft.position_id,
-                            draft.lane,
-                            roi_to_pixels(draft.roi, frame.width, frame.height),
-                        )
-                        for _index, draft in watched
-                    )
-                )
-            except ValueError as error:
-                self._detector = None
-                self._detector_key = None
-                self._detail = str(error)
-                self._refresh_status()
-                return
-            detector = LaneCrossingDetector(settings)
-            self._detector = detector
-            self._detector_key = key
-        self._seen_ns += 1_000_000
-        for crossing in detector.observe(frame, self._seen_ns):
-            for index, draft in watched:
-                if draft.position_id == crossing.position_id and draft.lane == crossing.lane:
-                    self.stage.highlight(index)
-                    break
 
     def _stop_preview(self, *_args: object) -> None:
         timer = getattr(self, "_timer", None)
