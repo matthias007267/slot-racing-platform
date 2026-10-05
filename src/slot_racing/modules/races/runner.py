@@ -217,6 +217,37 @@ class RaceController:
         :class:`ValidationError` (provider problems are :class:`TimingProviderError`)."""
         if self.active is not None and self.active.is_active:
             raise ValidationError("error.race.already_running")
+        runner = self._assemble(race_id)
+        self._start_runner(runner)
+        if self.active is not None:
+            self.active.close()
+        self.active = runner
+        return runner
+
+    def prepare_race(self, race_id: RaceId) -> RaceRunner:
+        """Wire the race and leave the clock stopped.
+
+        The live view uses this for the camera start cue. :meth:`start_prepared`
+        is the same start the immediate path uses, so the engine still decides
+        when the clock and the first lap begin.
+        """
+        if self.active is not None and not self.active.is_finished:
+            raise ValidationError("error.race.already_running")
+        runner = self._assemble(race_id)
+        if self.active is not None:
+            self.active.close()
+        self.active = runner
+        return runner
+
+    def start_prepared(self) -> None:
+        """Start the race that :meth:`prepare_race` left waiting."""
+        runner = self.active
+        if runner is None or runner.status is not RaceStatus.CREATED:
+            status = "none" if runner is None else runner.status.value
+            raise ValidationError("error.race.not_startable", status=status)
+        self._start_runner(runner)
+
+    def _assemble(self, race_id: RaceId) -> RaceRunner:
         race = self._service.activate_next_heat(self._service.validate_startable(race_id).id)
         setup = self._timing_setup(race.track_id)
         source_laps = race.laps if race.mode is RaceMode.LAPS else TIME_TRIAL_TIMING_LAPS
@@ -252,18 +283,18 @@ class RaceController:
             mode=race.mode,
         )
         engine = RaceEngine(config, self._bus, self._clock, [source])
-        runner = RaceRunner(race, engine, self._bus, self._storage_errors)
+        return RaceRunner(race, engine, self._bus, self._storage_errors)
+
+    def _start_runner(self, runner: RaceRunner) -> None:
         try:
             runner.start()
         except Exception:
             runner.close()
-            self._service.cancel_heat_start(race.id)
-            self._service.abort_race(race.id)
+            if self.active is runner:
+                self.active = None
+            self._service.cancel_heat_start(runner.race.id)
+            self._service.abort_race(runner.race.id)
             raise
-        if self.active is not None:
-            self.active.close()
-        self.active = runner
-        return runner
 
     def shutdown(self) -> None:
         """Abort a running race so its results are stored, then release the runner."""

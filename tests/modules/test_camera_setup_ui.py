@@ -456,3 +456,51 @@ def test_image_points_round_trip_through_the_stage(qtbot: QtBot) -> None:
     qtbot.addWidget(stage)
     assert stage.image_to_widget(64, 120) == QPoint(64, 120)
     assert stage.image_to_widget(192, 168) == QPoint(192, 168)
+
+
+def _two_lane_configuration() -> CameraConfiguration:
+    return CameraConfiguration(
+        camera=StoredCamera(device_index=0, width=640, height=480, fps=30),
+        detection=StoredDetection(
+            zones=(
+                StoredDetectionZone(
+                    position_id="start_finish",
+                    lane=1,
+                    roi=NormalizedRoi(x=0.1, y=0.1, width=0.2, height=0.2),
+                ),
+                StoredDetectionZone(
+                    position_id="sector_1",
+                    lane=2,
+                    roi=NormalizedRoi(x=0.6, y=0.6, width=0.2, height=0.2),
+                ),
+            )
+        ),
+    )
+
+
+def test_a_detection_flashes_only_that_zone_and_then_clears(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(_two_lane_configuration())
+    page, opener = open_page(qtbot, CameraConfigurationStore(stored))
+    assert page.stage.highlighted() == ()
+    source = opener.sources[-1]
+    lane_one = roi_to_pixels(page.stage.zones()[0], *FRAME)
+    source.frame = GrayFrame.blank(*FRAME, 30).paint(lane_one, 255)
+    page._pull_frame()
+    assert page.stage.highlighted() == (0,)
+    # The preview keeps polling. Expiry belongs to the zone timer alone.
+    page._timer.stop()
+    qtbot.waitUntil(lambda: page.stage.highlighted() == (), timeout=1000)
+    assert page.stage.highlighted() == ()
+
+
+def test_highlighting_one_zone_leaves_the_other_and_expires(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    page.add_zone.click()
+    page.add_zone.click()
+    page.stage.highlight(0, duration_ms=40)
+    assert page.stage.highlighted() == (0,)
+    page._timer.stop()
+    qtbot.waitUntil(lambda: page.stage.highlighted() == (), timeout=1000)
+    page.stage.highlight(1, duration_ms=60_000)
+    assert page.stage.highlighted() == (1,)

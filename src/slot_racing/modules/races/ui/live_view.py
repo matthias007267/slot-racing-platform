@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
@@ -54,6 +55,7 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceStatusWidget,
 )
 from slot_racing.modules.races.ui.lane_board import LiveLaneBoard
+from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep, uses_start_cue
 from slot_racing.modules.races.ui.time_trial_board_view import TimeTrialBoardView
 from slot_racing.uikit import describe_error, fill_table, provider_label, selected_id
 from slot_racing.uikit.errors import is_expected
@@ -102,6 +104,8 @@ class LiveRaceView(QWidget):
         self._lap_notice: tuple[int, int] | None = None
         self._announced_finishers: set[int] = set()
         self._message = ""
+        self._cue: StartCue | None = None
+        self.cue_interval_ms = 1000
         self._unsubscribe_hud: Callable[[], None] | None = None
         self.confirm: Callable[[str], bool] = lambda text: (
             QMessageBox.question(self, translator.translate("common.confirm"), text)
@@ -152,9 +156,19 @@ class LiveRaceView(QWidget):
         self.lane_board = LiveLaneBoard(translator)
         self.heat_gate = HeatGate(translator)
 
+        self.cue_label = QLabel("")
+        self.cue_label.setObjectName("start-cue")
+        self.cue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cue_font = QFont(self.cue_label.font())
+        cue_font.setPointSize(48)
+        cue_font.setBold(True)
+        self.cue_label.setFont(cue_font)
+        self.cue_label.hide()
+
         layout = QVBoxLayout(self)
         configure_page(layout)
         layout.setSpacing(0)
+        layout.addWidget(self.cue_label)
         layout.addWidget(self.lane_board)
         layout.addWidget(self.heat_gate)
         layout.addWidget(self.stage, 1)
@@ -194,6 +208,7 @@ class LiveRaceView(QWidget):
         self.stage.apply(configuration)
 
     def show_runner(self, runner: RaceRunner) -> None:
+        self._cancel_cue()
         self._runner = runner
         self._snapshot = None
         self._announced_end = False
@@ -206,6 +221,61 @@ class LiveRaceView(QWidget):
         self.refresh()
         if runner.is_active:
             self._timer.start()
+
+    def open_for_start(self, runner: RaceRunner) -> None:
+        """Show the race. A camera race counts down before the engine starts."""
+        self.show_runner(runner)
+        if uses_start_cue(runner.race.timing_provider) and not runner.is_active:
+            self.begin_start_cue()
+
+    def begin_start_cue(self, interval_ms: int | None = None) -> None:
+        """Count 3, 2, 1, GO. The race clock starts when GO is shown."""
+        self._cancel_cue()
+        interval = self.cue_interval_ms if interval_ms is None else interval_ms
+        cue = StartCue(self._commit_start, interval_ms=interval, parent=self)
+        cue.changed.connect(self._show_cue)
+        cue.finished.connect(self._hide_cue)
+        self._cue = cue
+        cue.begin()
+
+    def advance_start_cue(self) -> None:
+        """Move the countdown on. The race starts only when this reaches GO."""
+        cue = self._cue
+        if cue is not None:
+            cue.advance()
+
+    def _show_cue(self, step: object) -> None:
+        if not isinstance(step, StartCueStep):
+            return
+        self.cue_label.setText(step.label)
+        self.cue_label.show()
+
+    def _hide_cue(self) -> None:
+        self.cue_label.hide()
+        self.cue_label.setText("")
+
+    def _cancel_cue(self) -> None:
+        cue = self._cue
+        self._cue = None
+        if cue is not None:
+            cue.stop()
+        self._hide_cue()
+
+    def _commit_start(self) -> None:
+        """Start signal: hand control to the race engine and start its clock."""
+        runner = self._runner
+        if runner is None or runner.status is not RaceStatus.CREATED:
+            return
+        try:
+            self._controller.start_prepared()
+        except Exception as error:
+            if not is_expected(error):
+                logger.exception("Could not start the race after the countdown")
+            self.messages.show_warning(describe_error(self.translator, error))
+            self._cancel_cue()
+            return
+        self._timer.start()
+        self.refresh()
 
     def refresh(self) -> None:
         """Poll the timing source, then redraw.
@@ -559,13 +629,16 @@ class LiveRaceView(QWidget):
         if runner is None:
             return
         try:
-            started = self._controller.start_race(runner.race.id)
+            if uses_start_cue(runner.race.timing_provider):
+                started = self._controller.prepare_race(runner.race.id)
+            else:
+                started = self._controller.start_race(runner.race.id)
         except Exception as error:
             if not is_expected(error):
                 logger.exception("Could not start the next heat")
             self.messages.show_warning(describe_error(self.translator, error))
             return
-        self.show_runner(started)
+        self.open_for_start(started)
 
     def _postpone_driver(self, participant_id: int) -> None:
         self._change_heat(

@@ -7,7 +7,7 @@ import logging
 import sys
 from collections.abc import Sequence
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
 from slot_racing import __version__
@@ -46,7 +46,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         window = MainWindow(runtime)
         window.show()
         if args.smoke_test:
-            QTimer.singleShot(500, app.quit)
+            # Quit only this loop. QApplication.quit() sets a thread flag that
+            # makes every later QEventLoop return immediately, so a smoke test
+            # inside the shared test application would disable timers afterwards.
+            loop = QEventLoop()
+            QTimer.singleShot(500, loop.quit)
+            loop.exec()
+            window.close()
+            return 0
         return app.exec()
     finally:
         runtime.shutdown()

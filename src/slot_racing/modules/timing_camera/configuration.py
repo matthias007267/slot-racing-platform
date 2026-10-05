@@ -2,9 +2,10 @@
 
 Zones are stored as fractions of the frame (0 to 1) so a later change of the
 requested resolution still describes the same part of the picture. Detection
-itself keeps using pixel rectangles. The conversion happens once, when a race
-session is created, from the resolution stored next to the zones. The capture
-thread never reads this document.
+itself keeps using pixel rectangles. Those pixels are first computed from the
+resolution stored next to the zones. When the camera then delivers a different
+picture, the same fractions are mapped onto that picture. The capture thread
+never reads this document.
 
 The document is the camera's own configuration. It has no ``track_id`` and is
 not stored on a timing sensor.
@@ -198,6 +199,47 @@ def pixels_to_roi(
         y=y / frame_height,
         width=width / frame_width,
         height=height / frame_height,
+    )
+
+
+def scale_detector_settings(
+    settings: DetectorSettings,
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+) -> DetectorSettings:
+    """Reinterpret pixel zones that were built for one frame on another frame.
+
+    The saved document stores fractions of the picture. The pixel rectangles
+    were computed for ``source_width`` by ``source_height``. A camera that
+    delivers ``target_width`` by ``target_height`` still watches the same
+    fraction of its own picture. A zone that already sticks out of the source
+    frame is reported as-is; it is not clipped to look valid.
+    """
+    if source_width < 1 or source_height < 1 or target_width < 1 or target_height < 1:
+        raise ValueError("frame size must be positive")
+    if (source_width, source_height) == (target_width, target_height):
+        return settings
+    zones: list[DetectionZone] = []
+    for zone in settings.zones:
+        roi = zone.roi
+        if roi.x + roi.width > source_width or roi.y + roi.height > source_height:
+            raise ValueError(
+                f"zone {zone.position_id!r} lane {zone.lane} extends outside the frame"
+            )
+        normalized = pixels_to_roi(roi.x, roi.y, roi.width, roi.height, source_width, source_height)
+        zones.append(
+            DetectionZone(
+                zone.position_id,
+                zone.lane,
+                roi_to_pixels(normalized, target_width, target_height),
+            )
+        )
+    return DetectorSettings(
+        tuple(zones),
+        threshold=settings.threshold,
+        min_foreground_pixels=settings.min_foreground_pixels,
     )
 
 
