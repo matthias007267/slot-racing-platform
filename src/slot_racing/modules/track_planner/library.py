@@ -1,0 +1,177 @@
+"""Load and save the part library and the instances of one plan."""
+
+from __future__ import annotations
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from slot_racing.core.errors import ValidationError
+from slot_racing.core.storage import Database
+from slot_racing.modules.track_planner.models import (
+    TrackPartConnector,
+    TrackPartDefinition,
+    TrackPlanInstance,
+)
+from slot_racing.modules.track_planner.parts import (
+    ConnectorSpec,
+    PartInstance,
+    PartRecord,
+    PartSpec,
+    identity_key,
+    resolved_scale,
+    standard_catalog,
+)
+
+
+class PartLibrary:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def list_parts(self) -> tuple[PartRecord, ...]:
+        self.ensure_seed()
+        with self._database.session() as session:
+            return tuple(self._load_all(session))
+
+    def ensure_seed(self) -> None:
+        """Insert the original catalogue when a part is not stored yet."""
+        with self._database.session() as session:
+            stored = {
+                identity_key(row.system, row.article_number, row.scale)
+                for row in session.scalars(select(TrackPartDefinition))
+            }
+            for spec in standard_catalog():
+                key = identity_key(spec.system, spec.article_number, spec.scale)
+                if key not in stored:
+                    self._insert(session, spec)
+                    stored.add(key)
+
+    def add_part(self, spec: PartSpec) -> PartRecord:
+        key = identity_key(spec.system, spec.article_number, spec.scale)
+        with self._database.session() as session:
+            for row in session.scalars(select(TrackPartDefinition)):
+                if identity_key(row.system, row.article_number, row.scale) == key:
+                    raise ValidationError("error.planner.part_exists")
+            definition = self._insert(session, spec)
+            session.flush()
+            return self._record(session, definition)
+
+    def require(self, part_id: int) -> PartRecord:
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
+                raise ValidationError("error.planner.part")
+            return self._record(session, definition)
+
+    def read_instances(self, session: Session, track_id: int) -> tuple[PartInstance, ...]:
+        rows = session.scalars(
+            select(TrackPlanInstance)
+            .where(TrackPlanInstance.track_id == track_id)
+            .order_by(TrackPlanInstance.id)
+        )
+        return tuple(
+            PartInstance(
+                id=row.id,
+                part_id=row.part_id,
+                x_mm=row.x_mm,
+                y_mm=row.y_mm,
+                z_mm=row.z_mm,
+                rotation_x_deg=row.rotation_x_deg,
+                rotation_y_deg=row.rotation_y_deg,
+                rotation_z_deg=row.rotation_z_deg,
+            )
+            for row in rows
+        )
+
+    def write_instances(
+        self, session: Session, track_id: int, instances: tuple[PartInstance, ...]
+    ) -> None:
+        known = set(session.scalars(select(TrackPartDefinition.id)))
+        for instance in instances:
+            if instance.part_id not in known:
+                raise ValidationError("error.planner.part")
+        session.execute(delete(TrackPlanInstance).where(TrackPlanInstance.track_id == track_id))
+        for instance in instances:
+            session.add(
+                TrackPlanInstance(
+                    id=instance.id,
+                    track_id=track_id,
+                    part_id=instance.part_id,
+                    x_mm=instance.x_mm,
+                    y_mm=instance.y_mm,
+                    z_mm=instance.z_mm,
+                    rotation_x_deg=instance.rotation_x_deg,
+                    rotation_y_deg=instance.rotation_y_deg,
+                    rotation_z_deg=instance.rotation_z_deg,
+                )
+            )
+
+    def _load_all(self, session: Session) -> list[PartRecord]:
+        rows = session.scalars(select(TrackPartDefinition).order_by(TrackPartDefinition.id))
+        return [self._record(session, row) for row in rows]
+
+    def _insert(self, session: Session, spec: PartSpec) -> TrackPartDefinition:
+        definition = TrackPartDefinition(
+            system=spec.system,
+            article_number=spec.article_number,
+            scale=resolved_scale(spec.system, spec.scale),
+            name=spec.name,
+            category=spec.category,
+            length_mm=spec.length_mm,
+            width_mm=spec.width_mm,
+            height_mm=spec.height_mm,
+            radius_mm=spec.radius_mm,
+            angle_deg=spec.angle_deg,
+            lane_count=spec.lane_count,
+            outline=[list(point) for point in spec.outline],
+        )
+        session.add(definition)
+        session.flush()
+        for index, connector in enumerate(spec.connectors):
+            session.add(
+                TrackPartConnector(
+                    part_id=definition.id,
+                    name=connector.name,
+                    x_mm=connector.x_mm,
+                    y_mm=connector.y_mm,
+                    z_mm=connector.z_mm,
+                    direction_deg=connector.direction_deg,
+                    kind=connector.kind,
+                    lanes=list(connector.lanes),
+                    sort_order=index,
+                )
+            )
+        return definition
+
+    def _record(self, session: Session, definition: TrackPartDefinition) -> PartRecord:
+        connectors = session.scalars(
+            select(TrackPartConnector)
+            .where(TrackPartConnector.part_id == definition.id)
+            .order_by(TrackPartConnector.sort_order, TrackPartConnector.id)
+        )
+        spec = PartSpec(
+            system=definition.system,
+            article_number=definition.article_number,
+            scale=definition.scale,
+            name=definition.name,
+            category=definition.category,
+            length_mm=definition.length_mm,
+            width_mm=definition.width_mm,
+            height_mm=definition.height_mm,
+            radius_mm=definition.radius_mm,
+            angle_deg=definition.angle_deg,
+            lane_count=definition.lane_count,
+            connectors=tuple(
+                ConnectorSpec(
+                    name=connector.name,
+                    x_mm=connector.x_mm,
+                    y_mm=connector.y_mm,
+                    z_mm=connector.z_mm,
+                    direction_deg=connector.direction_deg,
+                    kind=connector.kind,
+                    lanes=tuple(int(lane) for lane in connector.lanes),
+                )
+                for connector in connectors
+            ),
+            outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
+        )
+        return PartRecord(definition.id, spec)

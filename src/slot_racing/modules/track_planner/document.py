@@ -12,6 +12,16 @@ from uuid import uuid4
 
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
+from slot_racing.modules.track_planner.parts import (
+    DEFAULT_GRID_MM,
+    DEFAULT_SNAP_MM,
+    PartInstance,
+    PartSpec,
+    Pose,
+    snap_pose,
+)
+
+_POSITION_LIMIT_MM = 100_000.0
 
 PLAN_VERSION = 1
 
@@ -75,6 +85,10 @@ class TrackPlan:
     direction: str
     pieces: tuple[Piece, ...]
     markers: tuple[Marker, ...]
+    grid_enabled: bool = True
+    grid_mm: float = DEFAULT_GRID_MM
+    snap_mm: float = DEFAULT_SNAP_MM
+    instances: tuple[PartInstance, ...] = ()
 
     def start_finish(self) -> Marker | None:
         found = [marker for marker in self.markers if marker.kind == START_FINISH]
@@ -254,6 +268,10 @@ def to_document(plan: TrackPlan) -> dict[str, Any]:
             }
             for marker in checked.markers
         ],
+        "grid_enabled": checked.grid_enabled,
+        "grid_mm": checked.grid_mm,
+        "snap_mm": checked.snap_mm,
+        "instances": [_instance_document(instance) for instance in checked.instances],
     }
 
 
@@ -270,6 +288,9 @@ def parse_plan(track_id: TrackId, payload: object) -> TrackPlan:
         raise ValidationError("error.planner.invalid")
     pieces = tuple(_parse_piece(item) for item in raw_pieces)
     markers = tuple(_parse_marker(item) for item in raw_markers)
+    raw_instances = payload.get("instances", [])
+    if not isinstance(raw_instances, list):
+        raise ValidationError("error.planner.invalid")
     return _validate(
         TrackPlan(
             track_id=track_id,
@@ -277,6 +298,10 @@ def parse_plan(track_id: TrackId, payload: object) -> TrackPlan:
             direction=str(direction),
             pieces=pieces,
             markers=markers,
+            grid_enabled=_flag(payload.get("grid_enabled", True)),
+            grid_mm=_millimetre(payload.get("grid_mm", DEFAULT_GRID_MM)),
+            snap_mm=_millimetre(payload.get("snap_mm", DEFAULT_SNAP_MM)),
+            instances=tuple(_parse_instance(item) for item in raw_instances),
         )
     )
 
@@ -288,6 +313,227 @@ def validate_lanes(plan: TrackPlan, lane_count: int) -> None:
             continue
         if lane_count < 1 or not 1 <= marker.lane <= lane_count:
             raise ValidationError("error.planner.lane")
+
+
+def add_instance(plan: TrackPlan, instance: PartInstance) -> TrackPlan:
+    _check_instance(instance)
+    return _replace(plan, instances=(*plan.instances, instance))
+
+
+def move_instance(plan: TrackPlan, instance_id: str, x_mm: float, y_mm: float) -> TrackPlan:
+    return _update_instance(
+        plan,
+        instance_id,
+        lambda instance: PartInstance(
+            instance.id,
+            instance.part_id,
+            x_mm,
+            y_mm,
+            instance.z_mm,
+            instance.rotation_x_deg,
+            instance.rotation_y_deg,
+            instance.rotation_z_deg,
+        ),
+    )
+
+
+def rotate_instance(plan: TrackPlan, instance_id: str, rotation_z_deg: float) -> TrackPlan:
+    return _update_instance(
+        plan,
+        instance_id,
+        lambda instance: PartInstance(
+            instance.id,
+            instance.part_id,
+            instance.x_mm,
+            instance.y_mm,
+            instance.z_mm,
+            instance.rotation_x_deg,
+            instance.rotation_y_deg,
+            rotation_z_deg,
+        ),
+    )
+
+
+def remove_instance(plan: TrackPlan, instance_id: str) -> TrackPlan:
+    instances = tuple(instance for instance in plan.instances if instance.id != instance_id)
+    if len(instances) == len(plan.instances):
+        raise ValidationError("error.planner.piece")
+    return _replace(plan, instances=instances)
+
+
+def set_plan_grid(plan: TrackPlan, *, enabled: bool, grid_mm: float, snap_mm: float) -> TrackPlan:
+    return _replace(plan, grid_enabled=enabled, grid_mm=grid_mm, snap_mm=snap_mm)
+
+
+def with_instances(plan: TrackPlan, instances: tuple[PartInstance, ...]) -> TrackPlan:
+    return _replace(plan, instances=instances)
+
+
+def place_instance(
+    plan: TrackPlan,
+    part_id: int,
+    spec: PartSpec,
+    x_mm: float,
+    y_mm: float,
+    rotation_z_deg: float,
+    catalog: dict[int, PartSpec],
+) -> TrackPlan:
+    """Append one instance. A nearby compatible joint wins over the grid."""
+    placed = _placed(plan, catalog)
+    pose = snap_pose(
+        spec,
+        Pose(x_mm, y_mm, rotation_z_deg),
+        placed,
+        snap_mm=plan.snap_mm,
+        grid_mm=plan.grid_mm if plan.grid_enabled else None,
+    )
+    return add_instance(
+        plan,
+        PartInstance(
+            id=new_id(),
+            part_id=part_id,
+            x_mm=pose.x_mm,
+            y_mm=pose.y_mm,
+            rotation_z_deg=pose.rotation_z_deg,
+        ),
+    )
+
+
+def reposition_instance(
+    plan: TrackPlan,
+    instance_id: str,
+    x_mm: float,
+    y_mm: float,
+    catalog: dict[int, PartSpec],
+) -> TrackPlan:
+    current = _require_instance(plan, instance_id)
+    spec = catalog.get(current.part_id)
+    if spec is None:
+        raise ValidationError("error.planner.part")
+    others = tuple(instance for instance in plan.instances if instance.id != instance_id)
+    pose = snap_pose(
+        spec,
+        Pose(x_mm, y_mm, current.rotation_z_deg),
+        _placed(with_instances(plan, others), catalog),
+        snap_mm=plan.snap_mm,
+        grid_mm=plan.grid_mm if plan.grid_enabled else None,
+    )
+    return move_instance(
+        _replace(
+            plan,
+            instances=tuple(
+                PartInstance(
+                    instance.id,
+                    instance.part_id,
+                    pose.x_mm,
+                    pose.y_mm,
+                    instance.z_mm,
+                    instance.rotation_x_deg,
+                    instance.rotation_y_deg,
+                    pose.rotation_z_deg,
+                )
+                if instance.id == instance_id
+                else instance
+                for instance in plan.instances
+            ),
+        ),
+        instance_id,
+        pose.x_mm,
+        pose.y_mm,
+    )
+
+
+def _placed(
+    plan: TrackPlan, catalog: dict[int, PartSpec]
+) -> tuple[tuple[PartInstance, PartSpec], ...]:
+    placed: list[tuple[PartInstance, PartSpec]] = []
+    for instance in plan.instances:
+        spec = catalog.get(instance.part_id)
+        if spec is not None:
+            placed.append((instance, spec))
+    return tuple(placed)
+
+
+def _require_instance(plan: TrackPlan, instance_id: str) -> PartInstance:
+    for instance in plan.instances:
+        if instance.id == instance_id:
+            return instance
+    raise ValidationError("error.planner.piece")
+
+
+def _update_instance(plan: TrackPlan, instance_id: str, build: Any) -> TrackPlan:
+    if not any(instance.id == instance_id for instance in plan.instances):
+        raise ValidationError("error.planner.piece")
+    instances = tuple(
+        build(instance) if instance.id == instance_id else instance for instance in plan.instances
+    )
+    return _replace(plan, instances=instances)
+
+
+def _instance_document(instance: PartInstance) -> dict[str, Any]:
+    return {
+        "id": instance.id,
+        "part_id": instance.part_id,
+        "x": instance.x_mm,
+        "y": instance.y_mm,
+        "z": instance.z_mm,
+        "rotation_x": instance.rotation_x_deg,
+        "rotation_y": instance.rotation_y_deg,
+        "rotation_z": instance.rotation_z_deg,
+    }
+
+
+def _parse_instance(payload: object) -> PartInstance:
+    if not isinstance(payload, dict):
+        raise ValidationError("error.planner.invalid")
+    part_id = payload.get("part_id")
+    if isinstance(part_id, bool) or not isinstance(part_id, int) or part_id < 1:
+        raise ValidationError("error.planner.invalid")
+    return PartInstance(
+        id=_identity(payload.get("id")),
+        part_id=part_id,
+        x_mm=_millimetre(payload.get("x")),
+        y_mm=_millimetre(payload.get("y")),
+        z_mm=_millimetre(payload.get("z", 0)),
+        rotation_x_deg=_angle(payload.get("rotation_x", 0)),
+        rotation_y_deg=_angle(payload.get("rotation_y", 0)),
+        rotation_z_deg=_angle(payload.get("rotation_z", 0)),
+    )
+
+
+def _check_instance(instance: PartInstance) -> None:
+    if not isinstance(instance, PartInstance):
+        raise ValidationError("error.planner.part")
+    _identity(instance.id)
+    if isinstance(instance.part_id, bool) or not isinstance(instance.part_id, int):
+        raise ValidationError("error.planner.part")
+    if instance.part_id < 1:
+        raise ValidationError("error.planner.part")
+    for value in (instance.x_mm, instance.y_mm, instance.z_mm):
+        _millimetre(value)
+        if abs(value) > _POSITION_LIMIT_MM:
+            raise ValidationError("error.planner.position")
+    for value in (instance.rotation_x_deg, instance.rotation_y_deg, instance.rotation_z_deg):
+        _angle(value)
+
+
+def _millimetre(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError("error.planner.invalid")
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValidationError("error.planner.invalid")
+    return number
+
+
+def _angle(value: object) -> float:
+    return _millimetre(value) % 360.0
+
+
+def _flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError("error.planner.invalid")
+    return value
 
 
 def _parse_piece(payload: object) -> Piece:
@@ -329,6 +575,14 @@ def _validate(plan: TrackPlan) -> TrackPlan:
         seen.add(piece.id)
         _check_piece(piece)
     piece_ids = {piece.id for piece in plan.pieces}
+    instance_ids: set[str] = set()
+    for instance in plan.instances:
+        if instance.id in instance_ids or instance.id in seen:
+            raise ValidationError("error.planner.invalid")
+        instance_ids.add(instance.id)
+        _check_instance(instance)
+    if not isinstance(plan.grid_enabled, bool) or plan.grid_mm <= 0 or plan.snap_mm < 0:
+        raise ValidationError("error.planner.invalid")
     marker_ids: set[str] = set()
     starts = 0
     for marker in plan.markers:
@@ -402,6 +656,10 @@ def _replace(
     direction: str | None = None,
     pieces: tuple[Piece, ...] | None = None,
     markers: tuple[Marker, ...] | None = None,
+    grid_enabled: bool | None = None,
+    grid_mm: float | None = None,
+    snap_mm: float | None = None,
+    instances: tuple[PartInstance, ...] | None = None,
 ) -> TrackPlan:
     return _validate(
         TrackPlan(
@@ -410,6 +668,10 @@ def _replace(
             direction=plan.direction if direction is None else direction,
             pieces=plan.pieces if pieces is None else pieces,
             markers=plan.markers if markers is None else markers,
+            grid_enabled=plan.grid_enabled if grid_enabled is None else grid_enabled,
+            grid_mm=plan.grid_mm if grid_mm is None else grid_mm,
+            snap_mm=plan.snap_mm if snap_mm is None else snap_mm,
+            instances=plan.instances if instances is None else instances,
         )
     )
 
