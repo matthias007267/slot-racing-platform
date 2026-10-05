@@ -16,6 +16,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.direction.clockwise": "Uhrzeigersinn",
         "planner.direction.counterclockwise": "Gegen den Uhrzeigersinn",
         "planner.save": "Speichern",
+        "planner.undo": "Rückgängig",
+        "planner.selection.many": "{count} Bauteile",
         "planner.discard": "Verwerfen",
         "planner.reset": "Zurücksetzen",
         "planner.properties": "Eigenschaften",
