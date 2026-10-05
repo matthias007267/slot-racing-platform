@@ -10,6 +10,7 @@ from slot_racing.modules.track_planner.parts import (
     CATEGORIES,
     IMPLIED_SCALE,
     SCALES,
+    PartRecord,
     PartSpec,
     build_part,
 )
@@ -18,9 +19,16 @@ from slot_racing.uikit.dialog import FormDialog
 
 
 class PartDialog(FormDialog):
-    def __init__(self, translator: Translator, planner: TrackPlannerService) -> None:
-        super().__init__(translator, translator.translate("planner.library.add"))
+    def __init__(
+        self,
+        translator: Translator,
+        planner: TrackPlannerService,
+        record: PartRecord | None = None,
+    ) -> None:
+        title = "planner.library.edit" if record is not None else "planner.library.add"
+        super().__init__(translator, translator.translate(title))
         self._planner = planner
+        self._record = record
         self.created: PartSpec | None = None
         self.system = QComboBox()
         self.system.setObjectName("part-system")
@@ -63,6 +71,8 @@ class PartDialog(FormDialog):
         form.addRow(translate("planner.field.angle"), self.angle)
         form.addRow(translate("planner.field.lanes"), self.lanes)
         self._sync_scale(self.system.currentText())
+        if record is not None:
+            self._fill(record)
 
     def submit(self) -> None:
         scale = self.scale.currentData()
@@ -79,8 +89,29 @@ class PartDialog(FormDialog):
             angle_deg=_optional(self.angle),
             lane_count=self.lanes.value(),
         )
-        self._planner.add_part(spec)
+        if self._record is None:
+            self._planner.add_part(spec)
+        else:
+            self._planner.update_part(self._record.id, spec)
         self.created = spec
+
+    def _fill(self, record: PartRecord) -> None:
+        spec = record.spec
+        self.system.setCurrentText(spec.system)
+        self.article.setText(spec.article_number)
+        self.name.setText(spec.name)
+        category = self.category.findData(spec.category)
+        if category >= 0:
+            self.category.setCurrentIndex(category)
+        self.length.setValue(0 if spec.length_mm is None else spec.length_mm)
+        self.width_mm.setValue(0 if spec.width_mm is None else spec.width_mm)
+        self.height_mm.setValue(0 if spec.height_mm is None else spec.height_mm)
+        self.radius.setValue(0 if spec.radius_mm is None else spec.radius_mm)
+        self.angle.setValue(0 if spec.angle_deg is None else spec.angle_deg)
+        self.lanes.setValue(spec.lane_count)
+        scale = self.scale.findData(spec.scale)
+        if scale >= 0:
+            self.scale.setCurrentIndex(scale)
 
     def _sync_scale(self, system: str) -> None:
         known = IMPLIED_SCALE.get(system.strip())

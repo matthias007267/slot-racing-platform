@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from slot_racing.core.errors import ValidationError
@@ -55,6 +55,48 @@ class PartLibrary:
             session.flush()
             return self._record(session, definition)
 
+    def update_part(self, part_id: int, spec: PartSpec) -> PartRecord:
+        key = identity_key(spec.system, spec.article_number, spec.scale)
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
+                raise ValidationError("error.planner.part")
+            for row in session.scalars(select(TrackPartDefinition)):
+                if row.id == part_id:
+                    continue
+                if identity_key(row.system, row.article_number, row.scale) == key:
+                    raise ValidationError("error.planner.part_exists")
+            definition.system = spec.system
+            definition.article_number = spec.article_number
+            definition.scale = resolved_scale(spec.system, spec.scale)
+            definition.name = spec.name
+            definition.category = spec.category
+            definition.length_mm = spec.length_mm
+            definition.width_mm = spec.width_mm
+            definition.height_mm = spec.height_mm
+            definition.radius_mm = spec.radius_mm
+            definition.angle_deg = spec.angle_deg
+            definition.lane_count = spec.lane_count
+            definition.outline = [list(point) for point in spec.outline]
+            session.execute(delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id))
+            self._add_connectors(session, part_id, spec)
+            session.flush()
+            return self._record(session, definition)
+
+    def delete_part(self, part_id: int) -> None:
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
+                raise ValidationError("error.planner.part")
+            used = session.scalar(
+                select(func.count())
+                .select_from(TrackPlanInstance)
+                .where(TrackPlanInstance.part_id == part_id)
+            )
+            if used:
+                raise ValidationError("error.planner.part_in_use", count=int(used))
+            session.delete(definition)
+
     def require(self, part_id: int) -> PartRecord:
         with self._database.session() as session:
             definition = session.get(TrackPartDefinition, part_id)
@@ -78,6 +120,8 @@ class PartLibrary:
                 rotation_x_deg=row.rotation_x_deg,
                 rotation_y_deg=row.rotation_y_deg,
                 rotation_z_deg=row.rotation_z_deg,
+                start_straight=bool(row.is_start_straight),
+                group_id=row.group_id,
             )
             for row in rows
         )
@@ -102,6 +146,8 @@ class PartLibrary:
                     rotation_x_deg=instance.rotation_x_deg,
                     rotation_y_deg=instance.rotation_y_deg,
                     rotation_z_deg=instance.rotation_z_deg,
+                    is_start_straight=instance.start_straight,
+                    group_id=instance.group_id,
                 )
             )
 
@@ -126,10 +172,14 @@ class PartLibrary:
         )
         session.add(definition)
         session.flush()
+        self._add_connectors(session, definition.id, spec)
+        return definition
+
+    def _add_connectors(self, session: Session, part_id: int, spec: PartSpec) -> None:
         for index, connector in enumerate(spec.connectors):
             session.add(
                 TrackPartConnector(
-                    part_id=definition.id,
+                    part_id=part_id,
                     name=connector.name,
                     x_mm=connector.x_mm,
                     y_mm=connector.y_mm,
@@ -140,7 +190,6 @@ class PartLibrary:
                     sort_order=index,
                 )
             )
-        return definition
 
     def _record(self, session: Session, definition: TrackPartDefinition) -> PartRecord:
         connectors = session.scalars(

@@ -18,6 +18,7 @@ from slot_racing.core.storage import Database
 from slot_racing.core.storage.base import Base
 from slot_racing.modules.track_planner.document import (
     TrackPlan,
+    clone_plan,
     empty_plan,
     parse_plan,
     to_document,
@@ -63,6 +64,39 @@ class TrackPlannerService:
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         return self.library.add_part(spec)
+
+    def update_part(self, part_id: int, spec: PartSpec) -> PartRecord:
+        return self.library.update_part(part_id, spec)
+
+    def delete_part(self, part_id: int) -> None:
+        self.library.delete_part(part_id)
+
+    def save_as_new(self, plan: TrackPlan, name: str) -> TrackPlan:
+        """Store a copy as its own track. The open track and its definitions stay as they are."""
+        source = self._require_track(plan.track_id)
+        title = name.strip()
+        if not title:
+            raise ValidationError("error.track.name.required")
+        if len(title) > 100:
+            raise ValidationError("error.track.name.too_long", limit=100)
+        validate_lanes(plan, source.lane_count)
+        with self._database.session() as session:
+            table = Base.metadata.tables["tracks"]
+            new_id = session.execute(
+                insert(table)
+                .values(
+                    name=title,
+                    lane_count=source.lane_count,
+                    description=source.description,
+                    is_active=True,
+                    image_path=source.image_path,
+                )
+                .returning(table.c.id)
+            ).scalar_one()
+            copied = clone_plan(plan, TrackId(int(new_id)))
+            self.library.write_instances(session, int(copied.track_id), copied.instances)
+            self._write(session, int(copied.track_id), to_document(copied))
+        return copied
 
     def _require_track(self, track_id: TrackId) -> TrackInfo:
         track = self._tracks.get_track(track_id)
