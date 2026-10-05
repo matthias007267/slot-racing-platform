@@ -37,7 +37,11 @@ from slot_racing.modules.timing_camera.capture import (
     FrameQueue,
 )
 from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
-from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
+from slot_racing.modules.timing_camera.frame_source import (
+    FrameSource,
+    ManualFrameSource,
+    TimedFrame,
+)
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
@@ -634,3 +638,205 @@ def test_a_held_camera_is_reported_in_use_without_opening_it() -> None:
     assert caught.value.key == "error.timing_provider.camera_in_use"
     assert "open" not in opened
     source.stop()
+
+
+# Grab stamps a delayed consumer must keep. They are not wall-clock values, so a
+# late poll cannot accidentally match them.
+_GRAB_STAMPS_NS = (
+    1_000_000_000,
+    1_033_000_000,
+    1_066_000_000,
+    1_099_000_000,
+)
+
+
+def solid(value: int, width: int = WIDTH, height: int = HEIGHT) -> GrayFrame:
+    """A uniform frame stored as bytes, the same form a camera grab uses."""
+    return GrayFrame(width, height, bytes([value]) * (width * height))
+
+
+def test_poll_frame_keeps_grab_order_and_timestamps_when_processing_is_late() -> None:
+    frames = ManualFrameSource()
+    frames.start()
+    for value, stamp in enumerate(_GRAB_STAMPS_NS, start=1):
+        frames.submit(solid(value), stamp)
+    time.sleep(0.03)
+    delivered: list[TimedFrame] = []
+    while True:
+        frame = frames.poll_frame()
+        if frame is None:
+            break
+        delivered.append(frame)
+    assert [frame.timestamp_ns for frame in delivered] == list(_GRAB_STAMPS_NS)
+    assert [frame.frame.pixels[0] for frame in delivered] == [1, 2, 3, 4]
+    assert len({id(frame) for frame in delivered}) == len(delivered)
+    assert frames.poll_frame() is None
+
+
+def test_a_late_poll_reports_the_stored_grab_timestamps_once() -> None:
+    frames = ManualFrameSource()
+    source = CameraTimingFactory(frames, zones(1), blank()).create_source(session())
+    assert isinstance(source, CameraTimingProvider)
+    received: list[SensorTriggered] = []
+    source.start(received.append)
+    frames.submit(blank(), _GRAB_STAMPS_NS[0])
+    frames.submit(car(1), _GRAB_STAMPS_NS[1])
+    frames.submit(blank(), _GRAB_STAMPS_NS[2])
+    frames.submit(car(1), _GRAB_STAMPS_NS[3])
+    time.sleep(0.03)
+    source.poll()
+    assert [event.timestamp_ns for event in received] == [_GRAB_STAMPS_NS[1], _GRAB_STAMPS_NS[3]]
+    source.poll()
+    assert [event.timestamp_ns for event in received] == [_GRAB_STAMPS_NS[1], _GRAB_STAMPS_NS[3]]
+    assert frames.poll_frame() is None
+    source.stop()
+
+
+def test_preview_drops_leave_the_timing_timestamps_untouched() -> None:
+    timing = ManualFrameSource()
+    source = CameraTimingFactory(timing, zones(1), blank()).create_source(session())
+    assert isinstance(source, CameraTimingProvider)
+    received: list[SensorTriggered] = []
+    source.start(received.append)
+    timing.submit(blank(), _GRAB_STAMPS_NS[0])
+    timing.submit(car(1), _GRAB_STAMPS_NS[1])
+    timing.submit(blank(), _GRAB_STAMPS_NS[2])
+    timing.submit(car(1), _GRAB_STAMPS_NS[3])
+
+    preview_device = ScriptedCapture()
+    preview = CameraFrameSource(preview_device, queue_size=4)
+    preview.start()
+    try:
+        for value in (11, 22, 33, 44):
+            preview_device.push(solid(value))
+        preview_device.wait_until_reads(4)
+        wait_for(lambda: preview.queued == 4)
+        latest = preview.poll_latest()
+        assert latest is not None
+        assert latest.frame.pixels[0] == 44
+        assert isinstance(latest.frame.pixels, bytes)
+        assert preview.queued == 0
+        assert preview.poll_frame() is None
+        assert latest.timestamp_ns not in _GRAB_STAMPS_NS
+
+        source.poll()
+        assert [event.timestamp_ns for event in received] == [
+            _GRAB_STAMPS_NS[1],
+            _GRAB_STAMPS_NS[3],
+        ]
+        source.poll()
+        assert len(received) == 2
+    finally:
+        preview.stop()
+        source.stop()
+    assert not preview.is_capturing
+
+
+def test_overflow_keeps_the_newest_grab_timestamps_in_order() -> None:
+    assert MAX_QUEUED_FRAMES == 2
+    capture = ScriptedCapture()
+    frames = CameraFrameSource(capture, queue_size=MAX_QUEUED_FRAMES)
+    frames.start()
+    try:
+        for value in (10, 20, 30, 40):
+            capture.push(solid(value))
+        capture.wait_until_reads(4)
+        wait_for(lambda: frames.captured == 4 and frames.queued == MAX_QUEUED_FRAMES)
+        grabbed_by = time.perf_counter_ns()
+        time.sleep(0.04)
+        first = frames.poll_frame()
+        second = frames.poll_frame()
+        assert first is not None and second is not None
+        assert first.frame.pixels[0] == 30
+        assert second.frame.pixels[0] == 40
+        assert isinstance(first.frame.pixels, bytes)
+        assert len(first.frame.to_bytes()) == WIDTH * HEIGHT
+        assert first.timestamp_ns < second.timestamp_ns <= grabbed_by
+        assert frames.poll_frame() is None
+        assert frames.dropped == 2
+        assert frames.queued == 0
+    finally:
+        frames.stop()
+    assert not frames.is_capturing
+
+
+def test_a_late_poll_uses_the_surviving_grab_and_does_not_count_it_twice() -> None:
+    capture = ScriptedCapture()
+    source, frames, received = started(capture, queue_size=MAX_QUEUED_FRAMES)
+    try:
+        capture.push(blank())
+        capture.push(blank())
+        capture.push(car(1))
+        capture.push(car(1))
+        capture.wait_until_reads(4)
+        wait_for(lambda: frames.captured == 4 and frames.queued == MAX_QUEUED_FRAMES)
+        grabbed_by = time.perf_counter_ns()
+        time.sleep(0.04)
+        source.poll()
+        assert len(received) == 1
+        assert received[0].timestamp_ns <= grabbed_by
+        assert received[0].lane == 1
+        source.poll()
+        assert len(received) == 1
+        assert frames.queued == 0
+    finally:
+        source.stop()
+
+
+def test_the_queue_never_hands_out_a_partial_frame() -> None:
+    queue = FrameQueue(MAX_QUEUED_FRAMES)
+    stop = threading.Event()
+    taken: list[TimedFrame] = []
+    errors: list[BaseException] = []
+
+    def accept(frame: TimedFrame) -> None:
+        raw = frame.frame.to_bytes()
+        if len(raw) != 64 or len(set(raw)) != 1 or raw[0] != frame.timestamp_ns % 256:
+            errors.append(AssertionError("incomplete frame"))
+            return
+        taken.append(frame)
+
+    def consume() -> None:
+        while not stop.is_set():
+            frame = queue.take()
+            if frame is not None:
+                accept(frame)
+
+    consumer = threading.Thread(target=consume)
+    consumer.start()
+    for index in range(300):
+        queue.put(TimedFrame(solid(index % 256, 8, 8), index))
+    stop.set()
+    consumer.join(timeout=2)
+    leftover = queue.take()
+    while leftover is not None:
+        accept(leftover)
+        leftover = queue.take()
+    assert not consumer.is_alive()
+    assert errors == []
+    stamps = [frame.timestamp_ns for frame in taken]
+    assert len(taken) >= 2
+    assert stamps == sorted(set(stamps))
+    assert len({id(frame) for frame in taken}) == len(taken)
+
+
+def test_a_frame_already_delivered_stays_intact_after_the_camera_stops() -> None:
+    capture = ScriptedCapture()
+    frames = CameraFrameSource(capture)
+    delivered: TimedFrame | None = None
+    frames.start()
+    try:
+        capture.push(solid(7))
+        wait_for(lambda: frames.queued == 1)
+        delivered = frames.poll_frame()
+        assert delivered is not None
+        stamp = delivered.timestamp_ns
+    finally:
+        frames.stop()
+    assert delivered is not None
+    assert not frames.is_capturing
+    assert not capture.opened
+    assert delivered.frame.to_bytes() == bytes([7]) * (WIDTH * HEIGHT)
+    assert delivered.timestamp_ns == stamp
+    assert frames.poll_frame() is None
+    assert frames.queued == 0
