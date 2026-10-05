@@ -38,8 +38,21 @@ shell with a sidebar and dynamic navigation. Usable in the application:
 - **Streckenplaner:** a grid editor for an existing track. Straights, 90° curves, the
   start/finish line and the driving direction are stored with that track.
 
-**Not** implemented yet: automatic vehicle detection, Raspberry Pi/GPIO, manufacturer-specific
-hardware, audio/animations, statistics, time limited races.
+Open work, in the existing order. Finished work is not listed again.
+
+1. Automatic vehicle detection
+2. Raspberry Pi / GPIO
+3. Manufacturer-specific hardware
+4. Audio and animations
+5. Time-limited races
+6. **Rennen neu starten.** On the race overview, a button „Rennen Neustart“, shown only for an
+   aborted race, which can then be started again. A finished race cannot be restarted and can
+   still only be deleted.
+7. **Startampel.** Later, replace the countdown `3 → 2 → 1 → GO` with a classic start-light
+   animation. The split between countdown, start signal and the running race stays.
+8. **Kamera-Zeitmessung mit Hardware-Sensoren.** Later, replace camera detection with sensors
+   in the rails. Sensors, readout electronics and the connection to the platform are still to
+   be planned and built. This is postponed.
 
 See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.md).
 
