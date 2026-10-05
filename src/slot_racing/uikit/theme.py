@@ -6,13 +6,14 @@ Dynamic properties ``role`` and ``tone`` select a variant. Pages do not invent t
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLayout, QStyle, QWidget
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,37 @@ _RADIUS = 6
 _BUTTON_HEIGHT = 32
 
 
+@dataclass(frozen=True, slots=True)
+class _ThemeAssets:
+    """Palette and stylesheet built for one theme. The icon path is part of the sheet."""
+
+    sheet: str
+    palette: QPalette
+
+
+# Resources keyed by the theme that produced them. A second theme gets its own entry.
+_ASSET_CACHE: dict[tuple[object, ...], _ThemeAssets] = {}
+# Style object installed by the last apply on that QApplication. Qt replaces this
+# object when the base style changes, so a later setStyle() cannot be skipped.
+# This is not a process-wide "already themed" flag.
+_APPLIED_STYLE: dict[int, QStyle] = {}
+
+
+def _theme_signature() -> tuple[object, ...]:
+    color_values = tuple(getattr(COLORS, item.name) for item in fields(COLORS))
+    return (*color_values, _RADIUS, _BUTTON_HEIGHT)
+
+
+def _theme_assets() -> _ThemeAssets:
+    signature = _theme_signature()
+    cached = _ASSET_CACHE.get(signature)
+    if cached is not None:
+        return cached
+    assets = _ThemeAssets(sheet=stylesheet(_checkmark()), palette=_palette())
+    _ASSET_CACHE[signature] = assets
+    return assets
+
+
 def configure_page(layout: QLayout) -> None:
     """Outer page padding lives on the shell. Nested pages only keep a consistent gap."""
     layout.setContentsMargins(0, 0, 0, 0)
@@ -76,10 +108,22 @@ def set_tone(widget: QWidget, tone: str) -> None:
 
 
 def apply_theme(app: QApplication) -> None:
-    """Fusion plus palette plus stylesheet. Safe to call more than once."""
+    """Fusion plus palette plus stylesheet. Safe to call more than once.
+
+    An application that already shows this exact theme is left untouched. A different
+    theme, stylesheet, palette, or base style still applies the full theme.
+    """
+    assets = _theme_assets()
+    if (
+        _APPLIED_STYLE.get(id(app)) is app.style()
+        and app.styleSheet() == assets.sheet
+        and app.palette() == assets.palette
+    ):
+        return
     app.setStyle("Fusion")
-    app.setPalette(_palette())
-    app.setStyleSheet(stylesheet(_checkmark()))
+    app.setPalette(assets.palette)
+    app.setStyleSheet(assets.sheet)
+    _APPLIED_STYLE[id(app)] = app.style()
 
 
 def _palette() -> QPalette:
@@ -111,8 +155,13 @@ def _palette() -> QPalette:
 
 
 def _checkmark() -> str:
-    """A small check icon so a checked box is not only a green square."""
-    path = Path(tempfile.gettempdir()) / "slot-racing-checkbox.png"
+    """A small check icon so a checked box is not only a green square.
+
+    The file name follows the icon color, so two themes never share one image.
+    Callers build theme assets once, so the file is not rewritten for every window.
+    """
+    token = hashlib.sha256(COLORS.accent_text.encode()).hexdigest()[:16]
+    path = Path(tempfile.gettempdir()) / f"slot-racing-checkbox-{token}.png"
     pixmap = QPixmap(16, 16)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
