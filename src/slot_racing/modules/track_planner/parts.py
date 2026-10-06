@@ -54,8 +54,18 @@ CONNECTOR_KINDS = frozenset({TRACK, BORDER_JOINT, SUPPORT_JOINT})
 
 # Carrera Digital 132 / Evolution: 200 mm for two lanes, 100 mm between lane centres.
 LANE_PITCH_MM = 100.0
-DEFAULT_GRID_MM = 10.0
-DEFAULT_SNAP_MM = 25.0
+# Defaults for a plan that has never stored its own grid or dock distance.
+DEFAULT_GRID_MM = 100.0
+DEFAULT_SNAP_MM = 200.0
+# The current (since 2021) electronic connecting rail. Not the older plug piece 20515/20520.
+START_FINISH_ARTICLE = "20020518"
+# Analog bottleneck, two rails of 345 mm. Not the digital pieces 20030350 / 20030351.
+BOTTLENECK_ARTICLE = "20020516"
+BOTTLENECK_LENGTH_MM = 690.0
+# Carrera does not publish the inner slot spacing. Each groove stays on its lane
+# and, at the joint of the two rails, sits a quarter of the lane pitch off the
+# centreline. The drawn slots and the lane length use that continuation.
+BOTTLENECK_INNER_OFFSET_MM = LANE_PITCH_MM / 4.0
 _POSITION_LIMIT_MM = 100_000.0
 
 # Continue-build uses catalogue articles, never the displayed designation.
@@ -818,6 +828,29 @@ def lateral_bow_paths(length: float, shift: float) -> tuple[SlotPath, ...]:
     return tuple(paths)
 
 
+def bottleneck_paths(length: float) -> tuple[SlotPath, ...]:
+    """Two grooves that narrow toward the centre joint and open again.
+
+    Lane 1 stays lane 1 and lane 2 stays lane 2. The ends meet the ordinary
+    straight anchors, so the part snaps like any other two-lane rail.
+    """
+    half = length / 2.0
+    inner = BOTTLENECK_INNER_OFFSET_MM
+    paths: list[SlotPath] = []
+    for index in range(2):
+        y = lane_offset_mm(index, 2)
+        narrowed = inner if y >= 0.0 else -inner
+        spans = s_bend(-half, y, 0.0, narrowed) + s_bend(0.0, narrowed, half, y)
+        paths.append(SlotPath(spans))
+    paths.append(_center_line(length))
+    return tuple(paths)
+
+
+def is_start_finish_part(spec: PartSpec) -> bool:
+    """The connecting rail carries start and finish. A standard straight does not."""
+    return normalize_article(spec.article_number) == START_FINISH_ARTICLE
+
+
 def chicane_paths(length: float) -> tuple[SlotPath, ...]:
     """Both lanes weave to one side and then the other. The centre follows."""
     half = length / 2.0
@@ -952,6 +985,9 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         )
 
     straight("20020601", "Standardgerade", 345.0)
+    # 20020518 since 2021: electronic connecting rail, 345 mm, plus a separate
+    # standard straight in the package. Only the connecting rail is this part.
+    straight(START_FINISH_ARTICLE, "Anschlussgerade", 345.0)
     straight("20020611", "1/3-Gerade", 115.0)
     straight("20020612", "1/4-Gerade", 86.0)
     straight("20030343", "Spurwechsel links", 345.0, LANE_CHANGE, lane_change_paths(345.0, "left"))
@@ -960,6 +996,13 @@ def standard_catalog() -> tuple[PartSpec, ...]:
     )
     straight("20030347", "Doppelspurwechsel", 345.0, LANE_CHANGE, lane_change_paths(345.0, "both"))
     straight("20020517", "Weiche", 345.0, SWITCH, lane_change_paths(345.0, "left"))
+    straight(
+        BOTTLENECK_ARTICLE,
+        "Engstelle",
+        BOTTLENECK_LENGTH_MM,
+        SPECIAL,
+        bottleneck_paths(BOTTLENECK_LENGTH_MM),
+    )
     straight("20030350", "Engstelle links", 690.0, SPECIAL, lateral_bow_paths(690.0, -32.0))
     straight("20030351", "Engstelle rechts", 690.0, SPECIAL, lateral_bow_paths(690.0, 32.0))
     straight("20030373", "Schikane", 1035.0, SPECIAL, chicane_paths(1035.0))
@@ -1027,6 +1070,29 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             outline=arc_outline(300.0, 30.0, width),
         )
     )
+    # Plan radii match the flat curve of the same number (R2/R3/R4). The outer
+    # diameters follow: R2 about 1.2 m, R4 about 2.0 m. Banking is not stored.
+    for article, name, radius, angle in (
+        ("20020575", "Steilkurve R2 30°", 500.0, 30.0),
+        ("20020576", "Steilkurve R3 30°", 700.0, 30.0),
+        ("20020579", "Steilkurve R4 15°", 900.0, 15.0),
+    ):
+        add(
+            PartSpec(
+                article_number=article,
+                scale=scale,
+                name=name,
+                category=SPECIAL,
+                length_mm=None,
+                width_mm=width,
+                height_mm=None,
+                radius_mm=radius,
+                angle_deg=angle,
+                lane_count=2,
+                connectors=curve_connectors(radius, angle, 2),
+                outline=arc_outline(radius, angle, width),
+            )
+        )
     add(
         PartSpec(
             article_number="20020587",

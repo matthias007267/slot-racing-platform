@@ -35,13 +35,19 @@ class PartLibrary:
     def list_parts(self) -> tuple[PartRecord, ...]:
         self.ensure_seed()
         with self._database.session() as session:
-            return tuple(self._load_all(session))
+            rows = session.scalars(
+                select(TrackPartDefinition)
+                .where(TrackPartDefinition.suppressed.is_(False))
+                .order_by(TrackPartDefinition.id)
+            )
+            return tuple(self._record(session, row) for row in rows)
 
     def ensure_seed(self) -> None:
         """Insert the original catalogue when a part is not stored yet.
 
         A part that was stored before grooves existed gets those grooves once.
-        The outline and the joints are left as they are.
+        The outline and the joints are left as they are. A suppressed catalogue
+        row still counts as stored, so deleting a bundled part does not recreate it.
         """
         catalog = {
             identity_key(spec.name, spec.article_number): spec for spec in standard_catalog()
@@ -99,6 +105,14 @@ class PartLibrary:
             raise self._duplicate(spec) from error
 
     def delete_part(self, part_id: int) -> None:
+        """Remove a part from the placeable library.
+
+        A part that is already on a plan is kept. Deleting it would break that
+        plan. An unused catalogue part is suppressed, because seeding would
+        otherwise insert it again. An unused custom part is deleted, and its
+        stock row goes with it.
+        """
+        catalog = {identity_key(spec.name, spec.article_number) for spec in standard_catalog()}
         with self._database.session() as session:
             definition = session.get(TrackPartDefinition, part_id)
             if definition is None:
@@ -110,6 +124,10 @@ class PartLibrary:
             )
             if used:
                 raise ValidationError("error.planner.part_in_use", count=int(used))
+            key = identity_key(definition.name, definition.article_number)
+            if key in catalog:
+                definition.suppressed = True
+                return
             session.delete(definition)
 
     def stock_quantities(self) -> dict[int, int]:
@@ -184,10 +202,6 @@ class PartLibrary:
                     sort_order=index,
                 )
             )
-
-    def _load_all(self, session: Session) -> list[PartRecord]:
-        rows = session.scalars(select(TrackPartDefinition).order_by(TrackPartDefinition.id))
-        return [self._record(session, row) for row in rows]
 
     def _insert(self, session: Session, spec: PartSpec) -> TrackPartDefinition:
         definition = TrackPartDefinition(

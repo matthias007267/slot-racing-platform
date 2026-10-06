@@ -18,7 +18,6 @@ from slot_racing.modules.track_planner.parts import (
     DEFAULT_GRID_MM,
     DEFAULT_SNAP_MM,
     EXTEND_DIRECTIONS,
-    STRAIGHT,
     PartInstance,
     PartSpec,
     Pose,
@@ -27,6 +26,7 @@ from slot_racing.modules.track_planner.parts import (
     extend_article,
     extend_pose,
     find_catalog_part,
+    is_start_finish_part,
     join_pose,
     rotate_xy,
     snap_pose,
@@ -428,10 +428,14 @@ def remove_instance(plan: TrackPlan, instance_id: str) -> TrackPlan:
 def set_start_straight(
     plan: TrackPlan, instance_id: str, enabled: bool, catalog: dict[int, PartSpec]
 ) -> TrackPlan:
-    """Mark one straight instance as the start straight. Any previous mark is cleared."""
+    """Mark the connecting rail as start and finish. Any previous mark is cleared.
+
+    A standard straight cannot be turned into the connecting rail, and its stock
+    is not involved. The flag stays a property of this one instance.
+    """
     current = _require_instance(plan, instance_id)
     spec = catalog.get(current.part_id)
-    if enabled and (spec is None or spec.category != STRAIGHT):
+    if enabled and (spec is None or not is_start_finish_part(spec)):
         raise ValidationError("error.planner.start_straight")
     instances: list[PartInstance] = []
     for instance in plan.instances:
@@ -608,16 +612,19 @@ def place_instance(
         snap_mm=plan.snap_mm,
         grid_mm=plan.grid_mm if plan.grid_enabled else None,
     )
-    return add_instance(
-        plan,
-        PartInstance(
-            id=new_id(),
-            part_id=part_id,
-            x_mm=pose.x_mm,
-            y_mm=pose.y_mm,
-            rotation_z_deg=pose.rotation_z_deg,
-        ),
+    instance = PartInstance(
+        id=new_id(),
+        part_id=part_id,
+        x_mm=pose.x_mm,
+        y_mm=pose.y_mm,
+        rotation_z_deg=pose.rotation_z_deg,
     )
+    plan = add_instance(plan, instance)
+    if not is_start_finish_part(spec):
+        return plan
+    known = dict(catalog)
+    known[part_id] = spec
+    return set_start_straight(plan, instance.id, True, known)
 
 
 def reposition_instance(

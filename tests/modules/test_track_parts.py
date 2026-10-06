@@ -620,6 +620,7 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     placed = page.plan().instances[0]
     assert placed.rotation_z_deg == pytest.approx(37)
     _same((placed.x_mm, placed.y_mm), (13.4, 8.2))
+    page.grid_size.setValue(10)
     page.grid.setChecked(True)
     page.x_mm.setValue(23.4)
     snapped = page.plan().instances[0]

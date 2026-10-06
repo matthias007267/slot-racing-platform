@@ -6,8 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtGui import QKeyEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -66,14 +67,14 @@ from slot_racing.modules.track_planner.document import (
     rotate_piece,
     set_direction,
     set_plan_grid,
-    set_start_straight,
     toggle_group,
 )
 from slot_racing.modules.track_planner.inventory import InventoryReport, analyze_inventory
 from slot_racing.modules.track_planner.lane_length import display_lane_lengths, format_length_m
 from slot_racing.modules.track_planner.parts import (
+    DEFAULT_GRID_MM,
+    DEFAULT_SNAP_MM,
     SCALES,
-    STRAIGHT,
     PartInstance,
     PartRecord,
     PartSpec,
@@ -82,12 +83,67 @@ from slot_racing.modules.track_planner.parts import (
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
 from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
+from slot_racing.modules.track_planner.ui.flow_layout import FlowLayout, retain_content_width
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.library_view import PartLibrary
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import configure_page, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
+
+
+class _BodyHost(QWidget):
+    """Reports the column minimum as its hint so a wide canvas hint cannot force a scrollbar."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        width = 0 if layout is None else layout.minimumSize().width()
+        return QSize(width, 48)
+
+
+class _RowScroll(QScrollArea):
+    """Grows the row to the viewport, and scrolls sideways when the columns do not fit."""
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        host = self.widget()
+        if host is None:
+            return
+        needed = host.minimumSizeHint().width()
+        viewport = self.viewport().size()
+        width = max(needed, viewport.width())
+        height = viewport.height()
+        if width > viewport.width():
+            bar = self.horizontalScrollBar().sizeHint().height()
+            height = max(1, viewport.height() - bar)
+        if host.width() != width or host.height() != height:
+            host.resize(width, height)
+
+
+class _PlanStage(QWidget):
+    """Hosts the canvas without publishing QGraphicsView's 1440x900 size hint."""
+
+    def __init__(self, canvas: QWidget, warning: QWidget) -> None:
+        super().__init__()
+        self.setObjectName("planner-stage")
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas, 0, 0)
+        layout.addWidget(
+            warning,
+            0,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(160, 120)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 48)
 
 
 class PlannerPage(QWidget):
@@ -248,11 +304,11 @@ class PlannerPage(QWidget):
         self.grid_size = QDoubleSpinBox()
         self.grid_size.setObjectName("planner-grid-size")
         self.grid_size.setRange(1, 500)
-        self.grid_size.setValue(10)
+        self.grid_size.setValue(DEFAULT_GRID_MM)
         self.snap_distance = QDoubleSpinBox()
         self.snap_distance.setObjectName("planner-snap")
         self.snap_distance.setRange(0, 500)
-        self.snap_distance.setValue(25)
+        self.snap_distance.setValue(DEFAULT_SNAP_MM)
         self.rotation_free = QDoubleSpinBox()
         self.rotation_free.setObjectName("planner-rotation-free")
         self.rotation_free.setRange(0, 359.9)
@@ -266,6 +322,12 @@ class PlannerPage(QWidget):
         self.y_mm.setRange(-100_000, 100_000)
         self.y_mm.setDecimals(1)
         self.canvas = PlanCanvas()
+        # The view's own minimum is a standalone default. In the page the side
+        # columns keep their text width and the canvas takes whatever is left.
+        self.canvas.setMinimumSize(0, 0)
+        # QGraphicsView's size hint is 1440x900. Ignored keeps that hint from
+        # forcing the page to scroll past the window.
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.canvas.set_color_coding(self._color_coding)
         self.canvas.set_listener(self._moved)
         self.canvas.set_group_listener(self._moved_group)
@@ -273,10 +335,6 @@ class PlannerPage(QWidget):
         self.canvas.set_drop_listener(self._dropped)
         self.canvas.set_extend_listener(self._extended)
         self.canvas.scene().selectionChanged.connect(self._show_selection)
-        self.start_straight = QCheckBox(translate("planner.start_straight"))
-        self.start_straight.setObjectName("planner-start-straight")
-        self.start_straight.setEnabled(False)
-        self.start_straight.toggled.connect(self._start_straight_changed)
         self.selection_label = QLabel(translate("planner.none"))
         self.selection_label.setObjectName("planner-selection")
         self.selection_label.setWordWrap(True)
@@ -301,7 +359,6 @@ class PlannerPage(QWidget):
         set_role(title, "section")
         properties.addRow(title)
         properties.addRow(self.selection_label)
-        properties.addRow(self.start_straight)
         properties.addRow(translate("planner.field.x"), self.x_spin)
         properties.addRow(translate("planner.field.y"), self.y_spin)
         properties.addRow(translate("planner.field.rotation"), self.rotation)
@@ -337,7 +394,8 @@ class PlannerPage(QWidget):
         mode_label = QLabel(translate("planner.mode"))
         mode_label.setObjectName("planner-mode-label")
         tools.addWidget(mode_label)
-        modes = QHBoxLayout()
+        modes = QVBoxLayout()
+        modes.setSpacing(6)
         modes.addWidget(self.mode_unlimited)
         modes.addWidget(self.mode_collection)
         tools.addLayout(modes)
@@ -345,6 +403,9 @@ class PlannerPage(QWidget):
         tools.addWidget(self.scale_filter)
         tools.addWidget(self.compatible)
         tools.addWidget(self.reset_filter)
+        self.library.setMinimumWidth(0)
+        self.library.setMinimumHeight(72)
+        self.library.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         tools.addWidget(self.library, 1)
         tools.addWidget(self.show_all_parts)
         tools.addWidget(self.manage_stock)
@@ -354,25 +415,54 @@ class PlannerPage(QWidget):
         tools.addStretch(1)
         library_panel = QWidget()
         library_panel.setObjectName("planner-library-panel")
-        library_panel.setMinimumWidth(360)
         library_panel.setLayout(tools)
-        header = QHBoxLayout()
-        header.addWidget(QLabel(translate("planner.track")))
-        header.addWidget(self.track_combo, 1)
-        header.addWidget(self.lanes)
-        header.addWidget(self.direction_button)
-        header.addWidget(self.undo_button)
-        header.addWidget(self.redo_button)
-        header.addWidget(self.save_button)
-        header.addWidget(self.save_as_button)
-        header.addWidget(self.color_coding)
-        header.addWidget(self.jump_button)
-        header.addWidget(self.discard_button)
-        header.addWidget(self.reset_button)
-        stage = QWidget()
-        stage.setObjectName("planner-stage")
-        stage_layout = QGridLayout(stage)
-        stage_layout.setContentsMargins(0, 0, 0, 0)
+        labeled = (
+            self.mode_unlimited,
+            self.mode_collection,
+            self.compatible,
+            self.reset_filter,
+            self.show_all_parts,
+            self.manage_stock,
+            self.add_part,
+            self.manage_library,
+            self.delete_track_button,
+        )
+        for control in labeled:
+            control.setMinimumWidth(control.sizeHint().width())
+        # The list's own 340 px floor would crush the canvas. Width follows the
+        # longest label; cards ellipsize inside that column.
+        library_panel.setMinimumWidth(max(260, *(control.minimumWidth() for control in labeled)))
+        library_scroll = QScrollArea()
+        library_scroll.setObjectName("planner-library-scroll")
+        library_scroll.setWidgetResizable(True)
+        library_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        library_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        library_scroll.setWidget(library_panel)
+        gutter = library_scroll.verticalScrollBar().sizeHint().width()
+        library_scroll.setMinimumWidth(library_panel.minimumWidth() + gutter)
+        library_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        track_label = QLabel(translate("planner.track"))
+        track_label.setObjectName("planner-track-label")
+        self._toolbar_widgets: tuple[QWidget, ...] = (
+            track_label,
+            self.track_combo,
+            self.lanes,
+            self.direction_button,
+            self.undo_button,
+            self.redo_button,
+            self.save_button,
+            self.save_as_button,
+            self.color_coding,
+            self.jump_button,
+            self.discard_button,
+            self.reset_button,
+        )
+        self.toolbar = QWidget()
+        self.toolbar.setObjectName("planner-toolbar")
+        header = FlowLayout(self.toolbar)
+        for widget in self._toolbar_widgets:
+            header.addWidget(widget)
+        self._fit_toolbar()
         warning_holder = QWidget()
         warning_holder.setObjectName("planner-stock-warning-holder")
         warning_holder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -380,24 +470,37 @@ class PlannerPage(QWidget):
         holder_layout = QHBoxLayout(warning_holder)
         holder_layout.setContentsMargins(0, 0, 16, 16)
         holder_layout.addWidget(self.stock_warning)
-        stage_layout.addWidget(self.canvas, 0, 0)
-        stage_layout.addWidget(
-            warning_holder,
-            0,
-            0,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
-        )
-        body = QHBoxLayout()
-        body.addWidget(library_panel)
-        body.addWidget(stage, 1)
+        stage = _PlanStage(self.canvas, warning_holder)
         side = QWidget()
         side.setObjectName("planner-properties")
         side.setLayout(properties)
-        body.addWidget(side)
+        properties_scroll = QScrollArea()
+        properties_scroll.setObjectName("planner-properties-scroll")
+        properties_scroll.setWidgetResizable(True)
+        properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        properties_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        properties_scroll.setWidget(side)
+        bar = properties_scroll.verticalScrollBar().sizeHint().width()
+        properties_scroll.setMinimumWidth(side.sizeHint().width() + bar)
+        properties_scroll.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Ignored)
+        body = QHBoxLayout()
+        body.addWidget(library_scroll)
+        body.addWidget(stage, 1)
+        body.addWidget(properties_scroll)
+        body_host = _BodyHost()
+        body_host.setObjectName("planner-body")
+        body_host.setLayout(body)
+        body_scroll = _RowScroll()
+        body_scroll.setObjectName("planner-body-scroll")
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body_scroll.setWidget(body_host)
         layout = QVBoxLayout(self)
         configure_page(layout)
-        layout.addLayout(header)
-        layout.addLayout(body, 1)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(body_scroll, 1)
         layout.addWidget(self.status)
         self._refresh_tracks()
 
@@ -601,6 +704,7 @@ class PlannerPage(QWidget):
             self._plan = empty_plan(TrackId(0))
             self._lane_count = 0
             self.lanes.setText(self._translator.format("planner.lanes", count=0))
+            self._fit_toolbar()
             self._set_enabled(False)
             self._draw()
             self.status.show_info(self._translator.translate("planner.empty"))
@@ -643,6 +747,7 @@ class PlannerPage(QWidget):
         self._load_parts()
         self._show_grid()
         self.lanes.setText(self._translator.format("planner.lanes", count=track.lane_count))
+        self._fit_toolbar()
         self._set_enabled(True)
         self._draw()
 
@@ -753,8 +858,6 @@ class PlannerPage(QWidget):
             self.rotation_free.setEnabled(False)
             self.x_mm.setEnabled(False)
             self.y_mm.setEnabled(False)
-            self.start_straight.setEnabled(False)
-            self.start_straight.setChecked(False)
         elif len(self.canvas.selected_ids()) > 1:
             self.selection_label.setText(
                 self._translator.format(
@@ -767,8 +870,6 @@ class PlannerPage(QWidget):
             self.rotation_free.setEnabled(False)
             self.x_mm.setEnabled(False)
             self.y_mm.setEnabled(False)
-            self.start_straight.setEnabled(False)
-            self.start_straight.setChecked(False)
         elif isinstance(selected, PartInstance):
             spec = self._parts.get(selected.part_id)
             label = spec.name if spec is not None else self._translator.translate("planner.none")
@@ -782,10 +883,6 @@ class PlannerPage(QWidget):
             self.rotation_free.setValue(selected.rotation_z_deg)
             self.x_mm.setValue(selected.x_mm)
             self.y_mm.setValue(selected.y_mm)
-            spec = self._parts.get(selected.part_id)
-            straight = spec is not None and spec.category == STRAIGHT
-            self.start_straight.setEnabled(straight)
-            self.start_straight.setChecked(straight and selected.start_straight)
         else:
             kind = selected.piece_type if isinstance(selected, Piece) else selected.kind
             self.selection_label.setText(self._translator.translate(f"planner.kind.{kind}"))
@@ -798,8 +895,6 @@ class PlannerPage(QWidget):
             self.rotation_free.setEnabled(False)
             self.x_mm.setEnabled(False)
             self.y_mm.setEnabled(False)
-            self.start_straight.setEnabled(False)
-            self.start_straight.setChecked(False)
             if isinstance(selected, Piece) and selected.piece_type == CURVE_90:
                 index = self.rotation.findData(selected.rotation)
                 if index >= 0:
@@ -811,6 +906,7 @@ class PlannerPage(QWidget):
             else "planner.direction.counterclockwise"
         )
         self.direction_button.setText(self._translator.translate(key))
+        self._fit_toolbar()
         self.jump_button.setEnabled(
             any(instance.start_straight for instance in self._plan.instances)
         )
@@ -1014,21 +1110,10 @@ class PlannerPage(QWidget):
         self.canvas.set_color_coding(enabled)
         self.library.set_color_coding(enabled)
 
-    def _start_straight_changed(self) -> None:
-        if self._filling:
-            return
-        selected = self._selected()
-        if not isinstance(selected, PartInstance):
-            return
-        try:
-            updated = set_start_straight(
-                self._plan, selected.id, self.start_straight.isChecked(), self._parts
-            )
-        except Exception as error:
-            self._report(error)
-            self._show_selection()
-            return
-        self._commit(updated, selected.id)
+    def _fit_toolbar(self) -> None:
+        for widget in self._toolbar_widgets:
+            retain_content_width(widget)
+        self.toolbar.updateGeometry()
 
     def _toggle_group(self) -> None:
         ids = [

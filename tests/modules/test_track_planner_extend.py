@@ -19,6 +19,7 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner.document import (
     empty_plan,
     place_instance,
+    set_plan_grid,
     set_start_straight,
     toggle_group,
 )
@@ -58,12 +59,11 @@ def test_the_open_plan_can_be_stored_as_a_new_track(qtbot: QtBot, env: Env) -> N
     assert page.delete_button.isHidden()
     assert page.place_part.isHidden()
     page.add_start.click()
-    page.library.setCurrentRow(_library_row(page, "20020601"))
+    page.library.setCurrentRow(_library_row(page, "20020518"))
     page.place_part.click()
     page.x_mm.setValue(40)
     page.y_mm.setValue(15)
     page.rotation_free.setValue(12)
-    page.start_straight.setChecked(True)
     page.save()
     page.x_mm.setValue(80)
     original = page.plan()
@@ -97,7 +97,7 @@ def test_the_open_plan_can_be_stored_as_a_new_track(qtbot: QtBot, env: Env) -> N
     assert info is not None and info.lane_count == 3 and info.name == "Kopie"
 
 
-def test_only_one_straight_can_be_the_start_straight(qtbot: QtBot, env: Env) -> None:
+def test_only_the_connecting_rail_can_be_start_and_finish(qtbot: QtBot, env: Env) -> None:
     track = env.track("Start", lanes=2)
     window, page = open_page(qtbot, env, "track_planner")
     window.show()
@@ -108,14 +108,13 @@ def test_only_one_straight_can_be_the_start_straight(qtbot: QtBot, env: Env) -> 
     page.jump_to_start()
     assert "Startgerade" in page.status.text()
     assert page.plan().instances == ()
+    assert not hasattr(page, "start_straight")
 
     page.library.setCurrentRow(_library_row(page, "20020572"))
     page.place_part.click()
     curve = page.plan().instances[0]
     assert page._parts[curve.part_id].category == CURVE
-    assert not page.start_straight.isEnabled()
-    page.start_straight.setChecked(True)
-    assert not page.plan().instances[0].start_straight
+    assert not curve.start_straight
     with pytest.raises(ValidationError) as caught:
         set_start_straight(page.plan(), curve.id, True, page._parts)
     assert caught.value.key == "error.planner.start_straight"
@@ -123,20 +122,31 @@ def test_only_one_straight_can_be_the_start_straight(qtbot: QtBot, env: Env) -> 
 
     page.library.setCurrentRow(_library_row(page, "20020601"))
     page.place_part.click()
+    straight = page.plan().instances[0]
+    assert page._parts[straight.part_id].article_number == "20020601"
+    assert not straight.start_straight
+    with pytest.raises(ValidationError) as rejected:
+        set_start_straight(page.plan(), straight.id, True, page._parts)
+    assert rejected.value.key == "error.planner.start_straight"
+    assert not page.plan().instances[0].start_straight
+    page.delete_selected()
+
+    page.library.setCurrentRow(_library_row(page, "20020518"))
+    page.place_part.click()
     page.x_mm.setValue(0)
     page.y_mm.setValue(0)
-    page.start_straight.setChecked(True)
+    assert page.plan().instances[0].start_straight
+    assert page._parts[page.plan().instances[0].part_id].article_number == "20020518"
     page.place_part.click()
     page.x_mm.setValue(800)
     page.y_mm.setValue(0)
     assert sum(instance.start_straight for instance in page.plan().instances) == 1
-    second = page.plan().instances[1]
-    _select_ids(page, {second.id})
-    assert page.start_straight.isEnabled()
-    page.start_straight.setChecked(True)
+    assert page.plan().instances[1].start_straight
+    first = page.plan().instances[0]
+    page._commit(set_start_straight(page.plan(), first.id, True, page._parts))
     flags = {instance.id: instance.start_straight for instance in page.plan().instances}
-    assert flags[second.id]
-    assert not flags[page.plan().instances[0].id]
+    assert flags[first.id]
+    assert not flags[page.plan().instances[1].id]
     assert page.jump_button.isEnabled()
 
     start = next(instance for instance in page.plan().instances if instance.start_straight)
@@ -470,10 +480,11 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Gruppe", lane_count=2))
         part = next(
-            record for record in planner.list_parts() if record.spec.article_number == "20020601"
+            record for record in planner.list_parts() if record.spec.article_number == "20020518"
         )
         catalog = {part.id: part.spec}
-        plan = place_instance(empty_plan(track.id), part.id, part.spec, 0, 0, 0, catalog)
+        plan = set_plan_grid(empty_plan(track.id), enabled=False, grid_mm=100, snap_mm=25)
+        plan = place_instance(plan, part.id, part.spec, 0, 0, 0, catalog)
         plan = place_instance(plan, part.id, part.spec, 500, 0, 0, catalog)
         plan = toggle_group(plan, [instance.id for instance in plan.instances])
         plan = set_start_straight(plan, plan.instances[0].id, True, catalog)

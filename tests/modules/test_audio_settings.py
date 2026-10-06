@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QSlider, QWidget
@@ -89,10 +88,13 @@ def test_the_preview_uses_the_start_sound_ids_and_does_not_block(qtbot: QtBot) -
     qtbot.addWidget(host)
     output = RecordingOutput()
     preview = StartSoundPreview(RaceAudio(output, parent=host), parent=host, interval_ms=20)
-    began = time.perf_counter()
     assert preview.start()
     assert not preview.start()
-    assert time.perf_counter() - began < 0.05
+    # The first tone is handed to the output and the rest stay on the timer.
+    # A blocking implementation would have finished the sequence before returning.
+    assert preview.running
+    assert preview._timer.isActive()
+    assert preview._index == 1
     assert [tone for tone, _volume in output.calls] == [LAMP_TONE]
     qtbot.waitUntil(lambda: len(output.calls) == 6, timeout=2000)
     assert [tone for tone, _volume in output.calls] == [LAMP_TONE] * 5 + [GO_TONE]

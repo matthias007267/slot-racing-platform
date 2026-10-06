@@ -216,6 +216,15 @@ def _lane_anchor(spec: PartSpec, connector: ConnectorSpec, lane: int) -> tuple[f
     index = connector.lanes.index(lane)
     count = len(connector.lanes)
     offset = lane_offset_mm(index, count)
+    radius = spec.radius_mm
+    # A curve's groove sits on its own radius. A shallow arc points nearly
+    # along one axis, but the offset is still radial, not a straight shift.
+    if radius is not None and radius > 0.0 and spec.angle_deg:
+        groove = curve_lane_radius(radius, index, spec.lane_count)
+        centre = math.hypot(connector.x_mm, connector.y_mm)
+        if centre > 1.0:
+            scale = groove / centre
+            return (connector.x_mm * scale, connector.y_mm * scale)
     folded = abs(connector.direction_deg) % 180.0
     if folded > 90.0:
         folded = 180.0 - folded
@@ -223,13 +232,6 @@ def _lane_anchor(spec: PartSpec, connector: ConnectorSpec, lane: int) -> tuple[f
         return (connector.x_mm, connector.y_mm + offset)
     if folded >= 70.0:
         return (connector.x_mm + offset, connector.y_mm)
-    radius = spec.radius_mm
-    if radius is not None and radius > 0.0:
-        groove = curve_lane_radius(radius, index, spec.lane_count)
-        centre = math.hypot(connector.x_mm, connector.y_mm)
-        if centre > 1.0:
-            scale = groove / centre
-            return (connector.x_mm * scale, connector.y_mm * scale)
     return (connector.x_mm, connector.y_mm + offset)
 
 
