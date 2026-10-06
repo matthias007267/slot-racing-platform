@@ -22,6 +22,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.discard": "Verwerfen",
         "planner.reset": "Zurücksetzen",
         "planner.properties": "Eigenschaften",
+        "planner.length.title": "Streckenlänge",
+        "planner.length.lane": "Spur {lane}   {length}",
         "planner.field.x": "X",
         "planner.field.y": "Y",
         "planner.field.rotation": "Drehung",
