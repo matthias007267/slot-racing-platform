@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import delete, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from slot_racing.core.catalog import TrackCatalog, TrackInfo
@@ -70,6 +71,26 @@ class TrackPlannerService:
 
     def delete_part(self, part_id: int) -> None:
         self.library.delete_part(part_id)
+
+    def stock_quantities(self) -> dict[int, int]:
+        return self.library.stock_quantities()
+
+    def set_stock(self, part_id: int, quantity: int) -> None:
+        self.library.set_stock(part_id, quantity)
+
+    def delete_track(self, track_id: TrackId) -> None:
+        """Remove one track and the rows that belong only to it.
+
+        Part definitions and the personal stock stay. A race or a stored time that
+        still points at the track blocks the delete; those rows are not removed.
+        """
+        self._require_track(track_id)
+        try:
+            with self._database.session() as session:
+                table = Base.metadata.tables["tracks"]
+                session.execute(delete(table).where(table.c.id == int(track_id)))
+        except IntegrityError as error:
+            raise ValidationError("error.track.in_use") from error
 
     def save_as_new(self, plan: TrackPlan, name: str) -> TrackPlan:
         """Store a copy as its own track. The open track and its definitions stay as they are."""

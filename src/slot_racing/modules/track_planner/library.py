@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
+from slot_racing.modules.track_planner.inventory import require_quantity
 from slot_racing.modules.track_planner.models import (
     TrackPartConnector,
     TrackPartDefinition,
+    TrackPartStock,
     TrackPlanInstance,
 )
 from slot_racing.modules.track_planner.parts import (
@@ -110,6 +112,24 @@ class PartLibrary:
                 raise ValidationError("error.planner.part_in_use", count=int(used))
             session.delete(definition)
 
+    def stock_quantities(self) -> dict[int, int]:
+        """Owned counts keyed by part id. A missing row means the user owns none."""
+        with self._database.session() as session:
+            rows = session.scalars(select(TrackPartStock))
+            return {row.part_id: row.quantity for row in rows}
+
+    def set_stock(self, part_id: int, quantity: int) -> None:
+        """Store how many of this definition the user owns. Zero is kept on purpose."""
+        amount = require_quantity(quantity)
+        with self._database.session() as session:
+            if session.get(TrackPartDefinition, part_id) is None:
+                raise ValidationError("error.planner.part")
+            row = session.get(TrackPartStock, part_id)
+            if row is None:
+                session.add(TrackPartStock(part_id=part_id, quantity=amount))
+            else:
+                row.quantity = amount
+
     def require(self, part_id: int) -> PartRecord:
         with self._database.session() as session:
             definition = session.get(TrackPartDefinition, part_id)
@@ -121,7 +141,7 @@ class PartLibrary:
         rows = session.scalars(
             select(TrackPlanInstance)
             .where(TrackPlanInstance.track_id == track_id)
-            .order_by(TrackPlanInstance.id)
+            .order_by(TrackPlanInstance.sort_order, TrackPlanInstance.id)
         )
         return tuple(
             PartInstance(
@@ -147,7 +167,7 @@ class PartLibrary:
             if instance.part_id not in known:
                 raise ValidationError("error.planner.part")
         session.execute(delete(TrackPlanInstance).where(TrackPlanInstance.track_id == track_id))
-        for instance in instances:
+        for index, instance in enumerate(instances):
             session.add(
                 TrackPlanInstance(
                     id=instance.id,
@@ -161,6 +181,7 @@ class PartLibrary:
                     rotation_z_deg=instance.rotation_z_deg,
                     is_start_straight=instance.start_straight,
                     group_id=instance.group_id,
+                    sort_order=index,
                 )
             )
 

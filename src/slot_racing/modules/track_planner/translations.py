@@ -103,5 +103,30 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "und kann nicht gelöscht werden."
         ),
         "error.planner.start_straight": "Nur eine normale Gerade kann die Startgerade sein.",
+        "error.planner.stock": "Der Bestand muss eine ganze Zahl ab 0 sein.",
+        "planner.mode": "Baumodus",
+        "planner.mode.unlimited": "Unbegrenzt",
+        "planner.mode.collection": "Eigene Sammlung",
+        "planner.stock.manage": "Meine Bauteilsammlung",
+        "planner.stock.remaining": "Noch {count}",
+        "planner.stock.short": "Fehlt {count}",
+        "planner.stock.show_all": "Alle Bauteile anzeigen",
+        "planner.stock.close": "Schließen",
+        "planner.stock.saved": "Bestand gespeichert.",
+        "planner.stock.notice.title": "Bauteilsammlung",
+        "planner.stock.notice": (
+            "Diese Strecke kann mit deiner aktuellen Bauteilsammlung "
+            "nicht vollständig gebaut werden."
+        ),
+        "planner.stock.notice.detail": (
+            "Nicht verfügbare Bauteile sind im Streckenplan rot markiert."
+        ),
+        "planner.stock.warning": "⚠ Strecke überschreitet deine Bauteilsammlung",
+        "planner.delete_track": "Strecke löschen",
+        "planner.delete_track.title": "Strecke wirklich löschen?",
+        "planner.delete_track.confirm": "„{name}“ wird dauerhaft gelöscht.",
+        "planner.delete_track.done": "Die Strecke wurde gelöscht.",
+        "planner.delete_track.cancel": "Abbrechen",
+        "planner.delete_track.accept": "Löschen",
     }
 }

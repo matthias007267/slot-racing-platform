@@ -4,19 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,6 +30,10 @@ from PySide6.QtWidgets import (
 
 from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.config import AppConfig, save_config
+from slot_racing.core.config.models import (
+    TRACK_PLANNER_BUILD_COLLECTION,
+    TRACK_PLANNER_BUILD_UNLIMITED,
+)
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
@@ -59,6 +69,7 @@ from slot_racing.modules.track_planner.document import (
     set_start_straight,
     toggle_group,
 )
+from slot_racing.modules.track_planner.inventory import InventoryReport, analyze_inventory
 from slot_racing.modules.track_planner.lane_length import display_lane_lengths, format_length_m
 from slot_racing.modules.track_planner.parts import (
     SCALES,
@@ -70,11 +81,12 @@ from slot_racing.modules.track_planner.parts import (
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
+from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.library_view import PartLibrary
 from slot_racing.uikit.errors import describe_error
-from slot_racing.uikit.theme import configure_page, set_role
+from slot_racing.uikit.theme import configure_page, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
 
 
@@ -94,6 +106,12 @@ class PlannerPage(QWidget):
         self._config = config
         self._config_path = config_path
         self._color_coding = False if config is None else config.track_planner_color_coding
+        self._stock: dict[int, int] = {}
+        self._build_mode: Literal["unlimited", "collection"] = TRACK_PLANNER_BUILD_UNLIMITED
+        if config is not None and config.track_planner_build_mode == TRACK_PLANNER_BUILD_COLLECTION:
+            self._build_mode = TRACK_PLANNER_BUILD_COLLECTION
+        # One notice per over-capacity episode. It arms again only after the plan fits.
+        self._stock_problem_noted = False
         self._plan = empty_plan(TrackId(0))
         self._lane_count = 0
         self._dirty = False
@@ -163,6 +181,49 @@ class PlannerPage(QWidget):
         set_role(self.color_coding, "ghost")
         self.color_coding.setChecked(self._color_coding)
         self.color_coding.toggled.connect(self._color_coding_changed)
+        self.mode_unlimited = QPushButton(translate("planner.mode.unlimited"))
+        self.mode_unlimited.setObjectName("planner-mode-unlimited")
+        self.mode_unlimited.setCheckable(True)
+        set_role(self.mode_unlimited, "ghost")
+        self.mode_collection = QPushButton(translate("planner.mode.collection"))
+        self.mode_collection.setObjectName("planner-mode-collection")
+        self.mode_collection.setCheckable(True)
+        set_role(self.mode_collection, "ghost")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_group.addButton(self.mode_unlimited)
+        self._mode_group.addButton(self.mode_collection)
+        self.mode_unlimited.setChecked(self._build_mode == TRACK_PLANNER_BUILD_UNLIMITED)
+        self.mode_collection.setChecked(self._build_mode == TRACK_PLANNER_BUILD_COLLECTION)
+        self.mode_unlimited.toggled.connect(self._mode_toggled)
+        self.mode_collection.toggled.connect(self._mode_toggled)
+        self.show_all_parts = QPushButton(translate("planner.stock.show_all"))
+        self.show_all_parts.setObjectName("planner-show-all-parts")
+        self.show_all_parts.setCheckable(True)
+        set_role(self.show_all_parts, "ghost")
+        self.show_all_parts.setVisible(self._build_mode == TRACK_PLANNER_BUILD_COLLECTION)
+        self.show_all_parts.toggled.connect(self._show_all_toggled)
+        self.manage_stock = self._tool(
+            "planner-manage-stock", "planner.stock.manage", self._manage_stock
+        )
+        self.delete_track_button = QPushButton(translate("planner.delete_track"))
+        self.delete_track_button.setObjectName("planner-delete-track")
+        set_role(self.delete_track_button, "danger")
+        self.delete_track_button.clicked.connect(self.delete_current_track)
+        self.announce_stock_problem: Callable[[], None] = self._announce_stock_problem
+        self.confirm_delete: Callable[[str], bool] = self._confirm_delete
+        self.stock_dialog_runner: Callable[[CollectionDialog], int] = lambda dialog: dialog.exec()
+        warning_text = QLabel(translate("planner.stock.warning"))
+        warning_text.setObjectName("planner-stock-warning-text")
+        set_tone(warning_text, "error")
+        self.stock_warning = QFrame()
+        self.stock_warning.setObjectName("planner-stock-warning")
+        set_role(self.stock_warning, "card")
+        self.stock_warning.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        warning_layout = QHBoxLayout(self.stock_warning)
+        warning_layout.setContentsMargins(12, 8, 12, 8)
+        warning_layout.addWidget(warning_text)
+        self.stock_warning.hide()
         self.place_part = self._tool("planner-place", "planner.library.place", self._place_part)
         self.add_part = self._tool("planner-add-part", "planner.library.add", self._add_part)
         self.manage_library = self._tool(
@@ -273,13 +334,23 @@ class PlannerPage(QWidget):
         library_title = QLabel(translate("planner.library"))
         set_role(library_title, "section")
         tools.addWidget(library_title)
+        mode_label = QLabel(translate("planner.mode"))
+        mode_label.setObjectName("planner-mode-label")
+        tools.addWidget(mode_label)
+        modes = QHBoxLayout()
+        modes.addWidget(self.mode_unlimited)
+        modes.addWidget(self.mode_collection)
+        tools.addLayout(modes)
         tools.addWidget(QLabel(translate("planner.filter.scale")))
         tools.addWidget(self.scale_filter)
         tools.addWidget(self.compatible)
         tools.addWidget(self.reset_filter)
         tools.addWidget(self.library, 1)
+        tools.addWidget(self.show_all_parts)
+        tools.addWidget(self.manage_stock)
         tools.addWidget(self.add_part)
         tools.addWidget(self.manage_library)
+        tools.addWidget(self.delete_track_button)
         tools.addStretch(1)
         library_panel = QWidget()
         library_panel.setObjectName("planner-library-panel")
@@ -298,9 +369,27 @@ class PlannerPage(QWidget):
         header.addWidget(self.jump_button)
         header.addWidget(self.discard_button)
         header.addWidget(self.reset_button)
+        stage = QWidget()
+        stage.setObjectName("planner-stage")
+        stage_layout = QGridLayout(stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        warning_holder = QWidget()
+        warning_holder.setObjectName("planner-stock-warning-holder")
+        warning_holder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        warning_holder.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        holder_layout = QHBoxLayout(warning_holder)
+        holder_layout.setContentsMargins(0, 0, 16, 16)
+        holder_layout.addWidget(self.stock_warning)
+        stage_layout.addWidget(self.canvas, 0, 0)
+        stage_layout.addWidget(
+            warning_holder,
+            0,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
         body = QHBoxLayout()
         body.addWidget(library_panel)
-        body.addWidget(self.canvas, 1)
+        body.addWidget(stage, 1)
         side = QWidget()
         side.setObjectName("planner-properties")
         side.setLayout(properties)
@@ -509,9 +598,11 @@ class PlannerPage(QWidget):
             self.track_combo.addItem(track.name, track.id)
         if self.track_combo.count() == 0:
             self._filling = False
+            self._plan = empty_plan(TrackId(0))
             self._lane_count = 0
             self.lanes.setText(self._translator.format("planner.lanes", count=0))
             self._set_enabled(False)
+            self._draw()
             self.status.show_info(self._translator.translate("planner.empty"))
             return
         index = self.track_combo.findData(current)
@@ -750,7 +841,12 @@ class PlannerPage(QWidget):
 
     def _draw(self, selected: str | set[str] | list[str] | None = None) -> None:
         chosen = set(selected) if isinstance(selected, list) else selected
-        self.canvas.show_plan(self._plan, max(self._lane_count, 1), chosen, self._parts)
+        report = self._inventory()
+        excess = report.excess_ids() if self._collection_mode() else frozenset()
+        self.canvas.show_plan(
+            self._plan, max(self._lane_count, 1), chosen, self._parts, excess=excess
+        )
+        self._sync_stock_warning(report)
         self._show_selection()
 
     def _set_enabled(self, enabled: bool) -> None:
@@ -769,6 +865,9 @@ class PlannerPage(QWidget):
             self.place_part,
             self.add_part,
             self.manage_library,
+            self.manage_stock,
+            self.show_all_parts,
+            self.delete_track_button,
             self.scale_filter,
             self.reset_filter,
             self.canvas,
@@ -783,6 +882,7 @@ class PlannerPage(QWidget):
         records = self._planner.list_parts()
         self._records = records
         self._parts = {record.id: record.spec for record in records}
+        self._stock = self._planner.stock_quantities()
         self._apply_filters()
 
     def _show_grid(self) -> None:
@@ -974,9 +1074,15 @@ class PlannerPage(QWidget):
                 records = [
                     record for record in records if can_dock(record.spec, selected, spec, placed)
                 ]
+        report = self._inventory()
+        if self._collection_mode() and not self.show_all_parts.isChecked():
+            records = [record for record in records if report.balance(record.id).available >= 1]
+        remaining = None
+        if self._collection_mode():
+            remaining = {record.id: self._remaining_text(report, record.id) for record in records}
         current = self.library.currentItem()
         current_id = None if current is None else current.data(Qt.ItemDataRole.UserRole)
-        self.library.set_records(records)
+        self.library.set_records(records, remaining)
         if not self.library.count():
             return
         row = 0
@@ -1026,5 +1132,139 @@ class PlannerPage(QWidget):
         self.redo_button.setEnabled(False)
         self._draw(selected)
 
+    def delete_current_track(self) -> None:
+        """Delete the open track after confirmation. This is not a canvas undo step."""
+        track_id = self._current_track()
+        if track_id is None or self._lane_count < 1:
+            return
+        track = self._tracks.get_track(track_id)
+        name = "" if track is None else track.name
+        text = self._translator.format("planner.delete_track.confirm", name=name)
+        if not self.confirm_delete(text):
+            return
+        try:
+            self._planner.delete_track(track_id)
+        except Exception as error:
+            self._report(error)
+            return
+        self._dirty = False
+        self._history.clear()
+        self._future.clear()
+        self.undo_button.setEnabled(False)
+        self.redo_button.setEnabled(False)
+        self._refresh_tracks()
+        self.status.show_info(self._translator.translate("planner.delete_track.done"))
+
+    def _confirm_delete(self, text: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setObjectName("planner-delete-track-dialog")
+        box.setWindowTitle(self._translator.translate("planner.delete_track.title"))
+        box.setText(text)
+        accept = box.addButton(
+            self._translator.translate("planner.delete_track.accept"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel = box.addButton(
+            self._translator.translate("planner.delete_track.cancel"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        accept.setObjectName("planner-delete-track-accept")
+        cancel.setObjectName("planner-delete-track-cancel")
+        set_role(accept, "danger")
+        box.setDefaultButton(cancel)
+        _keep_message_visible(box)
+        box.exec()
+        return box.clickedButton() is accept
+
+    def _announce_stock_problem(self) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setObjectName("planner-stock-notice")
+        box.setWindowTitle(self._translator.translate("planner.stock.notice.title"))
+        box.setText(self._translator.translate("planner.stock.notice"))
+        box.setInformativeText(self._translator.translate("planner.stock.notice.detail"))
+        _keep_message_visible(box)
+        box.exec()
+
+    def _manage_stock(self) -> None:
+        dialog = CollectionDialog(self._translator, self._planner, self)
+        self.stock_dialog_runner(dialog)
+        dialog.close()
+        self._stock = self._planner.stock_quantities()
+        self._draw()
+
+    def _mode_toggled(self, checked: bool) -> None:
+        if self._filling or not checked:
+            return
+        mode: Literal["unlimited", "collection"] = (
+            TRACK_PLANNER_BUILD_COLLECTION
+            if self.mode_collection.isChecked()
+            else TRACK_PLANNER_BUILD_UNLIMITED
+        )
+        if mode == self._build_mode:
+            return
+        self._build_mode = mode
+        self.show_all_parts.setVisible(mode == TRACK_PLANNER_BUILD_COLLECTION)
+        if mode != TRACK_PLANNER_BUILD_COLLECTION and self.show_all_parts.isChecked():
+            self._filling = True
+            self.show_all_parts.setChecked(False)
+            self._filling = False
+        self._persist_mode()
+        self._draw()
+
+    def _show_all_toggled(self, _checked: bool) -> None:
+        if self._filling:
+            return
+        self._apply_filters()
+
+    def _persist_mode(self) -> None:
+        if self._config is None:
+            return
+        self._config.track_planner_build_mode = self._build_mode
+        if self._config_path is not None:
+            save_config(self._config, self._config_path)
+
+    def _collection_mode(self) -> bool:
+        return self._build_mode == TRACK_PLANNER_BUILD_COLLECTION
+
+    def _inventory(self) -> InventoryReport:
+        return analyze_inventory(self._plan.instances, self._stock)
+
+    def _remaining_text(self, report: InventoryReport, part_id: int) -> str:
+        available = report.balance(part_id).available
+        if available < 0:
+            return self._translator.format("planner.stock.short", count=-available)
+        return self._translator.format("planner.stock.remaining", count=available)
+
+    def _sync_stock_warning(self, report: InventoryReport) -> None:
+        active = self._collection_mode() and report.over_capacity()
+        self.stock_warning.setVisible(active)
+        if not report.over_capacity():
+            self._stock_problem_noted = False
+            return
+        if active and not self._stock_problem_noted:
+            self._stock_problem_noted = True
+            self.announce_stock_problem()
+
     def _report(self, error: Exception) -> None:
         self.status.show_error(describe_error(self._translator, error))
+
+
+def _keep_message_visible(box: QMessageBox) -> None:
+    """Widen the message and its buttons. Stylesheet padding otherwise clips the last letters."""
+    for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
+        label = box.findChild(QLabel, name)
+        if label is None or not label.text():
+            continue
+        label.ensurePolished()
+        widest = max(
+            label.fontMetrics().horizontalAdvance(line) for line in label.text().splitlines()
+        )
+        label.setMinimumWidth(widest + 12)
+    for button in box.buttons():
+        if not isinstance(button, QPushButton) or not button.text():
+            continue
+        button.ensurePolished()
+        advance = button.fontMetrics().horizontalAdvance(button.text())
+        button.setMinimumWidth(max(button.sizeHint().width(), advance + 30) + 12)

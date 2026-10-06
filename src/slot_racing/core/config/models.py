@@ -17,6 +17,8 @@ class ConfigError(Exception):
 AUDIO_ENABLED_DEFAULT = True
 AUDIO_VOLUME_DEFAULT = 70
 TRACK_PLANNER_COLOR_CODING_DEFAULT = False
+TRACK_PLANNER_BUILD_UNLIMITED: Literal["unlimited"] = "unlimited"
+TRACK_PLANNER_BUILD_COLLECTION: Literal["collection"] = "collection"
 
 
 class AppConfig(BaseModel):
@@ -45,6 +47,8 @@ class AppConfig(BaseModel):
     """Race-sound level from 0 (silent) to 100 (full)."""
     track_planner_color_coding: bool = TRACK_PLANNER_COLOR_CODING_DEFAULT
     """Tint rails by geometry in the track planner. Off keeps the dark roadway."""
+    track_planner_build_mode: Literal["unlimited", "collection"] = TRACK_PLANNER_BUILD_UNLIMITED
+    """Planner preference. ``unlimited`` ignores owned stock. ``collection`` uses it."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()
