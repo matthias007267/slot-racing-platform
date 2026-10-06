@@ -10,7 +10,7 @@
 set -euo pipefail
 
 UV_VERSION="${UV_VERSION:-0.12.22}"
-QT_SYSTEM_PACKAGES=(libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0)
+QT_SYSTEM_PACKAGES=(libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0 libpulse0)
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

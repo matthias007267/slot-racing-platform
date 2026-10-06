@@ -11,9 +11,9 @@ The moments stay separate:
 * ``start_signal`` — every light goes out. This is the moment the race starts.
 * the race is then ``running``, which is the engine's own status.
 
-Each step carries ``sound_id`` (``light-1`` … ``light-5``, then ``go``). A later
-sound player can listen to :attr:`StartCue.changed` and use that id. This module
-does not play audio.
+Each step carries ``sound_id`` (``light-1`` … ``light-5``, then ``go``). The live
+view may play that id. This module does not play audio, and a missed sound does
+not move the start.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class StartCueStep:
 
     ``lit_lights`` is how many red lamps are on, from the left. Zero with
     :attr:`StartPhase.START_SIGNAL` is the lights-out start. ``sound_id`` names
-    the beat for a future sound, and is not played here.
+    the beat for the race audio. Playing it is not this step's job.
     """
 
     phase: StartPhase

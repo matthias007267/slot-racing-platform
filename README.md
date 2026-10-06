@@ -62,7 +62,7 @@ See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.
 - [uv](https://docs.astral.sh/uv/)
 - Windows is the primary target. Linux and macOS work for development.
 - Linux only: Qt needs a few system libraries, for example on Ubuntu
-  `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0`
+  `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0 libpulse0`
 
 ## Installation
 
