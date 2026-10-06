@@ -31,6 +31,8 @@ class TrackPartDefinition(Base):
     angle_deg: Mapped[float | None] = mapped_column(Float)
     lane_count: Mapped[int]
     outline: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Grooves for diverging parts. Null or empty means the ordinary lanes are derived.
+    slot_paths: Mapped[list[Any] | None] = mapped_column(JSON)
 
 
 class TrackPartConnector(Base):

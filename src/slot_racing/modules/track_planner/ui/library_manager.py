@@ -35,6 +35,8 @@ class LibraryManager(QDialog):
         translator: Translator,
         planner: TrackPlannerService,
         used_part_ids: Collection[int] = (),
+        *,
+        color_coding: bool = False,
     ) -> None:
         super().__init__()
         self.setObjectName("library-manager")
@@ -43,6 +45,7 @@ class LibraryManager(QDialog):
         self._translator = translator
         self._planner = planner
         self._used = frozenset(used_part_ids)
+        self.color_coding = color_coding
         self._selected: int | None = None
         self._rows: list[_PartRow] = []
         translate = translator.translate
@@ -158,7 +161,7 @@ class _PartRow(QWidget):
             (spec.name, spec.scale, spec.article_number, spec.system, spec.category)
         ).casefold()
         self._owner = owner
-        preview = PartPreview(spec.outline)
+        preview = PartPreview(spec, color_coding=owner.color_coding)
         preview.setObjectName("library-manager-preview")
         self.name = QLabel(spec.name)
         self.name.setObjectName("library-manager-name")

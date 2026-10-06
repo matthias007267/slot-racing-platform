@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
@@ -75,6 +76,50 @@ class ConnectorSpec:
     lanes: tuple[int, ...]
 
 
+# A slot path is geometry, not a paint special case. ``line`` uses the two endpoints.
+# ``arc`` uses the centre ``(x0, y0)``, ``radius_mm`` and the angles. 0° is +x and
+# positive angles run toward +y, the same convention as the curve connectors.
+SPAN_LINE = "line"
+SPAN_ARC = "arc"
+PATH_SLOT = "slot"
+PATH_CENTER = "center"
+
+
+@dataclass(frozen=True, slots=True)
+class SlotSpan:
+    """One straight or circular piece of a groove, in local millimetres."""
+
+    kind: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    radius_mm: float = 0.0
+    start_deg: float = 0.0
+    sweep_deg: float = 0.0
+
+    @staticmethod
+    def line(x0: float, y0: float, x1: float, y1: float) -> SlotSpan:
+        return SlotSpan(SPAN_LINE, x0, y0, x1, y1)
+
+    @staticmethod
+    def arc(cx: float, cy: float, radius_mm: float, start_deg: float, sweep_deg: float) -> SlotSpan:
+        return SlotSpan(SPAN_ARC, cx, cy, 0.0, 0.0, radius_mm, start_deg, sweep_deg)
+
+
+@dataclass(frozen=True, slots=True)
+class SlotPath:
+    """One continuous groove. Several spans join end to end.
+
+    ``kind`` is ``slot`` for a driving groove and ``center`` for the dashed line
+    between two lanes. Complex parts store these on the definition. A part with
+    no paths gets the ordinary lanes derived from its measures.
+    """
+
+    spans: tuple[SlotSpan, ...]
+    kind: str = PATH_SLOT
+
+
 @dataclass(frozen=True, slots=True)
 class PartSpec:
     """The original part. ``scale`` is always one of :data:`SCALES`, even for a known system."""
@@ -92,6 +137,8 @@ class PartSpec:
     lane_count: int
     connectors: tuple[ConnectorSpec, ...]
     outline: tuple[tuple[float, float], ...]
+    # Empty means "derive the ordinary lanes". Diverging parts store their grooves here.
+    slot_paths: tuple[SlotPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +441,200 @@ def lane_world_point(
     return world_xy(instance, connector.x_mm, connector.y_mm + offset)
 
 
+def lane_offset_mm(index: int, lane_count: int) -> float:
+    """Local y of one lane on a straight joint. Lane 1 is the negative side."""
+    return (index - (lane_count - 1) / 2.0) * LANE_PITCH_MM
+
+
+def curve_lane_radius(center_mm: float, index: int, lane_count: int) -> float:
+    """Groove radius on a catalogue curve.
+
+    The arc bends to the right as it runs from joint a to joint b, so lane 1
+    (the left lane of a straight) is the outer groove. That is what lines up
+    with a straight after the parts are joined.
+    """
+    return center_mm - lane_offset_mm(index, lane_count)
+
+
+def span_point(span: SlotSpan, t: float) -> tuple[float, float]:
+    """Point at fraction ``t`` along one span. ``t`` is 0 at the start and 1 at the end."""
+    if span.kind == SPAN_ARC:
+        angle = math.radians(span.start_deg + span.sweep_deg * t)
+        return (
+            span.x0 + span.radius_mm * math.cos(angle),
+            span.y0 + span.radius_mm * math.sin(angle),
+        )
+    return (span.x0 + (span.x1 - span.x0) * t, span.y0 + (span.y1 - span.y0) * t)
+
+
+def s_bend(x0: float, y0: float, x1: float, y1: float) -> tuple[SlotSpan, ...]:
+    """Two arcs from ``(x0, y0)`` to ``(x1, y1)``, tangent to +x at both ends."""
+    run = x1 - x0
+    rise = y1 - y0
+    if run <= 1.0 or abs(rise) < 1.0:
+        return (SlotSpan.line(x0, y0, x1, y1),)
+    dx = run / 2.0
+    dy = rise / 2.0
+    alpha = 2.0 * math.atan2(abs(dy), dx)
+    radius = abs(dy) / (1.0 - math.cos(alpha))
+    sign = 1.0 if dy >= 0.0 else -1.0
+    start1 = -sign * 90.0
+    sweep1 = sign * math.degrees(alpha)
+    mid_x = x0 + dx
+    mid_y = y0 + dy
+    center2_y = y1 - sign * radius
+    start2 = math.degrees(math.atan2(mid_y - center2_y, mid_x - x1))
+    end_angle = sign * 90.0
+    sweep2 = (end_angle - start2 + 180.0) % 360.0 - 180.0
+    if sweep1 > 0.0 and sweep2 > 0.0:
+        sweep2 -= 360.0
+    if sweep1 < 0.0 and sweep2 < 0.0:
+        sweep2 += 360.0
+    return (
+        SlotSpan.arc(x0, y0 + sign * radius, radius, start1, sweep1),
+        SlotSpan.arc(x1, center2_y, radius, start2, sweep2),
+    )
+
+
+def _through_lanes(length: float, lane_count: int) -> tuple[SlotPath, ...]:
+    half = length / 2.0
+    paths: list[SlotPath] = []
+    for index in range(lane_count):
+        y = lane_offset_mm(index, lane_count)
+        paths.append(SlotPath((SlotSpan.line(-half, y, half, y),)))
+    return tuple(paths)
+
+
+def _center_line(length: float) -> SlotPath:
+    half = length / 2.0
+    return SlotPath((SlotSpan.line(-half, 0.0, half, 0.0),), PATH_CENTER)
+
+
+def lane_change_paths(length: float, side: str) -> tuple[SlotPath, ...]:
+    """Both through grooves plus the branch that changes lane.
+
+    ``left`` moves from lane 2 to lane 1, ``right`` the other way, ``both`` crosses.
+    """
+    half = length / 2.0
+    margin = length * 0.22
+    x0 = -half + margin
+    x1 = half - margin
+    paths: list[SlotPath] = list(_through_lanes(length, 2))
+    if side in {"left", "both"}:
+        paths.append(SlotPath(s_bend(x0, LANE_PITCH_MM / 2.0, x1, -LANE_PITCH_MM / 2.0)))
+    if side in {"right", "both"}:
+        paths.append(SlotPath(s_bend(x0, -LANE_PITCH_MM / 2.0, x1, LANE_PITCH_MM / 2.0)))
+    paths.append(_center_line(length))
+    return tuple(paths)
+
+
+def lateral_bow_paths(length: float, shift: float) -> tuple[SlotPath, ...]:
+    """Both lanes and the centre bow sideways by ``shift`` and return."""
+    half = length / 2.0
+    paths: list[SlotPath] = []
+    for index in range(2):
+        y = lane_offset_mm(index, 2)
+        spans = s_bend(-half, y, 0.0, y + shift) + s_bend(0.0, y + shift, half, y)
+        paths.append(SlotPath(spans))
+    center = s_bend(-half, 0.0, 0.0, shift) + s_bend(0.0, shift, half, 0.0)
+    paths.append(SlotPath(center, PATH_CENTER))
+    return tuple(paths)
+
+
+def chicane_paths(length: float) -> tuple[SlotPath, ...]:
+    """Both lanes weave to one side and then the other. The centre follows."""
+    half = length / 2.0
+    shift = LANE_PITCH_MM * 0.36
+    stations = (-half, -half / 3.0, half / 3.0, half)
+    offsets = (0.0, shift, -shift, 0.0)
+    bases = (lane_offset_mm(0, 2), lane_offset_mm(1, 2), 0.0)
+    kinds = (PATH_SLOT, PATH_SLOT, PATH_CENTER)
+    paths: list[SlotPath] = []
+    for base, kind in zip(bases, kinds, strict=True):
+        spans: list[SlotSpan] = []
+        points = tuple(zip(stations, offsets, strict=True))
+        for (x_a, off_a), (x_b, off_b) in pairwise(points):
+            spans.extend(s_bend(x_a, base + off_a, x_b, base + off_b))
+        paths.append(SlotPath(tuple(spans), kind))
+    return tuple(paths)
+
+
+def encode_slot_paths(paths: tuple[SlotPath, ...]) -> list[dict[str, object]]:
+    encoded: list[dict[str, object]] = []
+    for path in paths:
+        spans: list[dict[str, object]] = []
+        for span in path.spans:
+            if span.kind == SPAN_ARC:
+                spans.append(
+                    {
+                        "kind": SPAN_ARC,
+                        "cx": span.x0,
+                        "cy": span.y0,
+                        "radius": span.radius_mm,
+                        "start_deg": span.start_deg,
+                        "sweep_deg": span.sweep_deg,
+                    }
+                )
+            else:
+                spans.append(
+                    {
+                        "kind": SPAN_LINE,
+                        "x0": span.x0,
+                        "y0": span.y0,
+                        "x1": span.x1,
+                        "y1": span.y1,
+                    }
+                )
+        encoded.append({"kind": path.kind, "spans": spans})
+    return encoded
+
+
+def decode_slot_paths(payload: object) -> tuple[SlotPath, ...]:
+    """Read stored grooves. A missing or broken value means the ordinary lanes."""
+    if not isinstance(payload, list):
+        return ()
+    paths: list[SlotPath] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            return ()
+        raw_spans = entry.get("spans")
+        if not isinstance(raw_spans, list):
+            return ()
+        spans: list[SlotSpan] = []
+        for raw in raw_spans:
+            span = _decode_span(raw)
+            if span is None:
+                return ()
+            spans.append(span)
+        kind = entry.get("kind", PATH_SLOT)
+        if kind not in {PATH_SLOT, PATH_CENTER} or not spans:
+            return ()
+        paths.append(SlotPath(tuple(spans), str(kind)))
+    return tuple(paths)
+
+
+def _decode_span(raw: object) -> SlotSpan | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    try:
+        if kind == SPAN_ARC:
+            return SlotSpan.arc(
+                float(raw["cx"]),
+                float(raw["cy"]),
+                float(raw["radius"]),
+                float(raw["start_deg"]),
+                float(raw["sweep_deg"]),
+            )
+        if kind == SPAN_LINE:
+            return SlotSpan.line(
+                float(raw["x0"]), float(raw["y0"]), float(raw["x1"]), float(raw["y1"])
+            )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
 def standard_catalog() -> tuple[PartSpec, ...]:
     """Original Carrera Digital 132 pieces. The same definition can be placed any number of times.
 
@@ -407,7 +648,13 @@ def standard_catalog() -> tuple[PartSpec, ...]:
     def add(spec: PartSpec) -> None:
         specs.append(spec)
 
-    def straight(article: str, name: str, length: float, category: str = STRAIGHT) -> None:
+    def straight(
+        article: str,
+        name: str,
+        length: float,
+        category: str = STRAIGHT,
+        slot_paths: tuple[SlotPath, ...] = (),
+    ) -> None:
         width = track_width(2)
         add(
             PartSpec(
@@ -424,19 +671,22 @@ def standard_catalog() -> tuple[PartSpec, ...]:
                 2,
                 straight_connectors(length, 2),
                 rectangle(length, width),
+                slot_paths,
             )
         )
 
     straight("20020601", "Standardgerade", 345.0)
     straight("20020611", "1/3-Gerade", 115.0)
     straight("20020612", "1/4-Gerade", 86.0)
-    straight("20030343", "Spurwechsel links", 345.0, LANE_CHANGE)
-    straight("20030345", "Spurwechsel rechts", 345.0, LANE_CHANGE)
-    straight("20030347", "Doppelspurwechsel", 345.0, LANE_CHANGE)
-    straight("20020517", "Weiche", 345.0, SWITCH)
-    straight("20030350", "Engstelle links", 690.0, SPECIAL)
-    straight("20030351", "Engstelle rechts", 690.0, SPECIAL)
-    straight("20030373", "Schikane", 1035.0, SPECIAL)
+    straight("20030343", "Spurwechsel links", 345.0, LANE_CHANGE, lane_change_paths(345.0, "left"))
+    straight(
+        "20030345", "Spurwechsel rechts", 345.0, LANE_CHANGE, lane_change_paths(345.0, "right")
+    )
+    straight("20030347", "Doppelspurwechsel", 345.0, LANE_CHANGE, lane_change_paths(345.0, "both"))
+    straight("20020517", "Weiche", 345.0, SWITCH, lane_change_paths(345.0, "left"))
+    straight("20030350", "Engstelle links", 690.0, SPECIAL, lateral_bow_paths(690.0, -32.0))
+    straight("20030351", "Engstelle rechts", 690.0, SPECIAL, lateral_bow_paths(690.0, 32.0))
+    straight("20030373", "Schikane", 1035.0, SPECIAL, chicane_paths(1035.0))
 
     pit_width = track_width(1)
     add(
@@ -699,12 +949,14 @@ def build_part(
         connectors = curve_connectors(radius_mm, angle_deg, len(lanes))
         outline = arc_outline(radius_mm, angle_deg, width)
         length = None
+        paths: tuple[SlotPath, ...] = ()
     elif category == CROSSING:
         if length_mm is None or length_mm <= 0:
             raise ValidationError("error.planner.part")
         connectors = crossing_connectors(length_mm, len(lanes))
         outline = rectangle(length_mm, length_mm)
         length = length_mm
+        paths = ()
     else:
         if length_mm is None or length_mm <= 0:
             raise ValidationError("error.planner.part")
@@ -717,6 +969,12 @@ def build_part(
         connectors = straight_connectors(length_mm, len(lanes), kind=kind)
         outline = rectangle(length_mm, width)
         length = length_mm
+        if category == SWITCH:
+            paths = lane_change_paths(length_mm, "left")
+        elif category == LANE_CHANGE:
+            paths = lane_change_paths(length_mm, "both")
+        else:
+            paths = ()
     return PartSpec(
         system=system_name,
         article_number=article,
@@ -731,6 +989,7 @@ def build_part(
         lane_count=len(lanes),
         connectors=connectors,
         outline=outline,
+        slot_paths=paths,
     )
 
 

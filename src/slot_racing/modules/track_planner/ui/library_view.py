@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QMimeData, QPointF, QSize, Qt
-from PySide6.QtGui import QColor, QDrag, QPainter, QPen, QPolygonF
+from PySide6.QtCore import QMimeData, QSize, Qt
+from PySide6.QtGui import QDrag, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,27 +16,39 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.track_planner.parts import PartRecord
-from slot_racing.uikit.theme import COLORS
+from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
+from slot_racing.modules.track_planner.ui.track_paint import apply_preview_transform, paint_part
 
 PART_MIME = "application/x-slot-racing-part"
 
 
 class PartPreview(QWidget):
-    """Small top view of a definition. The outline is the one stored on the part."""
+    """Small top view of a definition. The plan paints the same way."""
 
-    def __init__(self, outline: tuple[tuple[float, float], ...]) -> None:
+    def __init__(self, spec: PartSpec, *, color_coding: bool = False) -> None:
         super().__init__()
         self.setObjectName("planner-part-preview")
         self.setFixedSize(72, 48)
-        self._outline = outline
+        self._spec = spec
+        self.color_coding = color_coding
+
+    def set_color_coding(self, enabled: bool) -> None:
+        if self.color_coding == enabled:
+            return
+        self.color_coding = enabled
+        self.update()
 
     def paintEvent(self, _event: object) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(QColor(COLORS.accent), 1.5))
-        painter.setBrush(QColor(COLORS.elevated))
-        painter.drawPolygon(_fitted(self._outline, self.width(), self.height()))
+        apply_preview_transform(painter, self._spec, self.width(), self.height())
+        paint_part(
+            painter,
+            self._spec,
+            color_coding=self.color_coding,
+            selected=False,
+            start_straight=False,
+        )
 
 
 class PartLibrary(QListWidget):
@@ -44,6 +56,7 @@ class PartLibrary(QListWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._color_coding = False
         self.setObjectName("planner-library")
         self.setMinimumWidth(340)
         self.setUniformItemSizes(False)
@@ -59,7 +72,7 @@ class PartLibrary(QListWidget):
             spec = record.spec
             item = QListWidgetItem(f"{spec.name} ({spec.article_number})")
             item.setData(Qt.ItemDataRole.UserRole, record.id)
-            card = _card(record, translator)
+            card = _card(record, translator, color_coding=self._color_coding)
             item.setSizeHint(card.sizeHint().expandedTo(QSize(300, 64)))
             self.addItem(item)
             self.setItemWidget(item, card)
@@ -85,12 +98,24 @@ class PartLibrary(QListWidget):
             )
         drag.exec(supported_actions)
 
+    def set_color_coding(self, enabled: bool) -> None:
+        """Restyle the visible cards. The list itself is not rebuilt."""
+        self._color_coding = enabled
+        for row in range(self.count()):
+            item = self.item(row)
+            card = self.itemWidget(item) if item is not None else None
+            if card is None:
+                continue
+            preview = card.findChild(PartPreview)
+            if preview is not None:
+                preview.set_color_coding(enabled)
 
-def _card(record: PartRecord, translator: Translator) -> QWidget:
+
+def _card(record: PartRecord, translator: Translator, *, color_coding: bool) -> QWidget:
     spec = record.spec
     card = QWidget()
     card.setObjectName("planner-part-card")
-    preview = PartPreview(spec.outline)
+    preview = PartPreview(spec, color_coding=color_coding)
     name = QLabel(spec.name)
     name.setObjectName("planner-part-name")
     system = QLabel(spec.system)
@@ -114,20 +139,3 @@ def _card(record: PartRecord, translator: Translator) -> QWidget:
     row.addWidget(preview)
     row.addLayout(text, 1)
     return card
-
-
-def _fitted(outline: tuple[tuple[float, float], ...], width: int, height: int) -> QPolygonF:
-    points = outline or ((-20.0, -10.0), (20.0, -10.0), (20.0, 10.0), (-20.0, 10.0))
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    span_x = max(max(xs) - min(xs), 1.0)
-    span_y = max(max(ys) - min(ys), 1.0)
-    scale = min((width - 8) / span_x, (height - 8) / span_y)
-    center_x = (min(xs) + max(xs)) / 2
-    center_y = (min(ys) + max(ys)) / 2
-    polygon = QPolygonF()
-    for x, y in points:
-        polygon.append(
-            QPointF(width / 2 + (x - center_x) * scale, height / 2 + (y - center_y) * scale)
-        )
-    return polygon

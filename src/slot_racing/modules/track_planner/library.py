@@ -17,6 +17,8 @@ from slot_racing.modules.track_planner.parts import (
     PartInstance,
     PartRecord,
     PartSpec,
+    decode_slot_paths,
+    encode_slot_paths,
     identity_key,
     resolved_scale,
     standard_catalog,
@@ -33,17 +35,28 @@ class PartLibrary:
             return tuple(self._load_all(session))
 
     def ensure_seed(self) -> None:
-        """Insert the original catalogue when a part is not stored yet."""
+        """Insert the original catalogue when a part is not stored yet.
+
+        A part that was stored before grooves existed gets those grooves once.
+        The outline and the joints are left as they are.
+        """
+        catalog = {
+            identity_key(spec.system, spec.article_number, spec.scale): spec
+            for spec in standard_catalog()
+        }
         with self._database.session() as session:
-            stored = {
-                identity_key(row.system, row.article_number, row.scale)
-                for row in session.scalars(select(TrackPartDefinition))
-            }
+            rows = list(session.scalars(select(TrackPartDefinition)))
+            stored = {identity_key(row.system, row.article_number, row.scale) for row in rows}
             for spec in standard_catalog():
                 key = identity_key(spec.system, spec.article_number, spec.scale)
                 if key not in stored:
                     self._insert(session, spec)
                     stored.add(key)
+            for row in rows:
+                known = catalog.get(identity_key(row.system, row.article_number, row.scale))
+                if known is None or not known.slot_paths or row.slot_paths:
+                    continue
+                row.slot_paths = encode_slot_paths(known.slot_paths)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         key = identity_key(spec.system, spec.article_number, spec.scale)
@@ -78,6 +91,7 @@ class PartLibrary:
             definition.angle_deg = spec.angle_deg
             definition.lane_count = spec.lane_count
             definition.outline = [list(point) for point in spec.outline]
+            definition.slot_paths = encode_slot_paths(spec.slot_paths)
             session.execute(delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id))
             self._add_connectors(session, part_id, spec)
             session.flush()
@@ -169,6 +183,7 @@ class PartLibrary:
             angle_deg=spec.angle_deg,
             lane_count=spec.lane_count,
             outline=[list(point) for point in spec.outline],
+            slot_paths=encode_slot_paths(spec.slot_paths),
         )
         session.add(definition)
         session.flush()
@@ -222,5 +237,6 @@ class PartLibrary:
                 for connector in connectors
             ),
             outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
+            slot_paths=decode_slot_paths(definition.slot_paths),
         )
         return PartRecord(definition.id, spec)

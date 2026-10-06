@@ -32,7 +32,13 @@ class TrackPlannerPlugin(Plugin):
         def planner_page() -> QWidget:
             from slot_racing.modules.track_planner.ui.page import PlannerPage
 
-            return PlannerPage(translator, context.get_service(TrackCatalog), planner)
+            return PlannerPage(
+                translator,
+                context.get_service(TrackCatalog),
+                planner,
+                context.config,
+                context.config_path,
+            )
 
         context.add_navigation(
             NavigationItem(
