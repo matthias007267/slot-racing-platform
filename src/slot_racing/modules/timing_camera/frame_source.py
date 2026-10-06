@@ -74,9 +74,10 @@ class FrameSource(ABC):
     def poll_latest(self) -> TimedFrame | None:
         """The newest queued frame. Older frames are discarded.
 
-        Preview uses this so the picture on screen is the current grab. A timing
-        source keeps calling :meth:`poll_frame` instead, in grab order, so a
-        crossing that is still in the small queue is not thrown away.
+        Preview uses this so the picture on screen is the current grab. A live
+        camera keeps only that latest frame and detects it on its own worker.
+        A manual source still returns frames from :meth:`poll_frame` in the
+        order they were submitted.
         """
         latest: TimedFrame | None = None
         while True:

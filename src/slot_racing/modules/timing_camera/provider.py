@@ -1,14 +1,18 @@
 """Camera timing provider.
 
 Frames come from a :class:`~slot_racing.modules.timing_camera.frame_source.FrameSource`.
-A hardware camera is read on a capture thread; :meth:`CameraTimingProvider.poll`
-is the only place that runs detection and emits sensor events. The sensor id is
-taken from the session setup.
+A hardware camera is read on a capture thread. Detection runs on its own worker
+as soon as a new frame is the latest one, and stores ``SensorTriggered`` values
+until :meth:`CameraTimingProvider.poll` forwards them. Poll does not wait and
+does not detect for that camera. A manual frame source has no worker, so poll
+still detects. The sensor id is taken from the session setup.
 """
 
 from __future__ import annotations
 
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
@@ -26,6 +30,7 @@ from slot_racing.modules.timing_camera.capture import (
     MAX_FRAMES_PER_POLL,
     CameraFrameSource,
     CameraOpenError,
+    CameraReadError,
     CaptureDevice,
 )
 from slot_racing.modules.timing_camera.configuration import (
@@ -99,6 +104,19 @@ class CameraTimingProvider(TimingSource):
         self._paused = False
         self._resync = False
         self._regions_armed = False
+        self._pending: deque[SensorTriggered] = deque()
+        self._pending_lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._worker_stop = threading.Event()
+        self._resume_gate = threading.Event()
+        self._resume_gate.set()
+        self._halted = False
+        self._failure: BaseException | None = None
+        self.frames_observed = 0
+        self.detection_ns_total = 0
+        self.detection_ns_max = 0
+        self.latency_ns_total = 0
+        self.latency_ns_max = 0
         self._reset_detector()
 
     @property
@@ -116,6 +134,15 @@ class CameraTimingProvider(TimingSource):
         self._paused = False
         self._resync = False
         self._regions_armed = False
+        self._failure = None
+        self._halted = False
+        self.frames_observed = 0
+        self.detection_ns_total = 0
+        self.detection_ns_max = 0
+        self.latency_ns_total = 0
+        self.latency_ns_max = 0
+        with self._pending_lock:
+            self._pending.clear()
         self._publish_regions(())
         try:
             self._frames.start()
@@ -129,35 +156,77 @@ class CameraTimingProvider(TimingSource):
             self._frames.stop()
             raise
         self._sink = sink
+        self._worker_stop.clear()
+        self._resume_gate.set()
+        if self._has_capture_thread():
+            self._worker = threading.Thread(
+                target=self._detect, name="slot-racing-detection", daemon=True
+            )
+            self._worker.start()
 
     def stop(self) -> None:
-        self._sink = None
-        self._paused = False
-        self._resync = False
-        self._regions_armed = False
-        self._detector = None
-        self._publish_regions(())
-        self._frames.stop()
+        if self._halted:
+            return
+        self._halted = True
+        try:
+            self._worker_stop.set()
+            self._resume_gate.set()
+            wake = getattr(self._frames, "wake", None)
+            if callable(wake):
+                wake()
+            self._join_worker()
+            # Hand crossings that already finished to the race before the sink goes away.
+            self._drain_events()
+            self._sink = None
+            self._paused = False
+            self._resync = False
+            self._regions_armed = False
+            self._detector = None
+            self._publish_regions(())
+            self._frames.stop()
+        finally:
+            self._halted = False
 
     def pause(self) -> None:
         if self._sink is not None and not self._paused:
             self._paused = True
+            self._resume_gate.clear()
             self._frames.pause()
+            drop = getattr(self._frames, "clear_unread", None)
+            if callable(drop):
+                drop()
 
     def resume(self) -> None:
         if self._sink is None or not self._paused:
             return
+        # Drop the unread frame while the worker still treats the race as paused,
+        # then allow detection, then let the capture thread publish again.
+        drop = getattr(self._frames, "clear_unread", None)
+        if callable(drop):
+            drop()
+        self._resync = True
         self._paused = False
-        self._resync = self._frames.resume()
+        self._resume_gate.set()
+        if not self._frames.resume():
+            self._resync = False
 
     def poll(self) -> None:
-        """Turn due frames into sensor events, keeping each grab timestamp.
+        """Deliver events that are already detected, or drive a host-fed source.
 
-        At most :data:`~slot_racing.modules.timing_camera.capture.MAX_FRAMES_PER_POLL`
-        frames are handled, so a backlog cannot block the host. The event
-        timestamp is the frame's own ``timestamp_ns``, never the time of this call.
+        A live camera detects on its own worker. This call only forwards the
+        crossings that worker stored, on the caller's thread, and returns
+        without waiting. A manual frame source has no worker: this call still
+        detects, and it still stops after
+        :data:`~slot_racing.modules.timing_camera.capture.MAX_FRAMES_PER_POLL`
+        frames. The event timestamp is the frame's own ``timestamp_ns``.
         """
         self._frames.check()
+        failure = self._failure
+        if failure is not None:
+            raise failure
+        if self._worker is not None:
+            self._drain_events()
+            return
         if self._sink is None or self._paused:
             return
         processed = 0
@@ -170,15 +239,109 @@ class CameraTimingProvider(TimingSource):
                 sink = self._sink
                 if sink is None:
                     return
-                sink(
-                    SensorTriggered(
-                        timestamp_ns=crossing.timestamp_ns,
-                        source_id=self._source_id,
-                        sensor_id=self._sensors[crossing.position_id],
-                        position_id=crossing.position_id,
-                        lane=crossing.lane,
-                    )
-                )
+                sink(self._event(crossing))
+
+    def caught_up(self) -> bool:
+        """True when detection has finished every frame the capture thread kept.
+
+        Host-driven sources are always caught up: their frames wait for ``poll``.
+        """
+        if self._worker is None:
+            return True
+        idle = getattr(self._frames, "detection_idle", None)
+        if not callable(idle):
+            return True
+        return bool(idle())
+
+    def _has_capture_thread(self) -> bool:
+        return callable(getattr(self._frames, "wait_frame", None))
+
+    def _join_worker(self) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None and worker.is_alive() and threading.current_thread() is not worker:
+            worker.join(timeout=2)
+            if worker.is_alive():
+                self._worker = worker
+                raise RuntimeError("camera detection thread did not stop")
+
+    def _detect(self) -> None:
+        """Wait for a frame, detect, store the crossings, then wait again.
+
+        The sink is not called here. Race handlers touch the UI and the
+        database, and both belong on the thread that polls.
+        """
+        while not self._worker_stop.is_set():
+            if self._paused:
+                self._resume_gate.wait()
+                continue
+            try:
+                self._frames.check()
+            except CameraReadError:
+                return
+            frame = self._take_frame()
+            if frame is None:
+                return
+            if self._paused or self._worker_stop.is_set():
+                self._release_frame()
+                continue
+            started = time.perf_counter_ns()
+            try:
+                crossings = self._crossings(frame)
+            except Exception as error:
+                self._failure = error
+                self._release_frame()
+                return
+            elapsed = time.perf_counter_ns() - started
+            latency = max(0, started - frame.timestamp_ns)
+            self.frames_observed += 1
+            self.detection_ns_total += elapsed
+            self.detection_ns_max = max(self.detection_ns_max, elapsed)
+            self.latency_ns_total += latency
+            self.latency_ns_max = max(self.latency_ns_max, latency)
+            self._store(crossings)
+            self._release_frame()
+
+    def _take_frame(self) -> TimedFrame | None:
+        wait = getattr(self._frames, "wait_frame", None)
+        if not callable(wait):
+            return None
+        frame = wait(self._worker_stop)
+        if isinstance(frame, TimedFrame):
+            return frame
+        return None
+
+    def _release_frame(self) -> None:
+        ack = getattr(self._frames, "ack_frame", None)
+        if callable(ack):
+            ack()
+
+    def _event(self, crossing: LaneCrossing) -> SensorTriggered:
+        return SensorTriggered(
+            timestamp_ns=crossing.timestamp_ns,
+            source_id=self._source_id,
+            sensor_id=self._sensors[crossing.position_id],
+            position_id=crossing.position_id,
+            lane=crossing.lane,
+        )
+
+    def _store(self, crossings: tuple[LaneCrossing, ...]) -> None:
+        """Keep every crossing. Frames may be skipped; these events may not."""
+        if not crossings:
+            return
+        with self._pending_lock:
+            self._pending.extend(self._event(crossing) for crossing in crossings)
+
+    def _drain_events(self) -> None:
+        while True:
+            with self._pending_lock:
+                if not self._pending:
+                    return
+                event = self._pending.popleft()
+            sink = self._sink
+            if sink is None:
+                return
+            sink(event)
 
     def _match_delivered_frame(self, frame: GrayFrame) -> None:
         """Map saved zones onto the picture the camera actually delivered.

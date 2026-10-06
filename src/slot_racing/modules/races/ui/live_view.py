@@ -278,11 +278,13 @@ class LiveRaceView(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Poll the timing source, then redraw.
+        """Forward events a source has already produced, then redraw.
 
-        The timer is the host poll for providers such as the simulation. It is not a status
-        poll: race events redraw the same snapshot as soon as the engine publishes them.
-        The clock reads ``snapshot.elapsed_ns``, the race engine's own time.
+        A camera detects on its own worker. This timer is not that detector. It delivers
+        the crossings the worker stored, and it still drives sources that have no thread
+        of their own. It does not wait for either of them. Race events redraw the same
+        snapshot as soon as the engine publishes them. The clock reads ``snapshot.elapsed_ns``,
+        the race engine's own time.
         """
         runner = self._runner
         if runner is None or self._busy:

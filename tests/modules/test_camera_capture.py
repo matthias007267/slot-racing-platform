@@ -34,7 +34,7 @@ from slot_racing.modules.timing_camera.capture import (
     CameraOpenError,
     CameraReadError,
     CaptureDevice,
-    FrameQueue,
+    LatestFrameBuffer,
     _timed,
 )
 from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
@@ -167,18 +167,19 @@ def wait_for(predicate: Callable[[], bool]) -> None:
     raise AssertionError("timed out")
 
 
-def test_queue_drops_the_oldest_frame_when_it_is_full() -> None:
-    queue = FrameQueue(2)
+def test_a_newer_frame_replaces_one_that_detection_has_not_taken() -> None:
+    slot = LatestFrameBuffer()
     first = TimedFrame(blank(), 1)
     second = TimedFrame(blank(), 2)
     third = TimedFrame(blank(), 3)
-    queue.put(first)
-    queue.put(second)
-    queue.put(third)
-    assert queue.dropped == 1
-    assert queue.take() == second
-    assert queue.take() == third
-    assert queue.take() is None
+    slot.put(first)
+    slot.put(second)
+    slot.put(third)
+    assert slot.dropped == 2
+    assert len(slot) == 1
+    assert slot.take() == third
+    assert slot.take() is None
+    assert len(slot) == 0
 
 
 def test_a_missing_device_fails_start_and_releases_the_camera() -> None:
@@ -214,15 +215,16 @@ def test_a_present_device_starts_and_stop_joins_the_thread() -> None:
 
 def test_grabbed_frames_keep_their_timestamp_until_poll() -> None:
     capture = ScriptedCapture()
-    source, frames, received = started(capture)
+    source, _frames, received = started(capture)
     try:
         before = time.perf_counter_ns()
         capture.push(column(1, 30))
+        wait_for(lambda: source.frames_observed >= 1)
         capture.push(column(1, 32))
-        wait_for(lambda: frames.queued == 2)
+        wait_for(lambda: source.frames_observed >= 2)
+        assert received == []
         time.sleep(0.03)
         polled_at = time.perf_counter_ns()
-        assert received == []
         source.poll()
         assert len(received) == 1
         stamp = received[0].timestamp_ns
@@ -237,14 +239,21 @@ def test_grabbed_frames_keep_their_timestamp_until_poll() -> None:
 
 def test_frames_are_processed_in_grab_order() -> None:
     capture = ScriptedCapture()
-    source, frames, received = started(capture, zones(1, 3), queue_size=4)
+    source, _frames, received = started(capture, zones(1, 3))
     try:
-        capture.push(column(1, 30))
-        capture.push(column(1, 32))
-        capture.push(column(3, 30))
-        capture.push(column(3, 32))
-        capture.wait_until_reads(4)
-        wait_for(lambda: frames.queued == 4)
+        for frame, seen in (
+            (column(1, 30), 1),
+            (column(1, 32), 2),
+            (column(3, 30), 3),
+            (column(3, 32), 4),
+        ):
+            capture.push(frame)
+
+            def caught(expected: int = seen) -> bool:
+                return source.frames_observed >= expected and source.caught_up()
+
+            wait_for(caught)
+        assert received == []
         source.poll()
         assert [event.lane for event in received] == [1, 3]
         assert received[0].timestamp_ns < received[1].timestamp_ns
@@ -254,38 +263,40 @@ def test_frames_are_processed_in_grab_order() -> None:
 
 def test_poll_latest_discards_older_preview_frames_and_stop_ends_the_thread() -> None:
     capture = ScriptedCapture()
-    source, frames, received = started(capture, queue_size=4)
+    frames = CameraFrameSource(capture)
+    frames.start()
     try:
         capture.push(blank())
         capture.push(blank().paint(DetectionRoi(0, 0, 4, 4), 40))
         capture.push(GrayFrame.blank(WIDTH, HEIGHT, 9))
         capture.wait_until_reads(3)
-        wait_for(lambda: frames.queued == 3)
+        wait_for(lambda: frames.captured == 3)
         latest = frames.poll_latest()
         assert latest is not None
         assert latest.frame.pixels[0] == 9
         assert frames.queued == 0
+        assert frames.dropped == 2
         assert frames.captured == 3
         assert frames.last_read_ns >= 0
-        source.poll()
-        assert received == []
     finally:
-        source.stop()
+        frames.stop()
     assert not frames.is_capturing
 
 
-def test_the_queue_stays_bounded_and_keeps_the_newest_frames() -> None:
+def test_the_capture_thread_does_not_wait_for_a_consumer() -> None:
     capture = ScriptedCapture()
-    source, frames, _received = started(capture, queue_size=2)
+    frames = CameraFrameSource(capture)
+    frames.start()
     try:
         for _ in range(5):
             capture.push(blank())
         capture.wait_until_reads(5)
-        wait_for(lambda: frames.dropped >= 3)
-        assert frames.queued <= 2
-        assert frames.dropped == 3
+        wait_for(lambda: frames.captured == 5)
+        assert frames.queued <= MAX_QUEUED_FRAMES
+        assert frames.dropped == 4
+        assert frames.queued == 1
     finally:
-        source.stop()
+        frames.stop()
 
 
 def test_poll_handles_only_a_limited_number_of_frames() -> None:
@@ -314,16 +325,18 @@ def test_pause_frames_are_not_counted_after_resume() -> None:
         capture.wait_until_reads(1)
         source.poll()
         assert received == []
+        assert source.frames_observed == 0
 
         source.resume()
         capture.push(blank())
-        capture.wait_until_reads(2)
+        wait_for(lambda: source.frames_observed >= 1 and source.caught_up())
         source.poll()
         assert received == []
 
         capture.push(column(1, 30))
+        wait_for(lambda: source.frames_observed >= 2 and source.caught_up())
         capture.push(column(1, 32))
-        capture.wait_until_reads(4)
+        wait_for(lambda: source.frames_observed >= 3 and source.caught_up())
         source.poll()
         assert [event.lane for event in received] == [1]
     finally:
@@ -335,8 +348,9 @@ def test_a_car_already_in_the_zone_after_resume_is_not_a_new_crossing() -> None:
     source, _frames, received = started(capture)
     try:
         capture.push(column(1, 30))
+        wait_for(lambda: source.frames_observed >= 1 and source.caught_up())
         capture.push(column(1, 32))
-        capture.wait_until_reads(2)
+        wait_for(lambda: source.frames_observed >= 2 and source.caught_up())
         source.poll()
         assert len(received) == 1
 
@@ -345,13 +359,14 @@ def test_a_car_already_in_the_zone_after_resume_is_not_a_new_crossing() -> None:
         capture.wait_until_reads(3)
         source.poll()
         assert len(received) == 1
+        assert source.frames_observed == 2
 
         source.resume()
         capture.push(car(1))
-        capture.wait_until_reads(4)
+        wait_for(lambda: source.frames_observed >= 3 and source.caught_up())
         source.poll()
         capture.push(car(1))
-        capture.wait_until_reads(5)
+        wait_for(lambda: source.frames_observed >= 4 and source.caught_up())
         source.poll()
         assert len(received) == 1
     finally:
@@ -394,9 +409,11 @@ def test_capture_frames_complete_a_lap_through_the_race_engine() -> None:
         (TimingSensor("sensor-sf", "start_finish"),),
     )
     frames = CameraFrameSource(capture)
-    source = CameraTimingFactory(frames, zones(1), blank()).create_source(
+    built = CameraTimingFactory(frames, zones(1), blank()).create_source(
         TimingSessionSpec(setup, (1,), 1)
     )
+    assert isinstance(built, CameraTimingProvider)
+    source = built
     bus = EventBus()
     events: list[Event] = []
     bus.subscribe(Event, events.append)
@@ -409,6 +426,7 @@ def test_capture_frames_complete_a_lap_through_the_race_engine() -> None:
     engine.start()
     try:
         capture.push(column(1, 30))
+        wait_for(lambda: source.frames_observed >= 1 and source.caught_up())
         capture.push(column(1, 32))
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline and not any(
