@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast
 
 import numpy as np
 
@@ -145,6 +146,50 @@ class DetectionTrace:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class ZoneInspection:
+    """One zone's real block matrices and the decision just taken.
+
+    Built only while inspection is on. The matrices are the ones ``observe``
+    already compared. Nothing here is a second detector.
+    """
+
+    position_id: str
+    lane: int
+    block_size: int
+    analysis: tuple[tuple[float, ...], ...]
+    reference: tuple[tuple[float, ...], ...]
+    difference: tuple[tuple[float, ...], ...]
+    active: tuple[tuple[bool, ...], ...]
+    changed_blocks: int
+    active_ratio: float
+    mean_difference: float
+    max_difference: float
+    strength: float
+    shift: float | None
+    centroid: tuple[float, float] | None
+    sample_count: int
+    samples_expired: int
+    state: ZoneState
+    accepted: bool
+    reason: str
+    component_blocks: int
+    difference_threshold: float
+    min_blocks: int
+    required_blocks: int
+    min_shift: float
+    window_ns: int
+    direction: TravelDirection
+
+
+@dataclass(frozen=True, slots=True)
+class FrameInspection:
+    """Inspections for one analyzed frame, in configured zone order."""
+
+    reference_ready: bool
+    zones: tuple[ZoneInspection, ...]
+
+
 class LaneCrossingDetector:
     """Per-zone clear/occupied state over a sequence of grayscale frames.
 
@@ -167,6 +212,9 @@ class LaneCrossingDetector:
         self._blocks: list[int] = []
         self._references: list[np.ndarray] | None = None
         self._traces: tuple[DetectionTrace, ...] | None = None
+        self._inspect = False
+        self._last_inspection: FrameInspection | None = None
+        self._zone_inspections: list[ZoneInspection] = []
         self.pixels_compared = 0
         if background is not None:
             self._check_frame(background)
@@ -198,6 +246,25 @@ class LaneCrossingDetector:
         if not self._settings.debug:
             return None
         return self._traces
+
+    def set_inspection(self, enabled: bool) -> None:
+        """Keep the block matrices of each decision. Off by default.
+
+        Enabling this does not change which crossings ``observe`` returns. It
+        copies the matrices that decision already used.
+        """
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        self._inspect = enabled
+        if not enabled:
+            self._last_inspection = None
+            self._zone_inspections = []
+
+    def last_inspection(self) -> FrameInspection | None:
+        """The matrices of the last ``observe``, or ``None`` when inspection is off."""
+        if not self._inspect:
+            return None
+        return self._last_inspection
 
     def observe(self, frame: GrayFrame, timestamp_ns: int) -> tuple[LaneCrossing, ...]:
         """Update every zone from ``frame`` and return the new crossings.
@@ -269,6 +336,8 @@ class LaneCrossingDetector:
         crossings: list[LaneCrossing] = []
         traces: list[DetectionTrace] = []
         debug = self._settings.debug
+        if self._inspect:
+            self._zone_inspections = []
         for index, zone in enumerate(self._settings.zones):
             current = block_means(arrays[index], self._blocks[index])
             reference = references[index]
@@ -284,6 +353,8 @@ class LaneCrossingDetector:
                 traces.append(decision)
         if debug:
             self._traces = tuple(traces)
+        if self._inspect:
+            self._last_inspection = FrameInspection(True, tuple(self._zone_inspections))
         crossings.sort(key=_crossing_order)
         return tuple(crossings)
 
@@ -299,27 +370,70 @@ class LaneCrossingDetector:
         profile = self._profile
         difference = np.abs(current - reference)
         mask = difference >= profile.difference
+        block = self._blocks[index]
         required = _required_blocks(profile.min_blocks, int(mask.shape[0]), int(mask.shape[1]))
         component = _largest_component(mask, required)
         key = (zone.position_id, zone.lane)
         samples = self._samples[index]
         if not emit:
-            return self._synchronize_zone(zone, key, samples, component, difference, mask)
+            return self._synchronize_zone(
+                zone, key, samples, component, current, reference, difference, mask, block
+            )
 
         assert timestamp_ns is not None
         if component is None:
-            return None, self._without_component(zone, key, samples, timestamp_ns, mask, difference)
+            return None, self._without_component(
+                zone,
+                key,
+                samples,
+                timestamp_ns,
+                current,
+                reference,
+                mask,
+                difference,
+                block,
+            )
         centroid_x, centroid_y = _centroid(component)
+        centroid = (centroid_x, centroid_y)
         count = int(component.shape[0])
         if self._states[key] is ZoneState.OCCUPIED:
             return None, self._trace(
-                zone, mask, difference, component, None, ZoneState.OCCUPIED, False, "occupied"
+                zone,
+                current,
+                reference,
+                mask,
+                difference,
+                component,
+                None,
+                centroid,
+                len(samples),
+                0,
+                block,
+                ZoneState.OCCUPIED,
+                False,
+                "occupied",
             )
         samples.append((timestamp_ns, centroid_x, centroid_y))
+        before = len(samples)
         _drop_old(samples, timestamp_ns, profile.window_ns)
-        if len(samples) < 2:
+        expired = before - len(samples)
+        used = len(samples)
+        if used < 2:
             return None, self._trace(
-                zone, mask, difference, component, None, ZoneState.CLEAR, False, "too_short"
+                zone,
+                current,
+                reference,
+                mask,
+                difference,
+                component,
+                None,
+                centroid,
+                used,
+                expired,
+                block,
+                ZoneState.CLEAR,
+                False,
+                "too_short",
             )
         oldest = samples[0]
         shift = _travel_shift(
@@ -335,27 +449,52 @@ class LaneCrossingDetector:
                 foreground_pixels=count,
             )
             return crossing, self._trace(
-                zone, mask, difference, component, shift, ZoneState.OCCUPIED, True, "accepted"
+                zone,
+                current,
+                reference,
+                mask,
+                difference,
+                component,
+                shift,
+                centroid,
+                used,
+                expired,
+                block,
+                ZoneState.OCCUPIED,
+                True,
+                "accepted",
             )
         if shift <= -profile.min_shift:
             samples.clear()
             samples.append((timestamp_ns, centroid_x, centroid_y))
             return None, self._trace(
                 zone,
+                current,
+                reference,
                 mask,
                 difference,
                 component,
                 shift,
+                centroid,
+                used,
+                expired,
+                block,
                 ZoneState.CLEAR,
                 False,
                 "wrong_direction",
             )
         return None, self._trace(
             zone,
+            current,
+            reference,
             mask,
             difference,
             component,
             shift,
+            centroid,
+            used,
+            expired,
+            block,
             ZoneState.CLEAR,
             False,
             "insufficient_motion",
@@ -367,22 +506,45 @@ class LaneCrossingDetector:
         key: tuple[str, int],
         samples: list[tuple[int, float, float]],
         component: np.ndarray | None,
+        current: np.ndarray,
+        reference: np.ndarray,
         difference: np.ndarray,
         mask: np.ndarray,
+        block: int,
     ) -> tuple[None, DetectionTrace | None]:
         samples.clear()
+        centroid = None if component is None else _centroid(component)
         if component is None:
             self._states[key] = ZoneState.CLEAR
             return None, self._trace(
-                zone, mask, difference, None, None, ZoneState.CLEAR, False, "synchronized_clear"
+                zone,
+                current,
+                reference,
+                mask,
+                difference,
+                None,
+                None,
+                None,
+                0,
+                0,
+                block,
+                ZoneState.CLEAR,
+                False,
+                "synchronized_clear",
             )
         self._states[key] = ZoneState.OCCUPIED
         return None, self._trace(
             zone,
+            current,
+            reference,
             mask,
             difference,
             component,
             None,
+            centroid,
+            0,
+            0,
+            block,
             ZoneState.OCCUPIED,
             False,
             "synchronized_occupied",
@@ -394,30 +556,83 @@ class LaneCrossingDetector:
         key: tuple[str, int],
         samples: list[tuple[int, float, float]],
         timestamp_ns: int,
+        current: np.ndarray,
+        reference: np.ndarray,
         mask: np.ndarray,
         difference: np.ndarray,
+        block: int,
     ) -> DetectionTrace | None:
+        expired = 0
         if self._states[key] is ZoneState.OCCUPIED:
             self._states[key] = ZoneState.CLEAR
             samples.clear()
             reason = "released"
         else:
+            before = len(samples)
             _drop_old(samples, timestamp_ns, self._profile.window_ns)
+            expired = before - len(samples)
             # A few changed blocks that never form a group are noise, not a car.
             reason = "below_size" if self._settings.debug and bool(np.any(mask)) else "clear"
-        return self._trace(zone, mask, difference, None, None, ZoneState.CLEAR, False, reason)
+        return self._trace(
+            zone,
+            current,
+            reference,
+            mask,
+            difference,
+            None,
+            None,
+            None,
+            len(samples),
+            expired,
+            block,
+            ZoneState.CLEAR,
+            False,
+            reason,
+        )
 
     def _trace(
         self,
         zone: DetectionZone,
+        current: np.ndarray,
+        reference: np.ndarray,
         mask: np.ndarray,
         difference: np.ndarray,
         component: np.ndarray | None,
         shift: float | None,
+        centroid: tuple[float, float] | None,
+        sample_count: int,
+        samples_expired: int,
+        block_size: int,
         state: ZoneState,
         accepted: bool,
         reason: str,
     ) -> DetectionTrace | None:
+        if self._inspect:
+            reported = reason
+            if reason == "clear" and bool(np.any(mask)):
+                # Debug names this below_size. Inspection reports that same fact
+                # without turning debug on for the race.
+                reported = "below_size"
+            self._zone_inspections.append(
+                _zone_inspection(
+                    zone,
+                    current,
+                    reference,
+                    difference,
+                    mask,
+                    component,
+                    shift,
+                    centroid,
+                    sample_count,
+                    samples_expired,
+                    block_size,
+                    state,
+                    accepted,
+                    reported,
+                    self._profile,
+                    self._settings.direction,
+                )
+            )
         if not self._settings.debug:
             return None
         if component is None:
@@ -437,6 +652,33 @@ class LaneCrossingDetector:
         )
 
     def _note_calibration(self) -> None:
+        if self._inspect and self._references is not None:
+            zones: list[ZoneInspection] = []
+            for index, zone in enumerate(self._settings.zones):
+                reference = self._references[index]
+                zeros = np.zeros(reference.shape, dtype=np.float64)
+                inactive = np.zeros(reference.shape, dtype=bool)
+                zones.append(
+                    _zone_inspection(
+                        zone,
+                        reference,
+                        reference,
+                        zeros,
+                        inactive,
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        self._blocks[index],
+                        ZoneState.CLEAR,
+                        False,
+                        "calibrated",
+                        self._profile,
+                        self._settings.direction,
+                    )
+                )
+            self._last_inspection = FrameInspection(True, tuple(zones))
         if not self._settings.debug:
             return
         self._traces = tuple(
@@ -505,6 +747,16 @@ class LaneCrossingDetector:
                 raise ValueError("frame size must match the background")
 
 
+def create_lane_detector(
+    settings: DetectorSettings, background: GrayFrame | None = None
+) -> LaneCrossingDetector:
+    """The detector a race and the setup diagnosis both construct.
+
+    There is no second detection implementation behind this name.
+    """
+    return LaneCrossingDetector(settings, background=background)
+
+
 def sensitivity_profile(level: int) -> SensitivityProfile:
     """Map one sensitivity slider onto the internal detection thresholds.
 
@@ -559,6 +811,86 @@ def block_means(image: np.ndarray, block: int) -> np.ndarray:
     trimmed = image[: rows * block, : cols * block]
     folded = trimmed.reshape(rows, block, cols, block)
     return folded.mean(axis=(1, 3))
+
+
+def _zone_inspection(
+    zone: DetectionZone,
+    current: np.ndarray,
+    reference: np.ndarray,
+    difference: np.ndarray,
+    mask: np.ndarray,
+    component: np.ndarray | None,
+    shift: float | None,
+    centroid: tuple[float, float] | None,
+    sample_count: int,
+    samples_expired: int,
+    block_size: int,
+    state: ZoneState,
+    accepted: bool,
+    reason: str,
+    profile: SensitivityProfile,
+    direction: TravelDirection,
+) -> ZoneInspection:
+    """Copy the block matrices this decision compared. Not the camera frame."""
+    if difference.size == 0:
+        mean_difference = 0.0
+        max_difference = 0.0
+    else:
+        mean_difference = float(difference.mean())
+        max_difference = float(difference.max())
+    changed = int(np.count_nonzero(mask))
+    total = int(mask.size)
+    if component is None:
+        strength = 0.0
+        component_blocks = 0
+    else:
+        selected = difference[component[:, 0], component[:, 1]]
+        strength = float(selected.mean()) if selected.size else 0.0
+        component_blocks = int(component.shape[0])
+    rows = int(mask.shape[0]) if mask.ndim == 2 else 0
+    cols = int(mask.shape[1]) if mask.ndim == 2 else 0
+    return ZoneInspection(
+        position_id=zone.position_id,
+        lane=zone.lane,
+        block_size=block_size,
+        analysis=_float_matrix(current),
+        reference=_float_matrix(reference),
+        difference=_float_matrix(difference),
+        active=_bool_matrix(mask),
+        changed_blocks=changed,
+        active_ratio=(changed / total) if total else 0.0,
+        mean_difference=mean_difference,
+        max_difference=max_difference,
+        strength=strength,
+        shift=shift,
+        centroid=centroid,
+        sample_count=sample_count,
+        samples_expired=samples_expired,
+        state=state,
+        accepted=accepted,
+        reason=reason,
+        component_blocks=component_blocks,
+        difference_threshold=profile.difference,
+        min_blocks=profile.min_blocks,
+        required_blocks=_required_blocks(profile.min_blocks, rows, cols),
+        min_shift=profile.min_shift,
+        window_ns=profile.window_ns,
+        direction=direction,
+    )
+
+
+def _float_matrix(values: np.ndarray) -> tuple[tuple[float, ...], ...]:
+    if values.size == 0:
+        return ()
+    listed = cast(list[list[float]], np.asarray(values, dtype=np.float64).tolist())
+    return tuple(tuple(float(item) for item in row) for row in listed)
+
+
+def _bool_matrix(values: np.ndarray) -> tuple[tuple[bool, ...], ...]:
+    if values.size == 0:
+        return ()
+    listed = cast(list[list[bool]], np.asarray(values, dtype=bool).tolist())
+    return tuple(tuple(bool(item) for item in row) for row in listed)
 
 
 def _roi_array(frame: GrayFrame, roi: DetectionRoi | None) -> np.ndarray:
