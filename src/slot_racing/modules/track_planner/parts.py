@@ -1,8 +1,9 @@
 """Track pieces: one definition, many placed instances.
 
-A definition is an original part (system, article number, scale, measures, connectors, outline).
-An instance is that part used once on a plan, with its own position and rotation. Editing an
-instance never changes the definition.
+A definition is one part: designation, article number, scale, category, measures, connectors
+and outline. Its identity is the designation plus the article number. Scale and category are
+properties. An instance is that part used once on a plan, with its own position and rotation.
+Editing an instance never changes the definition.
 
 Coordinates are millimetres. Positive y points down, matching the plan canvas. ``rotation_z_deg``
 is clockwise. ``z`` and the other two rotations are stored so a later 3D view can use them; the
@@ -22,13 +23,8 @@ from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 
 SCALES = ("1:24", "1:32", "1:43")
-# These systems have one scale. The part still stores that scale; it is not left empty.
-IMPLIED_SCALE: dict[str, str] = {
-    "Carrera Digital 132": "1:32",
-    "Carrera Digital 124": "1:24",
-    "Carrera Evolution": "1:32",
-    "Carrera GO!!!": "1:43",
-}
+# The seeded Carrera rails are stored at 1:24. The scale is a property, not an identity.
+CATALOG_SCALE = "1:24"
 
 STRAIGHT = "straight"
 CURVE = "curve"
@@ -122,9 +118,8 @@ class SlotPath:
 
 @dataclass(frozen=True, slots=True)
 class PartSpec:
-    """The original part. ``scale`` is always one of :data:`SCALES`, even for a known system."""
+    """One part. ``scale`` is one of :data:`SCALES` and is not part of the identity."""
 
-    system: str
     article_number: str
     scale: str
     name: str
@@ -172,44 +167,37 @@ class Pose:
     rotation_z_deg: float
 
 
-def implied_scale(system: str) -> str | None:
-    return IMPLIED_SCALE.get(system.strip())
-
-
-def resolved_scale(system: str, scale: str | None) -> str:
-    """Scale stored on the part. A known system still stores its own scale."""
-    known = implied_scale(system)
-    typed = _typed_scale(scale)
-    if known is not None:
-        if typed is not None and typed != known:
-            raise ValidationError("error.planner.scale")
-        return known
-    if typed is None or typed not in SCALES:
-        raise ValidationError("error.planner.scale")
-    return typed
-
-
-def stored_scale(system: str, scale: str | None) -> str:
-    """The scale written on every part. It is never left empty."""
-    return resolved_scale(system, scale)
-
-
-def _typed_scale(scale: str | None) -> str | None:
-    if scale is None:
-        return None
+def require_scale(scale: str | None) -> str:
+    """One of :data:`SCALES`. Missing and unknown values are rejected."""
     if not isinstance(scale, str):
         raise ValidationError("error.planner.scale")
     text = scale.strip()
-    return text or None
+    if text not in SCALES:
+        raise ValidationError("error.planner.scale")
+    return text
 
 
-def identity_key(system: str, article_number: str, scale: str | None) -> tuple[str, str, str]:
-    """System, article number and the effective scale. No manufacturer."""
-    system_name = system.strip()
-    article = article_number.strip()
-    if not system_name or not article:
+def normalize_name(name: str) -> str:
+    """Identity form of a designation: trimmed, case folded. The stored text keeps its case."""
+    if not isinstance(name, str):
         raise ValidationError("error.planner.part")
-    return (system_name, article, resolved_scale(system_name, scale))
+    return name.strip().casefold()
+
+
+def normalize_article(article_number: str) -> str:
+    """Identity form of an article number: trimmed. Leading zeros stay."""
+    if not isinstance(article_number, str):
+        raise ValidationError("error.planner.part")
+    return article_number.strip()
+
+
+def identity_key(name: str, article_number: str) -> tuple[str, str]:
+    """Designation plus article number. Scale, category and manufacturer are not included."""
+    title = normalize_name(name)
+    article = normalize_article(article_number)
+    if not title or not article:
+        raise ValidationError("error.planner.part")
+    return (title, article)
 
 
 def normalize_deg(angle: float) -> float:
@@ -636,13 +624,13 @@ def _decode_span(raw: object) -> SlotSpan | None:
 
 
 def standard_catalog() -> tuple[PartSpec, ...]:
-    """Original Carrera Digital 132 pieces. The same definition can be placed any number of times.
+    """Carrera rails. Evolution and Digital 132 share these pieces, so each one is stored once.
 
-    Lengths, radii and angles follow the Carrera catalogue: straights 345 / 115 / 86 mm,
-    centre radii 300 / 500 / 700 / 900 mm. Packs that only repeat a piece are not a second part.
+    Identity is the designation plus the article number. The stored scale is 1:24, the scale
+    of these rails, even when 1:32 cars run on them. Lengths, radii and angles follow the
+    catalogue: straights 345 / 115 / 86 mm, centre radii 300 / 500 / 700 / 900 mm.
     """
-    system = "Carrera Digital 132"
-    scale = resolved_scale(system, None)
+    scale = CATALOG_SCALE
     specs: list[PartSpec] = []
 
     def add(spec: PartSpec) -> None:
@@ -658,20 +646,19 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         width = track_width(2)
         add(
             PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                category,
-                length,
-                width,
-                None,
-                None,
-                0.0,
-                2,
-                straight_connectors(length, 2),
-                rectangle(length, width),
-                slot_paths,
+                article_number=article,
+                scale=scale,
+                name=name,
+                category=category,
+                length_mm=length,
+                width_mm=width,
+                height_mm=None,
+                radius_mm=None,
+                angle_deg=0.0,
+                lane_count=2,
+                connectors=straight_connectors(length, 2),
+                outline=rectangle(length, width),
+                slot_paths=slot_paths,
             )
         )
 
@@ -691,25 +678,24 @@ def standard_catalog() -> tuple[PartSpec, ...]:
     pit_width = track_width(1)
     add(
         PartSpec(
-            system,
-            "20030341",
-            scale,
-            "Pitlane-Gerade",
-            PITLANE,
-            345.0,
-            pit_width,
-            None,
-            None,
-            0.0,
-            1,
-            straight_connectors(345.0, 1),
-            rectangle(345.0, pit_width),
+            article_number="20030341",
+            scale=scale,
+            name="Pitlane-Gerade",
+            category=PITLANE,
+            length_mm=345.0,
+            width_mm=pit_width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=0.0,
+            lane_count=1,
+            connectors=straight_connectors(345.0, 1),
+            outline=rectangle(345.0, pit_width),
         )
     )
-    # Carrera sells the pit entry and exit inside kit 20030356, not as their own articles.
-    # These two bodies keep that kit number with a suffix so each joint pattern is one part.
-    add(pit_end(system, "20030356-E", "Pitlane-Einfahrt", pit_side=1.0))
-    add(pit_end(system, "20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0))
+    # Entry and exit are two different bodies. The article number keeps a suffix so each
+    # joint pattern stays one part.
+    add(pit_end("20030356-E", "Pitlane-Einfahrt", pit_side=1.0))
+    add(pit_end("20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0))
 
     for article, name, radius, angle in (
         ("20020577", "Kurve R1 30°", 300.0, 30.0),
@@ -721,178 +707,74 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         width = track_width(2)
         add(
             PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                CURVE,
-                None,
-                width,
-                None,
-                radius,
-                angle,
-                2,
-                curve_connectors(radius, angle, 2),
-                arc_outline(radius, angle, width),
+                article_number=article,
+                scale=scale,
+                name=name,
+                category=CURVE,
+                length_mm=None,
+                width_mm=width,
+                height_mm=None,
+                radius_mm=radius,
+                angle_deg=angle,
+                lane_count=2,
+                connectors=curve_connectors(radius, angle, 2),
+                outline=arc_outline(radius, angle, width),
             )
         )
-    add(
-        PartSpec(
-            system,
-            "20020574",
-            scale,
-            "Steilkurve R1 30°",
-            SPECIAL,
-            None,
-            track_width(2),
-            None,
-            300.0,
-            30.0,
-            2,
-            curve_connectors(300.0, 30.0, 2),
-            arc_outline(300.0, 30.0, track_width(2)),
-        )
-    )
-    add(
-        PartSpec(
-            system,
-            "20020587",
-            scale,
-            "Kreuzung",
-            CROSSING,
-            345.0,
-            track_width(2),
-            None,
-            None,
-            90.0,
-            2,
-            crossing_connectors(345.0, 2),
-            rectangle(345.0, 345.0),
-        )
-    )
-    border_width = 40.0
-    add(
-        PartSpec(
-            system,
-            "20020560",
-            scale,
-            "Randstreifen Standardgerade",
-            BORDER,
-            345.0,
-            border_width,
-            None,
-            None,
-            0.0,
-            2,
-            straight_connectors(345.0, 2, kind=BORDER_JOINT),
-            rectangle(345.0, border_width),
-        )
-    )
-    return tuple(specs) + evolution_catalog()
-
-
-def evolution_catalog() -> tuple[PartSpec, ...]:
-    """Carrera Evolution rails. The same articles fit Digital 132; the system is separate.
-
-    Carrera sells 20020601 (two 345 mm straights) and 20020571 (three 60° curves) for
-    EVOLUTION as well as Digital 124/132. The other numbers are the same rail family
-    already measured for Digital 132: straights 345 / 115 / 86 mm and centre radii
-    300 / 500 / 700 / 900 mm. The stored scale is 1:32, the scale kept for this system.
-    """
-    system = "Carrera Evolution"
-    scale = resolved_scale(system, "1:32")
-    specs: list[PartSpec] = []
-
-    def add(spec: PartSpec) -> None:
-        specs.append(spec)
-
-    def straight(article: str, name: str, length: float) -> None:
-        width = track_width(2)
-        add(
-            PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                STRAIGHT,
-                length,
-                width,
-                None,
-                None,
-                0.0,
-                2,
-                straight_connectors(length, 2),
-                rectangle(length, width),
-            )
-        )
-
-    straight("20020601", "Standardgerade", 345.0)
-    straight("20020611", "1/3-Gerade", 115.0)
-    straight("20020612", "1/4-Gerade", 86.0)
     width = track_width(2)
-    for article, name, radius, angle in (
-        ("20020577", "Kurve R1 30°", 300.0, 30.0),
-        ("20020571", "Kurve R1 60°", 300.0, 60.0),
-        ("20020572", "Kurve R2 30°", 500.0, 30.0),
-        ("20020573", "Kurve R3 30°", 700.0, 30.0),
-        ("20020578", "Kurve R4 15°", 900.0, 15.0),
-    ):
-        add(
-            PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                CURVE,
-                None,
-                width,
-                None,
-                radius,
-                angle,
-                2,
-                curve_connectors(radius, angle, 2),
-                arc_outline(radius, angle, width),
-            )
-        )
     add(
         PartSpec(
-            system,
-            "20020587",
-            scale,
-            "Kreuzung",
-            CROSSING,
-            345.0,
-            width,
-            None,
-            None,
-            90.0,
-            2,
-            crossing_connectors(345.0, 2),
-            rectangle(345.0, 345.0),
+            article_number="20020574",
+            scale=scale,
+            name="Steilkurve R1 30°",
+            category=SPECIAL,
+            length_mm=None,
+            width_mm=width,
+            height_mm=None,
+            radius_mm=300.0,
+            angle_deg=30.0,
+            lane_count=2,
+            connectors=curve_connectors(300.0, 30.0, 2),
+            outline=arc_outline(300.0, 30.0, width),
+        )
+    )
+    add(
+        PartSpec(
+            article_number="20020587",
+            scale=scale,
+            name="Kreuzung",
+            category=CROSSING,
+            length_mm=345.0,
+            width_mm=width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=90.0,
+            lane_count=2,
+            connectors=crossing_connectors(345.0, 2),
+            outline=rectangle(345.0, 345.0),
         )
     )
     border_width = 40.0
     add(
         PartSpec(
-            system,
-            "20020560",
-            scale,
-            "Randstreifen Standardgerade",
-            BORDER,
-            345.0,
-            border_width,
-            None,
-            None,
-            0.0,
-            2,
-            straight_connectors(345.0, 2, kind=BORDER_JOINT),
-            rectangle(345.0, border_width),
+            article_number="20020560",
+            scale=scale,
+            name="Randstreifen Standardgerade",
+            category=BORDER,
+            length_mm=345.0,
+            width_mm=border_width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=0.0,
+            lane_count=2,
+            connectors=straight_connectors(345.0, 2, kind=BORDER_JOINT),
+            outline=rectangle(345.0, border_width),
         )
     )
     return tuple(specs)
 
 
-def pit_end(system: str, article: str, name: str, *, pit_side: float) -> PartSpec:
+def pit_end(article: str, name: str, *, pit_side: float) -> PartSpec:
     """Main line plus the pit spur. The spur is one lane and only fits a pit straight."""
     length = 345.0
     width = track_width(2) + track_width(1)
@@ -906,25 +788,23 @@ def pit_end(system: str, article: str, name: str, *, pit_side: float) -> PartSpe
         ConnectorSpec("pit", 0.0, side, 0.0, 90.0 if pit_side > 0 else 270.0, TRACK, pit),
     )
     return PartSpec(
-        system,
-        article,
-        resolved_scale(system, None),
-        name,
-        PITLANE,
-        length,
-        width,
-        None,
-        None,
-        0.0,
-        2,
-        connectors,
-        rectangle(length, width),
+        article_number=article,
+        scale=CATALOG_SCALE,
+        name=name,
+        category=PITLANE,
+        length_mm=length,
+        width_mm=width,
+        height_mm=None,
+        radius_mm=None,
+        angle_deg=0.0,
+        lane_count=2,
+        connectors=connectors,
+        outline=rectangle(length, width),
     )
 
 
 def build_part(
     *,
-    system: str,
     article_number: str,
     scale: str | None,
     name: str,
@@ -937,9 +817,13 @@ def build_part(
     lane_count: int,
 ) -> PartSpec:
     """A part entered in the library. Joints follow the category and the measures."""
-    system_name, article, _scale = identity_key(system, article_number, scale)
+    if not isinstance(name, str):
+        raise ValidationError("error.planner.part")
     title = name.strip()
-    if not title or category not in CATEGORIES:
+    article = normalize_article(article_number)
+    identity_key(title, article)
+    stored_scale = require_scale(scale)
+    if category not in CATEGORIES:
         raise ValidationError("error.planner.part")
     lanes = lanes_for(lane_count)
     width = track_width(len(lanes)) if width_mm is None else width_mm
@@ -976,9 +860,8 @@ def build_part(
         else:
             paths = ()
     return PartSpec(
-        system=system_name,
         article_number=article,
-        scale=stored_scale(system_name, scale),
+        scale=stored_scale,
         name=title,
         category=category,
         length_mm=length,

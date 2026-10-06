@@ -7,20 +7,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, String, UniqueConstraint, false
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from slot_racing.core.storage.base import Base
 
 
 class TrackPartDefinition(Base):
+    """One library part. Identity is the normalised name plus the article number."""
+
     __tablename__ = "track_part_definitions"
-    __table_args__ = (UniqueConstraint("system", "article_number", "scale"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    system: Mapped[str] = mapped_column(String(80))
     article_number: Mapped[str] = mapped_column(String(40))
-    # Always 1:24, 1:32 or 1:43. A known system still stores its scale. No manufacturer.
+    # Always 1:24, 1:32 or 1:43. The scale is a property, not part of the identity.
     scale: Mapped[str] = mapped_column(String(8))
     name: Mapped[str] = mapped_column(String(120))
     category: Mapped[str] = mapped_column(String(32))
@@ -70,3 +70,11 @@ class TrackPlanInstance(Base):
     is_start_straight: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # Instances that share a group id move and select together. Empty means ungrouped.
     group_id: Mapped[str | None] = mapped_column(String(40))
+
+
+Index(
+    "uq_track_part_definitions_identity",
+    func.lower(func.trim(TrackPartDefinition.name)),
+    func.trim(TrackPartDefinition.article_number),
+    unique=True,
+)

@@ -61,17 +61,12 @@ _R3 = 700.0
 _R4 = 900.0
 
 
-def _catalog(article: str, system: str = "Carrera Digital 132") -> PartSpec:
-    return next(
-        spec
-        for spec in standard_catalog()
-        if spec.article_number == article and spec.system == system
-    )
+def _catalog(article: str) -> PartSpec:
+    return next(spec for spec in standard_catalog() if spec.article_number == article)
 
 
 def _straight(length: float = 345.0) -> PartSpec:
     return build_part(
-        system="Eigenbau",
         article_number="EB-DRAW",
         scale="1:32",
         name="Gerade",
@@ -297,8 +292,8 @@ def test_a_switch_uses_its_branch_and_a_crossing_crosses(qtbot: QtBot) -> None:
 
 
 def test_pit_entry_and_exit_keep_their_identity_and_draw_a_spur() -> None:
-    entry = pit_end("Carrera Digital 132", "20030356-E", "Pitlane-Einfahrt", pit_side=1.0)
-    exit_part = pit_end("Carrera Digital 132", "20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0)
+    entry = pit_end("20030356-E", "Pitlane-Einfahrt", pit_side=1.0)
+    exit_part = pit_end("20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0)
     assert entry.article_number == "20030356-E"
     assert exit_part.article_number == "20030356-A"
     assert entry.slot_paths == ()
@@ -327,9 +322,7 @@ def test_stored_slot_paths_survive_and_empty_rows_still_derive(env: Env) -> None
     loaded = planner.library.require(switch.id).spec
     assert _branch(track_figure(loaded)).spans
     straight = next(
-        record
-        for record in planner.list_parts()
-        if record.spec.article_number == "20020601" and record.spec.system == "Carrera Digital 132"
+        record for record in planner.list_parts() if record.spec.article_number == "20020601"
     )
     plain = planner.library.require(straight.id).spec
     assert plain.slot_paths == ()

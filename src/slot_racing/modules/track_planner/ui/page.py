@@ -928,7 +928,7 @@ class PlannerPage(QWidget):
                 ]
         current = self.library.currentItem()
         current_id = None if current is None else current.data(Qt.ItemDataRole.UserRole)
-        self.library.set_records(records, self._translator)
+        self.library.set_records(records)
         if not self.library.count():
             return
         row = 0

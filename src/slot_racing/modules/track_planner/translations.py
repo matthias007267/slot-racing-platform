@@ -45,12 +45,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.lane": "Die Bahn liegt außerhalb der Strecke.",
         "error.planner.piece": "Das Streckenelement ist ungültig.",
         "error.planner.part": "Das Bauteil ist ungültig.",
-        "error.planner.part_exists": "Dieses Bauteil ist bereits in der Bibliothek.",
-        "error.planner.scale": "Der Maßstab fehlt oder passt nicht zum System.",
+        "error.planner.part_exists": (
+            "Ein Bauteil mit der Bezeichnung „{name}“ und der Artikelnummer "
+            "„{article}“ existiert bereits."
+        ),
+        "error.planner.scale": "Der Maßstab muss 1:24, 1:32 oder 1:43 sein.",
         "planner.library": "Bauteilbibliothek",
         "planner.library.add": "Bauteil hinzufügen",
         "planner.library.place": "Auf die Strecke legen",
-        "planner.field.system": "System",
         "planner.field.article": "Artikelnummer",
         "planner.field.scale": "Maßstab",
         "planner.field.name": "Bezeichnung",

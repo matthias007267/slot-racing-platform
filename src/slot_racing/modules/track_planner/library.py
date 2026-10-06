@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from slot_racing.core.errors import ValidationError
@@ -20,7 +21,7 @@ from slot_racing.modules.track_planner.parts import (
     decode_slot_paths,
     encode_slot_paths,
     identity_key,
-    resolved_scale,
+    require_scale,
     standard_catalog,
 )
 
@@ -41,61 +42,59 @@ class PartLibrary:
         The outline and the joints are left as they are.
         """
         catalog = {
-            identity_key(spec.system, spec.article_number, spec.scale): spec
-            for spec in standard_catalog()
+            identity_key(spec.name, spec.article_number): spec for spec in standard_catalog()
         }
         with self._database.session() as session:
             rows = list(session.scalars(select(TrackPartDefinition)))
-            stored = {identity_key(row.system, row.article_number, row.scale) for row in rows}
+            stored = {identity_key(row.name, row.article_number) for row in rows}
             for spec in standard_catalog():
-                key = identity_key(spec.system, spec.article_number, spec.scale)
+                key = identity_key(spec.name, spec.article_number)
                 if key not in stored:
                     self._insert(session, spec)
                     stored.add(key)
             for row in rows:
-                known = catalog.get(identity_key(row.system, row.article_number, row.scale))
+                known = catalog.get(identity_key(row.name, row.article_number))
                 if known is None or not known.slot_paths or row.slot_paths:
                     continue
                 row.slot_paths = encode_slot_paths(known.slot_paths)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
-        key = identity_key(spec.system, spec.article_number, spec.scale)
-        with self._database.session() as session:
-            for row in session.scalars(select(TrackPartDefinition)):
-                if identity_key(row.system, row.article_number, row.scale) == key:
-                    raise ValidationError("error.planner.part_exists")
-            definition = self._insert(session, spec)
-            session.flush()
-            return self._record(session, definition)
+        try:
+            with self._database.session() as session:
+                self._reject_duplicate(session, spec)
+                definition = self._insert(session, spec)
+                session.flush()
+                return self._record(session, definition)
+        except IntegrityError as error:
+            raise self._duplicate(spec) from error
 
     def update_part(self, part_id: int, spec: PartSpec) -> PartRecord:
-        key = identity_key(spec.system, spec.article_number, spec.scale)
-        with self._database.session() as session:
-            definition = session.get(TrackPartDefinition, part_id)
-            if definition is None:
-                raise ValidationError("error.planner.part")
-            for row in session.scalars(select(TrackPartDefinition)):
-                if row.id == part_id:
-                    continue
-                if identity_key(row.system, row.article_number, row.scale) == key:
-                    raise ValidationError("error.planner.part_exists")
-            definition.system = spec.system
-            definition.article_number = spec.article_number
-            definition.scale = resolved_scale(spec.system, spec.scale)
-            definition.name = spec.name
-            definition.category = spec.category
-            definition.length_mm = spec.length_mm
-            definition.width_mm = spec.width_mm
-            definition.height_mm = spec.height_mm
-            definition.radius_mm = spec.radius_mm
-            definition.angle_deg = spec.angle_deg
-            definition.lane_count = spec.lane_count
-            definition.outline = [list(point) for point in spec.outline]
-            definition.slot_paths = encode_slot_paths(spec.slot_paths)
-            session.execute(delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id))
-            self._add_connectors(session, part_id, spec)
-            session.flush()
-            return self._record(session, definition)
+        try:
+            with self._database.session() as session:
+                definition = session.get(TrackPartDefinition, part_id)
+                if definition is None:
+                    raise ValidationError("error.planner.part")
+                self._reject_duplicate(session, spec, except_id=part_id)
+                definition.article_number = spec.article_number.strip()
+                definition.scale = require_scale(spec.scale)
+                definition.name = spec.name.strip()
+                definition.category = spec.category
+                definition.length_mm = spec.length_mm
+                definition.width_mm = spec.width_mm
+                definition.height_mm = spec.height_mm
+                definition.radius_mm = spec.radius_mm
+                definition.angle_deg = spec.angle_deg
+                definition.lane_count = spec.lane_count
+                definition.outline = [list(point) for point in spec.outline]
+                definition.slot_paths = encode_slot_paths(spec.slot_paths)
+                session.execute(
+                    delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id)
+                )
+                self._add_connectors(session, part_id, spec)
+                session.flush()
+                return self._record(session, definition)
+        except IntegrityError as error:
+            raise self._duplicate(spec) from error
 
     def delete_part(self, part_id: int) -> None:
         with self._database.session() as session:
@@ -171,10 +170,9 @@ class PartLibrary:
 
     def _insert(self, session: Session, spec: PartSpec) -> TrackPartDefinition:
         definition = TrackPartDefinition(
-            system=spec.system,
-            article_number=spec.article_number,
-            scale=resolved_scale(spec.system, spec.scale),
-            name=spec.name,
+            article_number=spec.article_number.strip(),
+            scale=require_scale(spec.scale),
+            name=spec.name.strip(),
             category=spec.category,
             length_mm=spec.length_mm,
             width_mm=spec.width_mm,
@@ -213,7 +211,6 @@ class PartLibrary:
             .order_by(TrackPartConnector.sort_order, TrackPartConnector.id)
         )
         spec = PartSpec(
-            system=definition.system,
             article_number=definition.article_number,
             scale=definition.scale,
             name=definition.name,
@@ -240,3 +237,21 @@ class PartLibrary:
             slot_paths=decode_slot_paths(definition.slot_paths),
         )
         return PartRecord(definition.id, spec)
+
+    def _reject_duplicate(
+        self, session: Session, spec: PartSpec, *, except_id: int | None = None
+    ) -> None:
+        key = identity_key(spec.name, spec.article_number)
+        for row in session.scalars(select(TrackPartDefinition)):
+            if except_id is not None and row.id == except_id:
+                continue
+            if identity_key(row.name, row.article_number) == key:
+                raise self._duplicate(spec)
+
+    @staticmethod
+    def _duplicate(spec: PartSpec) -> ValidationError:
+        return ValidationError(
+            "error.planner.part_exists",
+            name=spec.name.strip(),
+            article=spec.article_number.strip(),
+        )

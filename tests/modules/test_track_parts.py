@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QLabel
 from pytestqt.qtbot import QtBot
 from sqlalchemy import text
 
@@ -43,7 +44,6 @@ from slot_racing.modules.track_planner.parts import (
     Pose,
     build_part,
     connectors_compatible,
-    implied_scale,
     lane_world_point,
     pit_end,
     rotate_xy,
@@ -61,10 +61,9 @@ from tests.modules.test_ui_management import open_page
 _ANGLES = (13.0, 37.0, 82.0, 127.0)
 
 
-def test_a_part_stores_system_article_measures_and_connectors(env: Env) -> None:
+def test_a_part_stores_name_article_measures_and_connectors(env: Env) -> None:
     planner = _planner(env)
     spec = build_part(
-        system="Eigenbau",
         article_number="EB-42",
         scale="1:24",
         name="Sondergerade",
@@ -78,7 +77,7 @@ def test_a_part_stores_system_article_measures_and_connectors(env: Env) -> None:
     )
     created = planner.add_part(spec)
     loaded = planner.library.require(created.id).spec
-    assert loaded.system == "Eigenbau"
+    assert loaded.name == "Sondergerade"
     assert loaded.article_number == "EB-42"
     assert loaded.scale == "1:24"
     assert loaded.length_mm == pytest.approx(250)
@@ -102,7 +101,6 @@ def test_a_curve_stores_radius_and_angle_without_a_length(env: Env) -> None:
     planner = _planner(env)
     created = planner.add_part(
         build_part(
-            system="Eigenbau",
             article_number="EB-R2",
             scale="1:32",
             name="Kurve",
@@ -124,10 +122,9 @@ def test_a_curve_stores_radius_and_angle_without_a_length(env: Env) -> None:
     assert loaded.connectors[0].lanes == (1, 2, 3)
 
 
-def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) -> None:
+def test_name_and_article_identify_a_part_and_scale_stays_a_property(env: Env) -> None:
     planner = _planner(env)
     known = build_part(
-        system="Carrera Digital 132",
         article_number="CUSTOM-1",
         scale="1:32",
         name="Zusatzgerade",
@@ -140,15 +137,13 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
         lane_count=2,
     )
     assert known.scale == "1:32"
-    assert implied_scale(known.system) == "1:32"
     stored = planner.add_part(known)
     assert planner.library.require(stored.id).spec.scale == "1:32"
     with pytest.raises(ValidationError) as duplicate:
         planner.add_part(known)
     assert duplicate.value.key == "error.planner.part_exists"
-    other_system = planner.add_part(
+    same_article = planner.add_part(
         build_part(
-            system="Eigenbau",
             article_number="CUSTOM-1",
             scale="1:32",
             name="Dieselbe Nummer",
@@ -161,13 +156,12 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
             lane_count=2,
         )
     )
-    assert other_system.spec.scale == "1:32"
-    other_scale = planner.add_part(
+    assert same_article.id != stored.id
+    same_name = planner.add_part(
         build_part(
-            system="Eigenbau",
-            article_number="CUSTOM-1",
+            article_number="CUSTOM-2",
             scale="1:43",
-            name="Anderer Maßstab",
+            name="Zusatzgerade",
             category=STRAIGHT,
             length_mm=200,
             width_mm=None,
@@ -177,10 +171,9 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
             lane_count=2,
         )
     )
-    assert other_scale.id != other_system.id
+    assert same_name.id != stored.id
     with pytest.raises(ValidationError) as missing:
         build_part(
-            system="Eigenbau",
             article_number="OHNE",
             scale=None,
             name="Ohne Maßstab",
@@ -193,11 +186,10 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
             lane_count=2,
         )
     assert missing.value.key == "error.planner.scale"
-    with pytest.raises(ValidationError) as conflicting:
+    with pytest.raises(ValidationError) as invalid:
         build_part(
-            system="Carrera Digital 132",
-            article_number="CUSTOM-2",
-            scale="1:24",
+            article_number="CUSTOM-3",
+            scale="1:18",
             name="Falscher Maßstab",
             category=STRAIGHT,
             length_mm=200,
@@ -207,8 +199,10 @@ def test_system_and_article_identify_a_part_and_scale_is_not_repeated(env: Env) 
             angle_deg=None,
             lane_count=2,
         )
-    assert conflicting.value.key == "error.planner.scale"
+    assert invalid.value.key == "error.planner.scale"
+    assert "system" not in TrackPartDefinition.__table__.columns
     assert "manufacturer" not in TrackPartDefinition.__table__.columns
+    assert "system" not in PartSpec.__dataclass_fields__
     assert "manufacturer" not in PartSpec.__dataclass_fields__
 
 
@@ -220,8 +214,8 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     assert straight.length_mm == pytest.approx(345)
     assert straight.radius_mm is None
     assert straight.angle_deg == pytest.approx(0)
-    assert straight.scale == "1:32"
-    assert {spec.scale for spec in by_article.values()} == {"1:32"}
+    assert straight.scale == "1:24"
+    assert {spec.scale for spec in by_article.values()} == {"1:24"}
     assert by_article["20020611"].length_mm == pytest.approx(115)
     assert by_article["20020612"].length_mm == pytest.approx(86)
     curve = by_article["20020572"]
@@ -380,7 +374,6 @@ def test_incompatible_joints_do_not_dock() -> None:
     wide = _straight_spec("wide", lanes=2, length=200)
     narrow = _straight_spec("narrow", lanes=1, length=200)
     border = build_part(
-        system="Eigenbau",
         article_number="RAND",
         scale="1:32",
         name="Rand",
@@ -393,7 +386,6 @@ def test_incompatible_joints_do_not_dock() -> None:
         lane_count=2,
     )
     support = build_part(
-        system="Eigenbau",
         article_number="STUETZE",
         scale="1:32",
         name="Stütze",
@@ -468,7 +460,7 @@ def test_a_rotated_part_keeps_lane_one_on_the_same_side() -> None:
 
 
 def test_a_pit_straight_docks_to_the_pit_spur_only() -> None:
-    entry = pit_end("Carrera Digital 132", "20030356-E", "Pitlane-Einfahrt", pit_side=1.0)
+    entry = pit_end("20030356-E", "Pitlane-Einfahrt", pit_side=1.0)
     pit = next(spec for spec in standard_catalog() if spec.article_number == "20030341")
     placed = PartInstance("entry", 1, 0.0, 0.0)
     spur = next(joint for joint in entry.connectors if joint.name == "pit")
@@ -516,8 +508,7 @@ def test_parts_and_plans_survive_reopening_the_database(tmp_path: Path) -> None:
             for record in planner.list_parts()
             if record.spec.article_number == "20020601"
         )
-        assert seeded.system == "Carrera Digital 132"
-        assert seeded.scale == "1:32"
+        assert seeded.scale == "1:24"
         loaded = planner.load(track_id)
         assert loaded.instances[0].rotation_z_deg == pytest.approx(82)
         assert loaded.instances[0].part_id == part_id
@@ -540,9 +531,7 @@ def test_backup_restores_the_library_and_the_plan(tmp_path: Path) -> None:
         tracks = source.services.get(TrackService)
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Heim", lane_count=3))
-        part = planner.add_part(
-            _straight_spec("EB-BACK", lanes=3, length=200, scale="1:43", system="Eigenbau")
-        )
+        part = planner.add_part(_straight_spec("EB-BACK", lanes=3, length=200, scale="1:43"))
         catalog = {part.id: part.spec}
         plan = set_plan_grid(empty_plan(track.id), enabled=False, grid_mm=10, snap_mm=30)
         plan = place_instance(plan, part.id, part.spec, 15, 25, 127, catalog)
@@ -573,14 +562,13 @@ def test_backup_restores_the_library_and_the_plan(tmp_path: Path) -> None:
         restored = next(
             record for record in planner.list_parts() if record.spec.article_number == article
         )
-        assert restored.spec.system == "Eigenbau"
         assert restored.spec.scale == "1:43"
         seeded = next(
             record.spec
             for record in planner.list_parts()
             if record.spec.article_number == "20020601"
         )
-        assert seeded.scale == "1:32"
+        assert seeded.scale == "1:24"
         assert restored.spec.lane_count == 3
         assert restored.spec.length_mm == pytest.approx(200)
         assert len(restored.spec.connectors) == 2
@@ -603,10 +591,6 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     planner = _planner(env)
     dialog = PartDialog(env.runtime.translator, planner)
     qtbot.addWidget(dialog)
-    dialog.system.setCurrentText("Carrera Digital 132")
-    assert not dialog.scale.isEnabled()
-    assert dialog.scale.currentData() == "1:32"
-    dialog.system.setCurrentText("Eigenbau")
     assert dialog.scale.isEnabled()
     dialog.article.setText("EB-DLG")
     dialog.scale.setCurrentIndex(dialog.scale.findData("1:43"))
@@ -653,10 +637,9 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     carrera.length.setValue(200)
     carrera.accept()
     assert carrera.created is not None
-    assert carrera.created.system == "Carrera Digital 132"
-    assert carrera.created.scale == "1:32"
+    assert carrera.created.scale == "1:24"
     saved = next(record for record in planner.list_parts() if record.spec.article_number == "20577")
-    assert saved.spec.scale == "1:32"
+    assert saved.spec.scale == "1:24"
 
 
 def test_every_scale_is_stored_and_an_invalid_scale_is_rejected(env: Env) -> None:
@@ -666,40 +649,32 @@ def test_every_scale_is_stored_and_an_invalid_scale_is_rejected(env: Env) -> Non
         loaded = planner.library.require(created.id).spec
         assert created.spec.scale == scale
         assert loaded.scale == scale
-        assert loaded.system == "Eigenbau"
     for scale in ("1:18", "1:64", "32", ""):
         with pytest.raises(ValidationError) as caught:
             _straight_spec(f"EB-{scale}", lanes=2, scale=scale)
         assert caught.value.key == "error.planner.scale"
 
 
-def test_carrera_systems_store_their_scale_explicitly(env: Env) -> None:
-    planner = _planner(env)
-    systems = (
-        ("Carrera Digital 132", "1:32"),
-        ("Carrera Digital 124", "1:24"),
-        ("Carrera Evolution", "1:32"),
-        ("Carrera GO!!!", "1:43"),
-    )
-    for system, scale in systems:
-        omitted = _straight_spec("20599", lanes=2, scale=None, system=system)
-        explicit = _straight_spec("20598", lanes=2, scale=scale, system=system)
-        assert omitted.scale == scale
-        assert explicit.scale == scale
-        stored = planner.add_part(omitted)
-        assert planner.library.require(stored.id).spec.scale == scale
-    again = _straight_spec("20599", lanes=2, scale=None, system="Carrera Digital 132")
-    with pytest.raises(ValidationError) as caught:
-        planner.add_part(again)
-    assert caught.value.key == "error.planner.part_exists"
+def test_the_identity_index_is_the_normalised_name_and_article(env: Env) -> None:
     with env.runtime.database.engine.connect() as connection:
-        sql = connection.execute(
+        indexes = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'track_part_definitions'"
+            )
+        ).scalars()
+        table = connection.execute(
             text(
                 "SELECT sql FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'track_part_definitions'"
             )
         ).scalar_one()
-    assert "uq_track_part_definitions_system_article_number_scale" in str(sql)
+    combined = " ".join(str(sql) for sql in indexes)
+    assert "uq_track_part_definitions_identity" in combined
+    assert "lower(trim(name))" in combined
+    assert "trim(article_number)" in combined
+    assert "system" not in str(table)
+    assert "uq_track_part_definitions_system_article_number_scale" not in str(table)
 
 
 def _straight_spec(
@@ -708,10 +683,8 @@ def _straight_spec(
     lanes: int,
     length: float = 200,
     scale: str | None = "1:32",
-    system: str = "Eigenbau",
 ) -> PartSpec:
     return build_part(
-        system=system,
         article_number=article,
         scale=scale,
         name=article,
@@ -744,6 +717,8 @@ def _select(page: PlannerPage, track_id: TrackId) -> None:
 def _library_row(page: PlannerPage, article: str) -> int:
     for row in range(page.library.count()):
         item = page.library.item(row)
-        if item is not None and article in item.text():
+        card = None if item is None else page.library.itemWidget(item)
+        label = None if card is None else card.findChild(QLabel, "planner-part-article")
+        if label is not None and article in label.text():
             return row
     raise AssertionError(article)
