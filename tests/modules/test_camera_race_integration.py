@@ -872,7 +872,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
     live.show()
     try:
         live.show_runner(runner)
-        assert not live.cue_label.isVisible()
+        assert not live.start_lights.isVisible()
         assert live.findChildren(CameraStage) == []
         device = hub.live()
         consume(device, blank())
@@ -1002,22 +1002,25 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
     try:
         live.show()
         live.open_for_start(runner)
-        assert live.cue_label.text() == "3"
-        assert live.cue_label.isVisible()
+        assert live.start_lights.lit_lights == 1
+        assert live.start_lights.isVisible()
+        assert not live.start_lights.showing_go
         assert runner.status is RaceStatus.CREATED
         assert not any(device.opened for device in hub.created)
         env.clock.advance(5_000_000_000)
         live.refresh()
         assert runner.snapshot().elapsed_ns == 0
         assert of_type(events, LapCompleted) == []
+        for lit in (2, 3, 4, 5):
+            live.advance_start_cue()
+            assert live.start_lights.lit_lights == lit
+            assert runner.status is RaceStatus.CREATED
+            assert runner.snapshot().elapsed_ns == 0
+            assert of_type(events, LapCompleted) == []
         live.advance_start_cue()
-        assert live.cue_label.text() == "2"
-        assert runner.status is RaceStatus.CREATED
-        live.advance_start_cue()
-        assert live.cue_label.text() == "1"
-        assert runner.status is RaceStatus.CREATED
-        live.advance_start_cue()
-        assert live.cue_label.text() == "GO"
+        assert live.start_lights.lit_lights == 0
+        assert live.start_lights.showing_go
+        assert live.start_lights.isVisible()
         assert engine_status(runner) is RaceStatus.RUNNING
         env.clock.advance(2_000_000_000)
         live.refresh()
@@ -1030,6 +1033,8 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
         assert runner.snapshot().source_errors == ()
         assert of_type(events, LapCompleted)
         assert live.findChildren(CameraStage) == []
+        live.advance_start_cue()
+        assert not live.start_lights.isVisible()
     finally:
         live.advance_start_cue()
         runner.close()
@@ -1056,8 +1061,9 @@ def test_the_races_page_counts_down_only_for_a_camera_race(qtbot: QtBot, env: En
     try:
         assert page.start_race(race_id)
         assert page.stack.currentWidget() is page.live
-        assert page.live.cue_label.text() == "3"
-        assert page.live.cue_label.isVisible()
+        assert page.live.start_lights.lit_lights == 1
+        assert page.live.start_lights.isVisible()
+        assert not page.live.start_lights.showing_go
         active = env.controller.active
         assert active is not None
         assert active.status is RaceStatus.CREATED
@@ -1165,3 +1171,139 @@ def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) 
         assert env.races.require_race(race_id).status is RaceStatus.ABORTED
     finally:
         again.close()
+
+
+def test_hiding_the_live_view_during_the_lights_does_not_start_the_race(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 40
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    live.open_for_start(runner)
+    live.advance_start_cue()
+    assert live.start_lights.lit_lights == 2
+    live.hide()
+    qtbot.wait(400)
+    assert engine_status(runner) is RaceStatus.CREATED
+    assert runner.snapshot().elapsed_ns == 0
+    assert not live.start_lights.isVisible()
+    assert not any(device.opened for device in hub.created)
+    live.show()
+    live.open_for_start(runner)
+    assert live.start_lights.lit_lights == 1
+    assert not live.start_lights.showing_go
+    assert engine_status(runner) is RaceStatus.CREATED
+    runner.close()
+
+
+def test_closing_the_live_view_during_the_lights_does_not_start_the_race(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1, name="Schließen")
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 40
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    live.open_for_start(runner)
+    live.close()
+    qtbot.wait(400)
+    assert engine_status(runner) is RaceStatus.CREATED
+    assert not any(device.opened for device in hub.created)
+    live.deleteLater()
+    qtbot.wait(50)
+    runner.close()
+
+
+def test_a_restarted_camera_race_begins_on_the_first_lamp(qtbot: QtBot, env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1, name="Neu")
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 60_000
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    try:
+        live.open_for_start(runner)
+        for _ in range(5):
+            live.advance_start_cue()
+        assert live.start_lights.showing_go
+        assert engine_status(runner) is RaceStatus.RUNNING
+        runner.stop()
+        assert runner.snapshot().aborted
+        restarted = env.races.restart_aborted(race_id)
+        again = env.controller.prepare_race(restarted.id)
+        live.open_for_start(again)
+        assert live.start_lights.lit_lights == 1
+        assert not live.start_lights.showing_go
+        assert engine_status(again) is RaceStatus.CREATED
+        assert env.races.require_race(race_id).status is RaceStatus.ABORTED
+        for lit in (2, 3, 4, 5):
+            live.advance_start_cue()
+            assert live.start_lights.lit_lights == lit
+            assert engine_status(again) is RaceStatus.CREATED
+        live.advance_start_cue()
+        assert live.start_lights.showing_go
+        assert live.start_lights.lit_lights == 0
+        assert engine_status(again) is RaceStatus.RUNNING
+    finally:
+        if env.controller.active is not None:
+            env.controller.active.close()
+
+
+def test_lap_and_time_trial_races_both_wait_for_the_lights_to_go_out(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 60_000
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    live.show()
+    lap_id, _track = create_camera_race(env, lanes=1, name="Runden")
+    track = env.track(name="Zeit", lanes=2)
+    save_layout(env, track.id, ("start_finish",))
+    open_trial = env.races.create_time_trial("Offen", track.id, "camera")
+    timed = env.races.create_time_trial("Dauer", track.id, "camera", duration_minutes=12)
+    for race_id in (open_trial.id, timed.id):
+        driver_id, vehicle_id = env.pair(1)
+        env.races.add_participant(race_id, driver_id, vehicle_id, 1)
+    try:
+        for race_id in (lap_id, open_trial.id, timed.id):
+            runner = env.controller.prepare_race(race_id)
+            live.open_for_start(runner)
+            assert live.start_lights.lit_lights == 1
+            assert engine_status(runner) is RaceStatus.CREATED
+            assert runner.snapshot().elapsed_ns == 0
+            for lit in (2, 3, 4, 5):
+                live.advance_start_cue()
+                assert live.start_lights.lit_lights == lit
+                assert engine_status(runner) is RaceStatus.CREATED
+            live.advance_start_cue()
+            assert live.start_lights.showing_go
+            assert engine_status(runner) is RaceStatus.RUNNING
+            if race_id == timed.id:
+                runner.tick()
+                assert engine_status(runner) is RaceStatus.RUNNING
+            runner.stop()
+            runner.close()
+            live.advance_start_cue()
+            assert not live.start_lights.isVisible()
+    finally:
+        if env.controller.active is not None:
+            env.controller.active.close()

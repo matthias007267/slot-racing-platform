@@ -1,14 +1,18 @@
-"""Visible start sequence for a camera race.
+"""Start sequence for a camera race.
 
 The cue only decides when to ask the race to start. The race engine still owns
-the clock and the first lap. A later start-light animation can replace the
-labels below without calling into the engine itself.
+the clock and the first lap. The start-light widget only draws the step this
+cue publishes. It does not start the race.
 
-The three moments stay separate:
+The moments stay separate:
 
-* ``counting`` — 3, 2, 1. The race clock is not running.
-* ``start_signal`` — GO. This is the moment the race is started.
+* ``counting`` — one more red light. The race clock is not running.
+* ``start_signal`` — every light goes out. This is the moment the race starts.
 * the race is then ``running``, which is the engine's own status.
+
+Each step carries ``sound_id`` (``light-1`` … ``light-5``, then ``go``). A later
+sound player can listen to :attr:`StartCue.changed` and use that id. This module
+does not play audio.
 """
 
 from __future__ import annotations
@@ -31,20 +35,37 @@ class StartPhase(StrEnum):
     START_SIGNAL = "start_signal"
 
 
+# Five red lights, one second apart. The race starts when they go out, so the
+# wait is five seconds. That replaces the old three-second 3-2-1, it is not
+# added on top of it.
+START_LIGHT_COUNT = 5
+
+
 @dataclass(frozen=True, slots=True)
 class StartCueStep:
-    """One beat of the sequence. ``label`` is what the current display shows."""
+    """One beat of the sequence.
+
+    ``lit_lights`` is how many red lamps are on, from the left. Zero with
+    :attr:`StartPhase.START_SIGNAL` is the lights-out start. ``sound_id`` names
+    the beat for a future sound, and is not played here.
+    """
 
     phase: StartPhase
-    label: str
+    lit_lights: int
+    sound_id: str
 
 
-DEFAULT_START_STEPS: tuple[StartCueStep, ...] = (
-    StartCueStep(StartPhase.COUNTING, "3"),
-    StartCueStep(StartPhase.COUNTING, "2"),
-    StartCueStep(StartPhase.COUNTING, "1"),
-    StartCueStep(StartPhase.START_SIGNAL, "GO"),
-)
+def _light_steps(count: int = START_LIGHT_COUNT) -> tuple[StartCueStep, ...]:
+    if count < 1:
+        raise ValueError("a start light needs at least one lamp")
+    counting = [
+        StartCueStep(StartPhase.COUNTING, lit, f"light-{lit}") for lit in range(1, count + 1)
+    ]
+    counting.append(StartCueStep(StartPhase.START_SIGNAL, 0, "go"))
+    return tuple(counting)
+
+
+DEFAULT_START_STEPS: tuple[StartCueStep, ...] = _light_steps()
 
 
 def uses_start_cue(timing_provider: str) -> bool:
@@ -53,9 +74,10 @@ def uses_start_cue(timing_provider: str) -> bool:
 
 
 class StartCue(QObject):
-    """Steps through the sequence and starts the race only on the start signal.
+    """Steps through the lights and starts the race only when they go out.
 
-    ``on_start`` is the existing race start. It is not called for 3, 2 or 1.
+    ``on_start`` is the existing race start. It is not called while a red light
+    is coming on.
     """
 
     changed = Signal(object)
@@ -74,6 +96,11 @@ class StartCue(QObject):
             raise ValueError("a start cue needs at least one step")
         if interval_ms < 0:
             raise ValueError("interval_ms must not be negative")
+        for step in steps:
+            if step.lit_lights < 0 or step.lit_lights > START_LIGHT_COUNT:
+                raise ValueError("a start step can light at most five lamps")
+            if step.phase is StartPhase.START_SIGNAL and step.lit_lights != 0:
+                raise ValueError("the start signal shows every light off")
         self._on_start = on_start
         self._steps = steps
         self._index = -1

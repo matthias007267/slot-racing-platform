@@ -171,8 +171,9 @@ def test_a_valid_camera_provider_starts_the_race(qtbot: QtBot, env: Env) -> None
     assert isinstance(page.current_view(), LiveRaceView)
     race = wizard.race
     assert race is not None
-    assert page.live.cue_label.text() == "3"
-    assert not page.live.cue_label.isHidden()
+    assert page.live.start_lights.lit_lights == 1
+    assert not page.live.start_lights.showing_go
+    assert not page.live.start_lights.isHidden()
     assert env.races.require_race(race.id).status is RaceStatus.READY
     qtbot.waitUntil(
         lambda: env.races.require_race(race.id).status is RaceStatus.RUNNING,
@@ -196,3 +197,4 @@ def test_a_race_with_the_simulation_still_starts_through_the_ui(qtbot: QtBot, en
     assert race is not None
     assert env.races.require_race(race.id).status is RaceStatus.RUNNING
     assert env.races.require_race(race.id).timing_provider == "simulation"
+    assert not page.live.start_lights.isVisible()
