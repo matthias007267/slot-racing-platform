@@ -59,6 +59,7 @@ from slot_racing.modules.track_planner.document import (
     set_start_straight,
     toggle_group,
 )
+from slot_racing.modules.track_planner.lane_length import display_lane_lengths, format_length_m
 from slot_racing.modules.track_planner.parts import (
     SCALES,
     STRAIGHT,
@@ -249,6 +250,16 @@ class PlannerPage(QWidget):
         properties.addRow(self.grid)
         properties.addRow(translate("planner.field.grid_size"), self.grid_size)
         properties.addRow(translate("planner.field.snap"), self.snap_distance)
+        self.length_title = QLabel(translate("planner.length.title"))
+        self.length_title.setObjectName("planner-length-title")
+        set_role(self.length_title, "section")
+        self.length_body = QLabel("")
+        self.length_body.setObjectName("planner-length")
+        self.length_body.setWordWrap(True)
+        self.length_title.hide()
+        self.length_body.hide()
+        properties.addRow(self.length_title)
+        properties.addRow(self.length_body)
         for retired in (
             self.add_horizontal,
             self.add_vertical,
@@ -715,6 +726,27 @@ class PlannerPage(QWidget):
         one = isinstance(selected, PartInstance) and len(self.canvas.selected_ids()) == 1
         self.compatible.setEnabled(one)
         self._apply_filters()
+        self._show_lengths()
+
+    def _show_lengths(self) -> None:
+        """Refresh the side-panel lengths from the current plan. The canvas is not involved."""
+        rows = display_lane_lengths(self._plan.instances, self._parts)
+        if not rows:
+            self.length_title.hide()
+            self.length_body.hide()
+            self.length_body.setText("")
+            return
+        lines = [
+            self._translator.format(
+                "planner.length.lane",
+                lane=row.lane,
+                length=format_length_m(row.length_mm),
+            )
+            for row in rows
+        ]
+        self.length_body.setText("\n".join(lines))
+        self.length_title.show()
+        self.length_body.show()
 
     def _draw(self, selected: str | set[str] | list[str] | None = None) -> None:
         chosen = set(selected) if isinstance(selected, list) else selected

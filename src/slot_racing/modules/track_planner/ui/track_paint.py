@@ -85,8 +85,9 @@ def paint_figure(
     _fill(painter, drawn.roadway, fill)
     _fill(painter, drawn.inner_shoulder, SHOULDER)
     _stroke(painter, drawn.edges, ROADWAY_EDGE, EDGE_WIDTH_MM, round_cap=False)
-    _stroke(painter, drawn.slots, SLOT_RIM, SLOT_RIM_MM, round_cap=True)
-    _stroke(painter, drawn.slots, SLOT_CORE, SLOT_CORE_MM, round_cap=True)
+    # Flat caps end on the span point. A round cap would stick out by half the stroke.
+    _stroke(painter, drawn.slots, SLOT_RIM, SLOT_RIM_MM, round_cap=False)
+    _stroke(painter, drawn.slots, SLOT_CORE, SLOT_CORE_MM, round_cap=False)
     _stroke(painter, drawn.centers, CENTER_LINE, CENTER_WIDTH_MM, round_cap=False)
     if start_straight and part_width > 0.0:
         _start_line(painter, part_width)
