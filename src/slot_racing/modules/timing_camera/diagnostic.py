@@ -34,7 +34,16 @@ MAX_LOG_LINES = 12_000
 _MAX_MAP_CELLS = 512
 _MAX_MAP_ROWS = 40
 _MAX_MAP_COLS = 64
-_IDLE_REASONS = frozenset({"clear", "calibrated", "released", "synchronized_clear"})
+_IDLE_REASONS = frozenset(
+    {
+        "clear",
+        "calibrated",
+        "released",
+        "released_to_background",
+        "background_adapting",
+        "synchronized_clear",
+    }
+)
 Phase = Literal["initializing", "ready"]
 
 
@@ -42,6 +51,7 @@ class DiagnosticView(StrEnum):
     """Which real matrix the preview shows. The pixels are not reinterpreted."""
 
     ANALYSIS = "analysis"
+    REFERENCE = "reference"
     DIFFERENCE = "difference"
     THRESHOLD = "threshold"
     ZONES = "zones"
@@ -237,7 +247,7 @@ def format_header(config: DiagnosticConfig) -> str:
         "Actual FPS: waiting",
         "",
         "Detection:",
-        "Algorithm: directional block difference against a fixed reference",
+        "Algorithm: directional block difference against an adaptive background reference",
         f"Requested block size: {config.block_size}",
         "Processing: per-zone crop, then mean of each full block; partial tiles dropped",
         f"Zone count: {len(config.zones)}",
@@ -319,6 +329,10 @@ def format_live(snapshot: DiagnosticSnapshot) -> str:
                 f"Direction: {zone.direction.value}",
                 f"Event: {'yes' if zone.accepted else 'no'}",
                 f"Reason: {zone.reason}",
+                f"Reference frozen: {'yes' if zone.reference_frozen else 'no'}",
+                f"Reference updates: {zone.reference_updates}",
+                f"Background stable: {'yes' if zone.background_stable else 'no'}",
+                f"Release candidate: {'yes' if zone.release_candidate else 'no'}",
             ]
         )
     return "\n".join(lines)
@@ -813,6 +827,10 @@ class DiagnosticSession:
                     f"direction={zone.direction.value}",
                     f"event={'true' if zone.accepted else 'false'}",
                     f"reason={zone.reason}",
+                    f"reference_frozen={'true' if zone.reference_frozen else 'false'}",
+                    f"reference_updates={zone.reference_updates}",
+                    f"background_stable={'true' if zone.background_stable else 'false'}",
+                    f"release_candidate={'true' if zone.release_candidate else 'false'}",
                 ]
             )
         )
@@ -967,6 +985,10 @@ def _zone_line(number: int, zone: ZoneInspection) -> str:
             f"direction={zone.direction.value}",
             f"event={'true' if zone.accepted else 'false'}",
             f"reason={zone.reason}",
+            f"reference_frozen={'true' if zone.reference_frozen else 'false'}",
+            f"reference_updates={zone.reference_updates}",
+            f"background_stable={'true' if zone.background_stable else 'false'}",
+            f"release_candidate={'true' if zone.release_candidate else 'false'}",
         ]
     )
 
@@ -1039,6 +1061,8 @@ def _view_grid(zone: ZoneInspection, view: DiagnosticView) -> np.ndarray:
                 grid[row, col] = 255 if zone.active[row][col] else 0
             elif view is DiagnosticView.DIFFERENCE:
                 grid[row, col] = _clip_u8(zone.difference[row][col])
+            elif view is DiagnosticView.REFERENCE:
+                grid[row, col] = _clip_u8(zone.reference[row][col])
             else:
                 grid[row, col] = _clip_u8(zone.analysis[row][col])
     return grid
