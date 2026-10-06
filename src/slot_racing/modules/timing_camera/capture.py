@@ -1,31 +1,38 @@
-"""Capture thread and the bounded queue between the camera and ``poll``.
+"""Capture thread and the latest-frame slot between the camera and detection.
 
 The thread only reads pictures. It does not detect cars, publish events or
 touch the UI. The host monotonic clock is read immediately after a frame
-returns, because ``poll`` may run much later:
+returns:
 
 ```text
 read frame
     ↓
 perf_counter_ns()
     ↓
-queue
+latest-frame slot (an unread frame is replaced)
     ↓
-poll() keeps that timestamp
+detection worker, or poll_latest for the setup preview
 ```
 
-The live view asks for events about every 100 ms. A timing path should not fall
-seconds behind, so the queue keeps only the newest frames (:data:`MAX_QUEUED_FRAMES`).
-When it is full the oldest frame is dropped and the new one is kept. ``poll``
-handles at most :data:`MAX_FRAMES_PER_POLL` frames, which is one poll interval
-at the requested camera rate plus a little catch-up.
+``put`` never waits. A newer picture replaces one the consumer has not taken,
+so a slow consumer skips ahead instead of walking through old frames. There is
+no backlog and no backpressure on the camera.
+
+``open`` and ``close`` run on the caller. For a race that caller is the GUI
+thread: a driver that stalls inside ``open`` or ``close`` freezes the window
+even though ``read`` itself blocks only on the capture thread. ``stop`` then
+joins that thread for at most two seconds. The synchronous ``open`` stays,
+because a missing camera has to fail the race start before the session is
+running. ``read`` is not moved onto the GUI thread.
+
+Host-driven sources that have no capture thread still deliver frames through
+``poll``, at most :data:`MAX_FRAMES_PER_POLL` per call.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections import deque
 from typing import Protocol
 
 from slot_racing.modules.timing_camera._checks import require_range
@@ -34,11 +41,11 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 
-# Newest frames only. Two pictures are enough for the next 100 ms poll to see
-# the latest grab without walking through a backlog.
-MAX_QUEUED_FRAMES = 2
-# 30 fps over a 100 ms poll is about three frames. Four leaves a little catch-up
-# and still returns control to the host quickly.
+# One unread frame. A second arrival replaces it. A deeper slot would keep
+# pictures the detector is already too late to use.
+MAX_QUEUED_FRAMES = 1
+# Host-driven sources (tests, manual frames) still have no worker. One poll
+# handles a few of their frames and then returns.
 MAX_FRAMES_PER_POLL = 4
 DEFAULT_READ_FAILURES = 3
 
@@ -68,49 +75,83 @@ class CaptureDevice(Protocol):
         """Release the device. Safe to call more than once."""
 
 
-class FrameQueue:
-    """A small queue that drops the oldest frame when a newer one arrives full.
+class LatestFrameBuffer:
+    """At most one unread frame. ``put`` replaces it and never blocks.
 
-    Low latency wins over delivering every picture. The grab timestamp on a
-    frame is never rewritten.
+    The grab timestamp on a frame is never rewritten. ``wait`` blocks until a
+    frame is published or ``stop`` is set. It is the detection worker's wakeup,
+    not a timer. A frame taken by ``wait`` stays in flight until :meth:`ack`,
+    so a caller can see that detection has not caught up yet.
     """
 
-    def __init__(self, capacity: int) -> None:
-        require_range("capacity", capacity, 1)
-        self._capacity = capacity
-        self._items: deque[TimedFrame] = deque()
-        self._lock = threading.Lock()
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._frame: TimedFrame | None = None
+        self._in_flight = False
         self.dropped = 0
 
     def put(self, frame: TimedFrame) -> None:
-        with self._lock:
-            while len(self._items) >= self._capacity:
-                self._items.popleft()
+        with self._cond:
+            if self._frame is not None:
                 self.dropped += 1
-            self._items.append(frame)
+            self._frame = frame
+            self._cond.notify_all()
 
     def take(self) -> TimedFrame | None:
-        with self._lock:
-            if not self._items:
+        """The unread frame, if there is one. Does not wait and is not in flight."""
+        with self._cond:
+            frame = self._frame
+            self._frame = None
+            return frame
+
+    def wait(self, stop: threading.Event) -> TimedFrame | None:
+        """Block until the newest unread frame is available, or ``stop`` is set.
+
+        A frame that arrives after ``stop`` is left unread. Detection does not
+        start it.
+        """
+        with self._cond:
+            while self._frame is None and not stop.is_set():
+                self._cond.wait()
+            if stop.is_set():
                 return None
-            return self._items.popleft()
+            frame = self._frame
+            self._frame = None
+            self._in_flight = True
+            return frame
+
+    def ack(self) -> None:
+        """Detection finished the frame taken by :meth:`wait`."""
+        with self._cond:
+            self._in_flight = False
 
     def clear(self) -> None:
-        with self._lock:
-            self._items.clear()
+        with self._cond:
+            self._frame = None
+            self._cond.notify_all()
+
+    def wake(self) -> None:
+        """Unblock :meth:`wait`. Used when capture fails or detection stops."""
+        with self._cond:
+            self._cond.notify_all()
+
+    def idle(self) -> bool:
+        """True when nothing is unread and nothing is still being detected."""
+        with self._cond:
+            return self._frame is None and not self._in_flight
 
     def __len__(self) -> int:
-        with self._lock:
-            return len(self._items)
+        with self._cond:
+            return 0 if self._frame is None else 1
 
 
 class CameraFrameSource(FrameSource):
-    """Reads a :class:`CaptureDevice` on its own thread and queues grayscale frames.
+    """Reads a :class:`CaptureDevice` on its own thread and keeps the latest frame.
 
     During a pause the thread keeps reading, so the camera buffer stays current,
-    but those frames are not queued. ``resume`` also drops anything still queued
-    and asks the timing source to resynchronize the detector: a car that is
-    already standing in a zone must not become a crossing.
+    but those frames are not published. ``resume`` also drops anything still
+    unread and asks the timing source to resynchronize the detector: a car that
+    is already standing in a zone must not become a crossing.
     """
 
     def __init__(
@@ -127,7 +168,10 @@ class CameraFrameSource(FrameSource):
         if lease is not None and not isinstance(lease, CameraLease):
             raise TypeError("lease must be a CameraLease")
         self._device = device
-        self._queue = FrameQueue(queue_size)
+        # Callers may still pass a size. The slot stays one frame either way:
+        # a larger buffer would hold pictures detection is already too late for.
+        require_range("queue_size", queue_size, 1)
+        self._queue = LatestFrameBuffer()
         self._max_read_failures = require_range("max_read_failures", max_read_failures, 1)
         self._lease = lease
         self._lease_owner = lease_owner
@@ -245,14 +289,37 @@ class CameraFrameSource(FrameSource):
         self.check()
         if not self._running or self._paused:
             return None
-        while True:
-            frame = self._queue.take()
-            if frame is None:
-                return None
-            resume_ns = self._resume_ns
-            if resume_ns is not None and frame.timestamp_ns < resume_ns:
-                continue
-            return frame
+        frame = self._queue.take()
+        if frame is None:
+            return None
+        resume_ns = self._resume_ns
+        if resume_ns is not None and frame.timestamp_ns < resume_ns:
+            return None
+        return frame
+
+    def wait_frame(self, stop: threading.Event) -> TimedFrame | None:
+        """Block until the newest frame is available, or ``stop`` is set.
+
+        The detection worker uses this. It does not sleep on a timer. A frame
+        taken here stays in flight until :meth:`ack_frame`.
+        """
+        return self._queue.wait(stop)
+
+    def ack_frame(self) -> None:
+        """The worker finished the frame from :meth:`wait_frame`."""
+        self._queue.ack()
+
+    def clear_unread(self) -> None:
+        """Drop a frame nobody has started detecting."""
+        self._queue.clear()
+
+    def wake(self) -> None:
+        """Unblock a worker waiting in :meth:`wait_frame`."""
+        self._queue.wake()
+
+    def detection_idle(self) -> bool:
+        """True when the latest slot is empty and no waited frame is in flight."""
+        return self._queue.idle()
 
     def _run(self) -> None:
         failures = 0
@@ -298,6 +365,7 @@ class CameraFrameSource(FrameSource):
             if self._error is None:
                 self._error = error
         self._device.close()
+        self._queue.wake()
 
 
 # A crop delivery has no full picture. The carrier is not scanned.

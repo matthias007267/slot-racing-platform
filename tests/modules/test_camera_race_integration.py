@@ -175,7 +175,7 @@ def cross(
     width: int = WIDTH,
     height: int = HEIGHT,
 ) -> None:
-    """Queue a left-to-right pass of whole tiles. Both frames fit the queue of two.
+    """Queue a left-to-right pass of whole tiles, one frame at a time.
 
     The painted group is large enough for the default sensitivity and then
     shifts by one tile, so a half-zone that still covers the same blocks is
@@ -204,6 +204,21 @@ def camera_threads() -> list[threading.Thread]:
         for thread in threading.enumerate()
         if thread.name == "slot-racing-camera" and thread.is_alive()
     ]
+
+
+def drive(runner: RaceRunner) -> None:
+    """Wait until camera detection has finished, then forward its events.
+
+    The worker detects without this call. ``tick`` only delivers crossings that
+    are already stored, on the test thread, the same way the live view does.
+    """
+    engine = getattr(runner, "_engine", None)
+    sources = () if engine is None else getattr(engine, "_sources", ())
+    for source in sources:
+        caught_up = getattr(source, "caught_up", None)
+        if callable(caught_up):
+            wait_until(caught_up, "camera detection did not catch up")
+    runner.tick()
 
 
 def wait_until(predicate: Callable[[], bool], message: str) -> None:
@@ -237,6 +252,9 @@ def consume(device: SyncCapture, frame: GrayFrame) -> None:
         lambda: device.reads > reads and device.entry_count() > entries,
         f"capture missed the frame (reads={device.reads}, entries={device.entry_count()})",
     )
+    # The capture thread has published this frame and is blocked in the next
+    # read. Detection has to take it before the next push replaces it.
+    time.sleep(0.02)
 
 
 def save_document(
@@ -333,17 +351,17 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
 
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         consume(device, painted((CAR_OUTSIDE,)))
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         before = time.perf_counter_ns()
         cross(device, zone_rect(ZONE_X))
         after_capture = time.perf_counter_ns()
-        runner.tick()
+        drive(runner)
 
         triggered = of_type(events, SensorTriggered)
         assert triggered == [
@@ -387,7 +405,7 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
     try:
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         save_document(
             env,
             (zone("start_finish", 1, x=0.0),),
@@ -396,11 +414,11 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
         assert CameraConfigurationStore(env.runtime.database).load().camera.device_index == 9
 
         consume(device, painted((CAR_OUTSIDE,)))
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         cross(device, zone_rect(ZONE_X))
-        runner.tick()
+        drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert [event.position_id for event in triggered] == ["start_finish"]
         assert runner.status is RaceStatus.FINISHED
@@ -418,9 +436,9 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
     try:
         device = first_hub.live()
         consume(device, blank())
-        first.tick()
+        drive(first)
         cross(device, zone_rect(ZONE_X))
-        first.tick()
+        drive(first)
         assert len(of_type(first_events, LapCompleted)) == 1
     finally:
         first.close()
@@ -442,12 +460,12 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
         }
         device = second_hub.live()
         consume(device, blank())
-        second.tick()
+        drive(second)
         consume(device, painted((CAR_IN_ZONE,)))
-        second.tick()
+        drive(second)
         assert of_type(second_events, SensorTriggered) == []
         cross(device, zone_rect(0.0))
-        second.tick()
+        drive(second)
         triggered = of_type(second_events, SensorTriggered)
         assert [(event.position_id, event.lane, event.sensor_id) for event in triggered] == [
             ("start_finish", 1, "sensor-start_finish")
@@ -474,11 +492,11 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
     try:
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         before = time.perf_counter_ns()
         cross(device, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50))
         after_capture = time.perf_counter_ns()
-        runner.tick()
+        drive(runner)
 
         triggered = of_type(events, SensorTriggered)
         reported = [
@@ -526,11 +544,11 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
     try:
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         before = time.perf_counter_ns()
         cross(device, zone_rect(ZONE_X), zone_rect(0.50), zone_rect(0.80))
         after_capture = time.perf_counter_ns()
-        runner.tick()
+        drive(runner)
 
         triggered = of_type(events, SensorTriggered)
         assert [(event.position_id, event.sensor_id, event.lane) for event in triggered] == [
@@ -548,9 +566,9 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
         assert runner.status is RaceStatus.RUNNING
 
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         cross(device, zone_rect(ZONE_X), zone_rect(0.80))
-        runner.tick()
+        drive(runner)
         laps = of_type(events, LapCompleted)
         assert len(laps) == 1 and laps[0].lap_number == 1
         assert [(event.sector_number,) for event in of_type(events, SectorCompleted)] == [
@@ -574,31 +592,31 @@ def test_pause_drops_frames_and_resume_does_not_count_a_car_already_in_the_zone(
     try:
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         runner.pause()
         assert runner.status is RaceStatus.PAUSED
         reads_before = device.reads
         consume(device, painted((CAR_IN_ZONE,)))
-        runner.tick()
+        drive(runner)
         assert device.reads == reads_before + 1
         assert of_type(events, SensorTriggered) == []
 
         runner.resume()
         assert runner.snapshot().status is RaceStatus.RUNNING
         consume(device, painted((zone_rect(ZONE_X),)))
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         before = time.perf_counter_ns()
         cross(device, zone_rect(ZONE_X))
         after_capture = time.perf_counter_ns()
-        runner.tick()
+        drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert len(triggered) == 1
         assert before <= triggered[0].timestamp_ns <= after_capture
@@ -645,7 +663,7 @@ def test_stop_releases_the_camera_and_a_held_preview_blocks_the_race(env: Env) -
         device = hub.live()
         assert device.open_count == 1
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         consume(device, painted((CAR_IN_ZONE,)))
         runner.stop()
         assert runner.status is RaceStatus.FINISHED
@@ -669,7 +687,7 @@ def test_stop_releases_the_camera_and_a_held_preview_blocks_the_race(env: Env) -
 
 
 def test_a_backlog_drops_old_frames_before_they_reach_the_race(env: Env) -> None:
-    assert MAX_QUEUED_FRAMES == 2
+    assert MAX_QUEUED_FRAMES == 1
     assert MAX_FRAMES_PER_POLL == 4
     hub = DeviceHub()
     save_document(env, (zone("start_finish", 1, x=ZONE_X),))
@@ -680,19 +698,19 @@ def test_a_backlog_drops_old_frames_before_they_reach_the_race(env: Env) -> None
     try:
         device = hub.live()
         consume(device, blank())
-        runner.tick()
-        # The queue keeps two frames. The two blanks are what remain, so the
-        # earlier pictures never become race events.
+        drive(runner)
+        # A repeated car in the same blocks is not a crossing. The slot also
+        # keeps only the newest unread frame, so a burst cannot replay history.
         for _ in range(4):
             consume(device, painted((CAR_IN_ZONE,)))
         consume(device, blank())
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
         assert runner.status is RaceStatus.RUNNING
 
         cross(device, zone_rect(ZONE_X))
-        runner.tick()
+        drive(runner)
         assert len(of_type(events, SensorTriggered)) == 1
     finally:
         runner.close()
@@ -758,7 +776,7 @@ def test_repeated_read_failures_are_recorded_without_crashing_the_race(env: Env)
             device.fail(OSError("no frame"))
         wait_until(lambda: not device.opened, "capture did not stop after read failures")
         wait_until(lambda: camera_threads() == [], "capture thread still alive")
-        runner.tick()
+        drive(runner)
         snapshot = runner.snapshot()
         assert runner.status is RaceStatus.RUNNING
         assert snapshot.status is RaceStatus.RUNNING
@@ -767,7 +785,7 @@ def test_repeated_read_failures_are_recorded_without_crashing_the_race(env: Env)
             for message in snapshot.source_errors
         )
         assert not any("camera_not_connected" in message for message in snapshot.source_errors)
-        runner.tick()
+        drive(runner)
         assert runner.status is RaceStatus.RUNNING
         assert lease.holder() == CameraLease.RACE
         with pytest.raises(CameraBusyError):
@@ -816,12 +834,12 @@ def test_saved_zones_scale_to_the_stored_resolution(
         assert roi_to_pixels(loaded.detection.zones[0].roi, width, height) == expected
         device = hub.live()
         consume(device, blank(width, height))
-        runner.tick()
+        drive(runner)
         consume(device, painted((DetectionRoi(0, 0, 4, 4),), width, height))
-        runner.tick()
+        drive(runner)
         assert of_type(events, SensorTriggered) == []
         cross(device, expected, width=width, height=height)
-        runner.tick()
+        drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert len(triggered) == 1
         assert triggered[0].position_id == "start_finish"
@@ -854,7 +872,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
     live.show()
     try:
         live.show_runner(runner)
-        assert not live.cue_label.isVisible()
+        assert not live.start_lights.isVisible()
         assert live.findChildren(CameraStage) == []
         device = hub.live()
         consume(device, blank())
@@ -948,13 +966,13 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
     try:
         device = hub.live()
         consume(device, blank(frame_width, frame_height))
-        runner.tick()
+        drive(runner)
         assert runner.snapshot().source_errors == ()
         assert of_type(events, SensorTriggered) == []
         assert actual.x + actual.width <= frame_width
         assert actual.y + actual.height <= frame_height
         cross(device, actual, width=frame_width, height=frame_height)
-        runner.tick()
+        drive(runner)
         snapshot = runner.snapshot()
         assert snapshot.source_errors == ()
         triggered = of_type(events, SensorTriggered)
@@ -984,34 +1002,39 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
     try:
         live.show()
         live.open_for_start(runner)
-        assert live.cue_label.text() == "3"
-        assert live.cue_label.isVisible()
+        assert live.start_lights.lit_lights == 1
+        assert live.start_lights.isVisible()
+        assert not live.start_lights.showing_go
         assert runner.status is RaceStatus.CREATED
         assert not any(device.opened for device in hub.created)
         env.clock.advance(5_000_000_000)
         live.refresh()
         assert runner.snapshot().elapsed_ns == 0
         assert of_type(events, LapCompleted) == []
+        for lit in (2, 3, 4, 5):
+            live.advance_start_cue()
+            assert live.start_lights.lit_lights == lit
+            assert runner.status is RaceStatus.CREATED
+            assert runner.snapshot().elapsed_ns == 0
+            assert of_type(events, LapCompleted) == []
         live.advance_start_cue()
-        assert live.cue_label.text() == "2"
-        assert runner.status is RaceStatus.CREATED
-        live.advance_start_cue()
-        assert live.cue_label.text() == "1"
-        assert runner.status is RaceStatus.CREATED
-        live.advance_start_cue()
-        assert live.cue_label.text() == "GO"
+        assert live.start_lights.lit_lights == 0
+        assert live.start_lights.showing_go
+        assert live.start_lights.isVisible()
         assert engine_status(runner) is RaceStatus.RUNNING
         env.clock.advance(2_000_000_000)
         live.refresh()
         assert runner.snapshot().elapsed_ns == 2_000_000_000
         device = hub.live()
         consume(device, blank())
-        runner.tick()
+        drive(runner)
         cross(device, zone_rect(ZONE_X))
-        runner.tick()
+        drive(runner)
         assert runner.snapshot().source_errors == ()
         assert of_type(events, LapCompleted)
         assert live.findChildren(CameraStage) == []
+        live.advance_start_cue()
+        assert not live.start_lights.isVisible()
     finally:
         live.advance_start_cue()
         runner.close()
@@ -1038,8 +1061,9 @@ def test_the_races_page_counts_down_only_for_a_camera_race(qtbot: QtBot, env: En
     try:
         assert page.start_race(race_id)
         assert page.stack.currentWidget() is page.live
-        assert page.live.cue_label.text() == "3"
-        assert page.live.cue_label.isVisible()
+        assert page.live.start_lights.lit_lights == 1
+        assert page.live.start_lights.isVisible()
+        assert not page.live.start_lights.showing_go
         active = env.controller.active
         assert active is not None
         assert active.status is RaceStatus.CREATED
@@ -1047,5 +1071,239 @@ def test_the_races_page_counts_down_only_for_a_camera_race(qtbot: QtBot, env: En
         assert not any(device.opened for device in hub.created)
     finally:
         page.live.advance_start_cue()
+        if env.controller.active is not None:
+            env.controller.active.close()
+
+
+def test_three_and_four_lanes_each_report_a_crossing(env: Env) -> None:
+    for lane_count in (3, 4):
+        hub = DeviceHub()
+        height = 0.2
+        zones = tuple(
+            zone("start_finish", lane, x=ZONE_X, y=(lane - 1) * 0.25, height=height)
+            for lane in range(1, lane_count + 1)
+        )
+        save_document(env, zones)
+        attach(env, hub)
+        race_id, _track = create_camera_race(env, lanes=lane_count, name=f"Lanes {lane_count}")
+        events = listen(env)
+        runner = env.controller.start_race(race_id)
+        try:
+            device = hub.live()
+            consume(device, blank())
+            drive(runner)
+            cross(
+                device,
+                *(
+                    zone_rect(ZONE_X, y=(lane - 1) * 0.25, height=height)
+                    for lane in range(1, lane_count + 1)
+                ),
+            )
+            drive(runner)
+            triggered = of_type(events, SensorTriggered)
+            assert [event.lane for event in triggered] == list(range(1, lane_count + 1))
+            assert len({event.timestamp_ns for event in triggered}) == 1
+            assert runner.status is RaceStatus.FINISHED
+        finally:
+            runner.close()
+        env.runtime.services.remove_owner("camera-e2e")
+
+
+def test_a_camera_time_trial_keeps_running_after_a_lap_until_it_is_stopped(env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    track = env.track(name="Training", lanes=2)
+    save_layout(env, track.id, ("start_finish",))
+    race = env.races.create_time_trial("Zeitfahren", track.id, "camera")
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    events = listen(env)
+    runner = env.controller.start_race(race.id)
+    try:
+        device = hub.live()
+        consume(device, blank())
+        drive(runner)
+        cross(device, zone_rect(ZONE_X))
+        drive(runner)
+        assert len(of_type(events, LapCompleted)) == 1
+        assert engine_status(runner) is RaceStatus.RUNNING
+        assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+        runner.stop()
+        assert engine_status(runner) is RaceStatus.FINISHED
+        assert runner.snapshot().aborted is False
+        assert env.races.require_race(race.id).status is RaceStatus.FINISHED
+    finally:
+        runner.close()
+
+
+def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1, name="Abbruch")
+    events = listen(env)
+    runner = env.controller.start_race(race_id)
+    try:
+        device = hub.live()
+        consume(device, blank())
+        drive(runner)
+        runner.stop()
+        assert runner.snapshot().aborted is True
+        assert env.races.require_race(race_id).status is RaceStatus.ABORTED
+        assert of_type(events, LapCompleted) == []
+    finally:
+        runner.close()
+
+    restarted = env.races.restart_aborted(race_id)
+    assert restarted.id != race_id
+    assert env.races.require_race(race_id).status is RaceStatus.ABORTED
+    again = env.controller.start_race(restarted.id)
+    try:
+        device = hub.live()
+        consume(device, blank())
+        drive(again)
+        cross(device, zone_rect(ZONE_X))
+        drive(again)
+        assert len(of_type(events, LapCompleted)) == 1
+        assert again.status is RaceStatus.FINISHED
+        assert env.races.require_race(restarted.id).status is RaceStatus.FINISHED
+        assert env.races.require_race(race_id).status is RaceStatus.ABORTED
+    finally:
+        again.close()
+
+
+def test_hiding_the_live_view_during_the_lights_does_not_start_the_race(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 40
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    live.open_for_start(runner)
+    live.advance_start_cue()
+    assert live.start_lights.lit_lights == 2
+    live.hide()
+    qtbot.wait(400)
+    assert engine_status(runner) is RaceStatus.CREATED
+    assert runner.snapshot().elapsed_ns == 0
+    assert not live.start_lights.isVisible()
+    assert not any(device.opened for device in hub.created)
+    live.show()
+    live.open_for_start(runner)
+    assert live.start_lights.lit_lights == 1
+    assert not live.start_lights.showing_go
+    assert engine_status(runner) is RaceStatus.CREATED
+    runner.close()
+
+
+def test_closing_the_live_view_during_the_lights_does_not_start_the_race(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1, name="Schließen")
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 40
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    live.open_for_start(runner)
+    live.close()
+    qtbot.wait(400)
+    assert engine_status(runner) is RaceStatus.CREATED
+    assert not any(device.opened for device in hub.created)
+    live.deleteLater()
+    qtbot.wait(50)
+    runner.close()
+
+
+def test_a_restarted_camera_race_begins_on_the_first_lamp(qtbot: QtBot, env: Env) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1, name="Neu")
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 60_000
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    runner = env.controller.prepare_race(race_id)
+    live.show()
+    try:
+        live.open_for_start(runner)
+        for _ in range(5):
+            live.advance_start_cue()
+        assert live.start_lights.showing_go
+        assert engine_status(runner) is RaceStatus.RUNNING
+        runner.stop()
+        assert runner.snapshot().aborted
+        restarted = env.races.restart_aborted(race_id)
+        again = env.controller.prepare_race(restarted.id)
+        live.open_for_start(again)
+        assert live.start_lights.lit_lights == 1
+        assert not live.start_lights.showing_go
+        assert engine_status(again) is RaceStatus.CREATED
+        assert env.races.require_race(race_id).status is RaceStatus.ABORTED
+        for lit in (2, 3, 4, 5):
+            live.advance_start_cue()
+            assert live.start_lights.lit_lights == lit
+            assert engine_status(again) is RaceStatus.CREATED
+        live.advance_start_cue()
+        assert live.start_lights.showing_go
+        assert live.start_lights.lit_lights == 0
+        assert engine_status(again) is RaceStatus.RUNNING
+    finally:
+        if env.controller.active is not None:
+            env.controller.active.close()
+
+
+def test_lap_and_time_trial_races_both_wait_for_the_lights_to_go_out(
+    qtbot: QtBot, env: Env
+) -> None:
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    live = LiveRaceView(env.runtime.translator, env.controller, service=env.races)
+    live.cue_interval_ms = 60_000
+    live.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    qtbot.addWidget(live)
+    live.show()
+    lap_id, _track = create_camera_race(env, lanes=1, name="Runden")
+    track = env.track(name="Zeit", lanes=2)
+    save_layout(env, track.id, ("start_finish",))
+    open_trial = env.races.create_time_trial("Offen", track.id, "camera")
+    timed = env.races.create_time_trial("Dauer", track.id, "camera", duration_minutes=12)
+    for race_id in (open_trial.id, timed.id):
+        driver_id, vehicle_id = env.pair(1)
+        env.races.add_participant(race_id, driver_id, vehicle_id, 1)
+    try:
+        for race_id in (lap_id, open_trial.id, timed.id):
+            runner = env.controller.prepare_race(race_id)
+            live.open_for_start(runner)
+            assert live.start_lights.lit_lights == 1
+            assert engine_status(runner) is RaceStatus.CREATED
+            assert runner.snapshot().elapsed_ns == 0
+            for lit in (2, 3, 4, 5):
+                live.advance_start_cue()
+                assert live.start_lights.lit_lights == lit
+                assert engine_status(runner) is RaceStatus.CREATED
+            live.advance_start_cue()
+            assert live.start_lights.showing_go
+            assert engine_status(runner) is RaceStatus.RUNNING
+            if race_id == timed.id:
+                runner.tick()
+                assert engine_status(runner) is RaceStatus.RUNNING
+            runner.stop()
+            runner.close()
+            live.advance_start_cue()
+            assert not live.start_lights.isVisible()
+    finally:
         if env.controller.active is not None:
             env.controller.active.close()
