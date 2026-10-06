@@ -46,7 +46,7 @@ from slot_racing.modules.track_planner.parts import (
     PartInstance,
     PartSpec,
     arrow_heading_deg,
-    connector_occupied,
+    free_connector_indexes,
     normalize_deg,
     offered_extend_directions,
     rotate_xy,
@@ -449,9 +449,8 @@ class PlanCanvas(QGraphicsView):
         curve = chosen.get(EXTEND_LEFT)
         straight_spec = None if straight is None else straight[1]
         curve_spec = None if curve is None else curve[1]
-        for index, connector in enumerate(item.spec.connectors):
-            if connector_occupied(live, connector, placed):
-                continue
+        for index in free_connector_indexes(live, item.spec, placed):
+            connector = item.spec.connectors[index]
             outward = normalize_deg(connector.direction_deg + live.rotation_z_deg)
             point = world_xy(live, connector.x_mm, connector.y_mm)
             for direction in offered_extend_directions(live, connector, straight_spec, curve_spec):
