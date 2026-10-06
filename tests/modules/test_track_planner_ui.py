@@ -17,7 +17,7 @@ from slot_racing.modules.track_planner.document import (
     instances_center,
     rotate_instances_around,
 )
-from slot_racing.modules.track_planner.parts import PartInstance
+from slot_racing.modules.track_planner.parts import STRAIGHT, PartInstance, build_part
 from slot_racing.modules.track_planner.ui.canvas import (
     InstanceItem,
     rect_fully_inside,
@@ -25,7 +25,7 @@ from slot_racing.modules.track_planner.ui.canvas import (
 from slot_racing.modules.track_planner.ui.library_view import PART_MIME
 from slot_racing.modules.track_planner.ui.page import PlannerPage
 from tests.modules.conftest import Env
-from tests.modules.test_track_parts import _planner, _select
+from tests.modules.test_track_parts import _library_row, _planner, _select
 from tests.modules.test_ui_management import open_page
 
 
@@ -80,12 +80,21 @@ def test_the_library_is_the_only_part_source_and_can_be_dropped(qtbot: QtBot, en
     assert item is not None
     card = page.library.itemWidget(item)
     assert isinstance(card, QWidget)
-    assert card.findChild(QWidget, "planner-part-preview") is not None
-    assert card.findChild(QLabel, "planner-part-name") is not None
-    assert card.findChild(QLabel, "planner-part-system") is not None
-    assert card.findChild(QLabel, "planner-part-article") is not None
-    assert card.findChild(QLabel, "planner-part-scale") is not None
-    assert card.findChild(QLabel, "planner-part-category") is not None
+    preview = card.findChild(QWidget, "planner-part-preview")
+    name = card.findChild(QLabel, "planner-part-name")
+    article = card.findChild(QLabel, "planner-part-article")
+    scale = card.findChild(QLabel, "planner-part-scale")
+    assert preview is not None and name is not None and article is not None and scale is not None
+    card.resize(340, max(72, card.sizeHint().height()))
+    layout = card.layout()
+    assert layout is not None
+    layout.activate()
+    assert preview.findChildren(QLabel) == []
+    assert card.findChild(QLabel, "planner-part-system") is None
+    assert card.findChild(QLabel, "planner-part-category") is None
+    assert item.text() == ""
+    assert not preview.geometry().intersects(name.geometry())
+    assert not preview.geometry().intersects(article.geometry())
     mime = page.library.mimeData([item])
     assert mime.hasFormat(PART_MIME)
     part_id = int(bytes(mime.data(PART_MIME).data()).decode("ascii"))
@@ -102,6 +111,59 @@ def test_the_library_is_the_only_part_source_and_can_be_dropped(qtbot: QtBot, en
     assert page.canvas.selected_ids() == [page.plan().instances[0].id]
     assert page.canvas.rotation_handle.isVisible()
     assert page.undo_button.isEnabled()
+
+
+def test_library_rows_show_only_the_rail_and_stay_apart(qtbot: QtBot, env: Env) -> None:
+    planner = _planner(env)
+    long_name = "Sehr lange Bezeichnung der Sondergeraden im Streckenplaner"
+    planner.add_part(
+        build_part(
+            article_number="EB-LONG",
+            scale="1:24",
+            name=long_name,
+            category=STRAIGHT,
+            length_mm=400,
+            width_mm=None,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=None,
+            lane_count=2,
+        )
+    )
+    track = env.track("Bibliothek", lanes=2)
+    window, page = open_page(qtbot, env, "track_planner")
+    window.resize(980, 520)
+    window.show()
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    qtbot.waitExposed(window)
+    labels = {"planner-part-name", "planner-part-article", "planner-part-scale"}
+    for row in range(page.library.count()):
+        item = page.library.item(row)
+        assert item is not None and item.text() == ""
+        card = page.library.itemWidget(item)
+        assert isinstance(card, QWidget)
+        shown = {label.objectName() for label in card.findChildren(QLabel)}
+        assert shown == labels
+        preview = card.findChild(QWidget, "planner-part-preview")
+        name = card.findChild(QLabel, "planner-part-name")
+        assert preview is not None and name is not None
+        assert preview.findChildren(QLabel) == []
+        if row + 1 < page.library.count():
+            nxt = page.library.item(row + 1)
+            assert nxt is not None
+            top = page.library.visualItemRect(item)
+            below = page.library.visualItemRect(nxt)
+            assert top.height() > 0
+            assert top.bottom() <= below.top()
+    long_item = page.library.item(_library_row(page, "EB-LONG"))
+    assert long_item is not None
+    long_card = page.library.itemWidget(long_item)
+    assert isinstance(long_card, QWidget)
+    long_label = long_card.findChild(QLabel, "planner-part-name")
+    assert long_label is not None and long_label.text() == long_name
+    assert page.library.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert page.library.verticalScrollBar().maximum() > 0
 
 
 def test_selection_delete_undo_and_paste(qtbot: QtBot, env: Env) -> None:

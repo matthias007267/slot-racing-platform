@@ -51,6 +51,7 @@ from slot_racing.modules.track_planner.parts import (
     world_xy,
 )
 from slot_racing.modules.track_planner.ui.library_view import PART_MIME
+from slot_racing.modules.track_planner.ui.track_paint import paint_part
 from slot_racing.uikit.theme import COLORS
 
 CELL = 16
@@ -112,6 +113,7 @@ class PlanCanvas(QGraphicsView):
         self._direction = CLOCKWISE
         self._loading = False
         self._zoom = 1.0
+        self._color_coding = False
         self._panning = False
         self._pan_at = QPointF()
         self._rubber_at: QPoint | None = None
@@ -140,6 +142,14 @@ class PlanCanvas(QGraphicsView):
 
     def set_dock_listener(self, listener: Docked) -> None:
         self._on_docked = listener
+
+    def set_color_coding(self, enabled: bool) -> None:
+        """Restyle the parts already on the plan. The scene is not rebuilt."""
+        self._color_coding = enabled
+        for item in self._scene.items():
+            if isinstance(item, InstanceItem):
+                item.set_color_coding(enabled)
+        self.viewport().update()
 
     def center_on_mm(self, x_mm: float, y_mm: float) -> None:
         """Move the view so one plan point sits in the middle. Coordinates stay put."""
@@ -170,6 +180,7 @@ class PlanCanvas(QGraphicsView):
             if spec is None:
                 continue
             placed = InstanceItem(instance, spec, self._report_group)
+            placed.set_color_coding(self._color_coding)
             self._scene.addItem(placed)
             placed.setSelected(placed.item_id in chosen)
         for piece in plan.pieces:
@@ -577,6 +588,8 @@ class InstanceItem(QGraphicsItem):
         self.item_id = instance.id
         self.spec = spec
         self.group_id = instance.group_id
+        self._start_straight = instance.start_straight
+        self._color_coding = False
         self._report = report
         self._ready = False
         self._press: QPointF | None = None
@@ -585,7 +598,8 @@ class InstanceItem(QGraphicsItem):
             [QPointF(x * MM, y * MM) for x, y in spec.outline]
             or [QPointF(-8, -8), QPointF(8, -8), QPointF(8, 8), QPointF(-8, 8)]
         )
-        bounds = self._polygon.boundingRect().adjusted(-2, -2, 2, 2)
+        # Stroke and a later shoulder may sit just outside the roadway outline.
+        bounds = self._polygon.boundingRect().adjusted(-4, -4, 4, 4)
         self._bounds = bounds
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
@@ -600,12 +614,25 @@ class InstanceItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:  # noqa: N802
         return self._bounds
 
+    def set_color_coding(self, enabled: bool) -> None:
+        if self._color_coding == enabled:
+            return
+        self._color_coding = enabled
+        self.update()
+
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
-        width = 3 if self.isSelected() else 1.5
-        painter.setPen(QPen(QColor(COLORS.accent if self.isSelected() else COLORS.border), width))
-        painter.setBrush(QColor(COLORS.elevated))
-        painter.drawPolygon(self._polygon)
+        painter.save()
+        painter.scale(MM, MM)
+        paint_part(
+            painter,
+            self.spec,
+            color_coding=self._color_coding,
+            selected=self.isSelected(),
+            start_straight=self._start_straight,
+        )
+        painter.restore()
         if self.isSelected():
+            painter.setPen(QPen(QColor(COLORS.accent), 1.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._bounds)
 

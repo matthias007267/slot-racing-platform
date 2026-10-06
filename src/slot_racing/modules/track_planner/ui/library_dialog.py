@@ -8,7 +8,6 @@ from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.parts import (
     CATEGORIES,
-    IMPLIED_SCALE,
     SCALES,
     PartRecord,
     PartSpec,
@@ -30,12 +29,6 @@ class PartDialog(FormDialog):
         self._planner = planner
         self._record = record
         self.created: PartSpec | None = None
-        self.system = QComboBox()
-        self.system.setObjectName("part-system")
-        self.system.setEditable(True)
-        for name in (*IMPLIED_SCALE, "Eigenbau"):
-            self.system.addItem(name)
-        self.system.currentTextChanged.connect(self._sync_scale)
         self.article = QLineEdit()
         self.article.setObjectName("part-article")
         self.scale = QComboBox()
@@ -59,7 +52,6 @@ class PartDialog(FormDialog):
         self.lanes.setValue(2)
         form = self.form
         translate = translator.translate
-        form.addRow(translate("planner.field.system"), self.system)
         form.addRow(translate("planner.field.article"), self.article)
         form.addRow(translate("planner.field.scale"), self.scale)
         form.addRow(translate("planner.field.name"), self.name)
@@ -70,14 +62,12 @@ class PartDialog(FormDialog):
         form.addRow(translate("planner.field.radius"), self.radius)
         form.addRow(translate("planner.field.angle"), self.angle)
         form.addRow(translate("planner.field.lanes"), self.lanes)
-        self._sync_scale(self.system.currentText())
         if record is not None:
             self._fill(record)
 
     def submit(self) -> None:
         scale = self.scale.currentData()
         spec = build_part(
-            system=self.system.currentText(),
             article_number=self.article.text(),
             scale=None if scale is None else str(scale),
             name=self.name.text(),
@@ -97,7 +87,6 @@ class PartDialog(FormDialog):
 
     def _fill(self, record: PartRecord) -> None:
         spec = record.spec
-        self.system.setCurrentText(spec.system)
         self.article.setText(spec.article_number)
         self.name.setText(spec.name)
         category = self.category.findData(spec.category)
@@ -112,14 +101,6 @@ class PartDialog(FormDialog):
         scale = self.scale.findData(spec.scale)
         if scale >= 0:
             self.scale.setCurrentIndex(scale)
-
-    def _sync_scale(self, system: str) -> None:
-        known = IMPLIED_SCALE.get(system.strip())
-        self.scale.setEnabled(known is None)
-        if known is not None:
-            index = self.scale.findData(known)
-            if index >= 0:
-                self.scale.setCurrentIndex(index)
 
 
 def _measure(object_name: str) -> QDoubleSpinBox:

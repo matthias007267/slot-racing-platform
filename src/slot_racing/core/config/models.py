@@ -16,6 +16,7 @@ class ConfigError(Exception):
 
 AUDIO_ENABLED_DEFAULT = True
 AUDIO_VOLUME_DEFAULT = 70
+TRACK_PLANNER_COLOR_CODING_DEFAULT = False
 
 
 class AppConfig(BaseModel):
@@ -42,6 +43,8 @@ class AppConfig(BaseModel):
     """Whether race sounds play. The race start does not depend on this."""
     audio_volume: int = Field(default=AUDIO_VOLUME_DEFAULT, ge=0, le=100)
     """Race-sound level from 0 (silent) to 100 (full)."""
+    track_planner_color_coding: bool = TRACK_PLANNER_COLOR_CODING_DEFAULT
+    """Tint rails by geometry in the track planner. Off keeps the dark roadway."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()

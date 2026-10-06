@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QKeyEvent
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.catalog import TrackCatalog
+from slot_racing.core.config import AppConfig, save_config
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
@@ -77,12 +79,20 @@ from slot_racing.uikit.widgets import StatusLabel
 
 class PlannerPage(QWidget):
     def __init__(
-        self, translator: Translator, tracks: TrackCatalog, planner: TrackPlannerService
+        self,
+        translator: Translator,
+        tracks: TrackCatalog,
+        planner: TrackPlannerService,
+        config: AppConfig | None = None,
+        config_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._translator = translator
         self._tracks = tracks
         self._planner = planner
+        self._config = config
+        self._config_path = config_path
+        self._color_coding = False if config is None else config.track_planner_color_coding
         self._plan = empty_plan(TrackId(0))
         self._lane_count = 0
         self._dirty = False
@@ -139,6 +149,13 @@ class PlannerPage(QWidget):
             "planner-delete", "planner.tool.delete", self.delete_selected
         )
         self.library = PartLibrary()
+        self.library.set_color_coding(self._color_coding)
+        self.color_coding = QPushButton(translate("planner.color_coding"))
+        self.color_coding.setObjectName("planner-color-coding")
+        self.color_coding.setCheckable(True)
+        set_role(self.color_coding, "ghost")
+        self.color_coding.setChecked(self._color_coding)
+        self.color_coding.toggled.connect(self._color_coding_changed)
         self.place_part = self._tool("planner-place", "planner.library.place", self._place_part)
         self.add_part = self._tool("planner-add-part", "planner.library.add", self._add_part)
         self.manage_library = self._tool(
@@ -181,6 +198,7 @@ class PlannerPage(QWidget):
         self.y_mm.setRange(-100_000, 100_000)
         self.y_mm.setDecimals(1)
         self.canvas = PlanCanvas()
+        self.canvas.set_color_coding(self._color_coding)
         self.canvas.set_listener(self._moved)
         self.canvas.set_group_listener(self._moved_group)
         self.canvas.set_rotation_listener(self._rotated)
@@ -258,6 +276,7 @@ class PlannerPage(QWidget):
         header.addWidget(self.undo_button)
         header.addWidget(self.save_button)
         header.addWidget(self.save_as_button)
+        header.addWidget(self.color_coding)
         header.addWidget(self.jump_button)
         header.addWidget(self.discard_button)
         header.addWidget(self.reset_button)
@@ -754,7 +773,9 @@ class PlannerPage(QWidget):
 
     def _manage_library(self) -> None:
         used = {instance.part_id for instance in self._plan.instances}
-        dialog = LibraryManager(self._translator, self._planner, used)
+        dialog = LibraryManager(
+            self._translator, self._planner, used, color_coding=self.color_coding.isChecked()
+        )
         dialog.exec()
         self._load_parts()
         self._draw(self.canvas.selected_ids())
@@ -836,6 +857,15 @@ class PlannerPage(QWidget):
         created = updated.instances[-1].id if updated.instances else None
         self._commit(updated, created)
 
+    def _color_coding_changed(self, enabled: bool) -> None:
+        self._color_coding = enabled
+        if self._config is not None:
+            self._config.track_planner_color_coding = enabled
+            if self._config_path is not None:
+                save_config(self._config, self._config_path)
+        self.canvas.set_color_coding(enabled)
+        self.library.set_color_coding(enabled)
+
     def _start_straight_changed(self) -> None:
         if self._filling:
             return
@@ -898,7 +928,7 @@ class PlannerPage(QWidget):
                 ]
         current = self.library.currentItem()
         current_id = None if current is None else current.data(Qt.ItemDataRole.UserRole)
-        self.library.set_records(records, self._translator)
+        self.library.set_records(records)
         if not self.library.count():
             return
         row = 0

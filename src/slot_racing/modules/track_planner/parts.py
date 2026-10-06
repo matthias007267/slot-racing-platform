@@ -1,8 +1,9 @@
 """Track pieces: one definition, many placed instances.
 
-A definition is an original part (system, article number, scale, measures, connectors, outline).
-An instance is that part used once on a plan, with its own position and rotation. Editing an
-instance never changes the definition.
+A definition is one part: designation, article number, scale, category, measures, connectors
+and outline. Its identity is the designation plus the article number. Scale and category are
+properties. An instance is that part used once on a plan, with its own position and rotation.
+Editing an instance never changes the definition.
 
 Coordinates are millimetres. Positive y points down, matching the plan canvas. ``rotation_z_deg``
 is clockwise. ``z`` and the other two rotations are stored so a later 3D view can use them; the
@@ -16,18 +17,14 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 
 SCALES = ("1:24", "1:32", "1:43")
-# These systems have one scale. The part still stores that scale; it is not left empty.
-IMPLIED_SCALE: dict[str, str] = {
-    "Carrera Digital 132": "1:32",
-    "Carrera Digital 124": "1:24",
-    "Carrera Evolution": "1:32",
-    "Carrera GO!!!": "1:43",
-}
+# The seeded Carrera rails are stored at 1:24. The scale is a property, not an identity.
+CATALOG_SCALE = "1:24"
 
 STRAIGHT = "straight"
 CURVE = "curve"
@@ -75,11 +72,54 @@ class ConnectorSpec:
     lanes: tuple[int, ...]
 
 
+# A slot path is geometry, not a paint special case. ``line`` uses the two endpoints.
+# ``arc`` uses the centre ``(x0, y0)``, ``radius_mm`` and the angles. 0° is +x and
+# positive angles run toward +y, the same convention as the curve connectors.
+SPAN_LINE = "line"
+SPAN_ARC = "arc"
+PATH_SLOT = "slot"
+PATH_CENTER = "center"
+
+
+@dataclass(frozen=True, slots=True)
+class SlotSpan:
+    """One straight or circular piece of a groove, in local millimetres."""
+
+    kind: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    radius_mm: float = 0.0
+    start_deg: float = 0.0
+    sweep_deg: float = 0.0
+
+    @staticmethod
+    def line(x0: float, y0: float, x1: float, y1: float) -> SlotSpan:
+        return SlotSpan(SPAN_LINE, x0, y0, x1, y1)
+
+    @staticmethod
+    def arc(cx: float, cy: float, radius_mm: float, start_deg: float, sweep_deg: float) -> SlotSpan:
+        return SlotSpan(SPAN_ARC, cx, cy, 0.0, 0.0, radius_mm, start_deg, sweep_deg)
+
+
+@dataclass(frozen=True, slots=True)
+class SlotPath:
+    """One continuous groove. Several spans join end to end.
+
+    ``kind`` is ``slot`` for a driving groove and ``center`` for the dashed line
+    between two lanes. Complex parts store these on the definition. A part with
+    no paths gets the ordinary lanes derived from its measures.
+    """
+
+    spans: tuple[SlotSpan, ...]
+    kind: str = PATH_SLOT
+
+
 @dataclass(frozen=True, slots=True)
 class PartSpec:
-    """The original part. ``scale`` is always one of :data:`SCALES`, even for a known system."""
+    """One part. ``scale`` is one of :data:`SCALES` and is not part of the identity."""
 
-    system: str
     article_number: str
     scale: str
     name: str
@@ -92,6 +132,8 @@ class PartSpec:
     lane_count: int
     connectors: tuple[ConnectorSpec, ...]
     outline: tuple[tuple[float, float], ...]
+    # Empty means "derive the ordinary lanes". Diverging parts store their grooves here.
+    slot_paths: tuple[SlotPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,44 +167,37 @@ class Pose:
     rotation_z_deg: float
 
 
-def implied_scale(system: str) -> str | None:
-    return IMPLIED_SCALE.get(system.strip())
-
-
-def resolved_scale(system: str, scale: str | None) -> str:
-    """Scale stored on the part. A known system still stores its own scale."""
-    known = implied_scale(system)
-    typed = _typed_scale(scale)
-    if known is not None:
-        if typed is not None and typed != known:
-            raise ValidationError("error.planner.scale")
-        return known
-    if typed is None or typed not in SCALES:
-        raise ValidationError("error.planner.scale")
-    return typed
-
-
-def stored_scale(system: str, scale: str | None) -> str:
-    """The scale written on every part. It is never left empty."""
-    return resolved_scale(system, scale)
-
-
-def _typed_scale(scale: str | None) -> str | None:
-    if scale is None:
-        return None
+def require_scale(scale: str | None) -> str:
+    """One of :data:`SCALES`. Missing and unknown values are rejected."""
     if not isinstance(scale, str):
         raise ValidationError("error.planner.scale")
     text = scale.strip()
-    return text or None
+    if text not in SCALES:
+        raise ValidationError("error.planner.scale")
+    return text
 
 
-def identity_key(system: str, article_number: str, scale: str | None) -> tuple[str, str, str]:
-    """System, article number and the effective scale. No manufacturer."""
-    system_name = system.strip()
-    article = article_number.strip()
-    if not system_name or not article:
+def normalize_name(name: str) -> str:
+    """Identity form of a designation: trimmed, case folded. The stored text keeps its case."""
+    if not isinstance(name, str):
         raise ValidationError("error.planner.part")
-    return (system_name, article, resolved_scale(system_name, scale))
+    return name.strip().casefold()
+
+
+def normalize_article(article_number: str) -> str:
+    """Identity form of an article number: trimmed. Leading zeros stay."""
+    if not isinstance(article_number, str):
+        raise ValidationError("error.planner.part")
+    return article_number.strip()
+
+
+def identity_key(name: str, article_number: str) -> tuple[str, str]:
+    """Designation plus article number. Scale, category and manufacturer are not included."""
+    title = normalize_name(name)
+    article = normalize_article(article_number)
+    if not title or not article:
+        raise ValidationError("error.planner.part")
+    return (title, article)
 
 
 def normalize_deg(angle: float) -> float:
@@ -394,72 +429,273 @@ def lane_world_point(
     return world_xy(instance, connector.x_mm, connector.y_mm + offset)
 
 
-def standard_catalog() -> tuple[PartSpec, ...]:
-    """Original Carrera Digital 132 pieces. The same definition can be placed any number of times.
+def lane_offset_mm(index: int, lane_count: int) -> float:
+    """Local y of one lane on a straight joint. Lane 1 is the negative side."""
+    return (index - (lane_count - 1) / 2.0) * LANE_PITCH_MM
 
-    Lengths, radii and angles follow the Carrera catalogue: straights 345 / 115 / 86 mm,
-    centre radii 300 / 500 / 700 / 900 mm. Packs that only repeat a piece are not a second part.
+
+def curve_lane_radius(center_mm: float, index: int, lane_count: int) -> float:
+    """Groove radius on a catalogue curve.
+
+    The arc bends to the right as it runs from joint a to joint b, so lane 1
+    (the left lane of a straight) is the outer groove. That is what lines up
+    with a straight after the parts are joined.
     """
-    system = "Carrera Digital 132"
-    scale = resolved_scale(system, None)
+    return center_mm - lane_offset_mm(index, lane_count)
+
+
+def span_point(span: SlotSpan, t: float) -> tuple[float, float]:
+    """Point at fraction ``t`` along one span. ``t`` is 0 at the start and 1 at the end."""
+    if span.kind == SPAN_ARC:
+        angle = math.radians(span.start_deg + span.sweep_deg * t)
+        return (
+            span.x0 + span.radius_mm * math.cos(angle),
+            span.y0 + span.radius_mm * math.sin(angle),
+        )
+    return (span.x0 + (span.x1 - span.x0) * t, span.y0 + (span.y1 - span.y0) * t)
+
+
+def s_bend(x0: float, y0: float, x1: float, y1: float) -> tuple[SlotSpan, ...]:
+    """Two arcs from ``(x0, y0)`` to ``(x1, y1)``, tangent to +x at both ends."""
+    run = x1 - x0
+    rise = y1 - y0
+    if run <= 1.0 or abs(rise) < 1.0:
+        return (SlotSpan.line(x0, y0, x1, y1),)
+    dx = run / 2.0
+    dy = rise / 2.0
+    alpha = 2.0 * math.atan2(abs(dy), dx)
+    radius = abs(dy) / (1.0 - math.cos(alpha))
+    sign = 1.0 if dy >= 0.0 else -1.0
+    start1 = -sign * 90.0
+    sweep1 = sign * math.degrees(alpha)
+    mid_x = x0 + dx
+    mid_y = y0 + dy
+    center2_y = y1 - sign * radius
+    start2 = math.degrees(math.atan2(mid_y - center2_y, mid_x - x1))
+    end_angle = sign * 90.0
+    sweep2 = (end_angle - start2 + 180.0) % 360.0 - 180.0
+    if sweep1 > 0.0 and sweep2 > 0.0:
+        sweep2 -= 360.0
+    if sweep1 < 0.0 and sweep2 < 0.0:
+        sweep2 += 360.0
+    return (
+        SlotSpan.arc(x0, y0 + sign * radius, radius, start1, sweep1),
+        SlotSpan.arc(x1, center2_y, radius, start2, sweep2),
+    )
+
+
+def _through_lanes(length: float, lane_count: int) -> tuple[SlotPath, ...]:
+    half = length / 2.0
+    paths: list[SlotPath] = []
+    for index in range(lane_count):
+        y = lane_offset_mm(index, lane_count)
+        paths.append(SlotPath((SlotSpan.line(-half, y, half, y),)))
+    return tuple(paths)
+
+
+def _center_line(length: float) -> SlotPath:
+    half = length / 2.0
+    return SlotPath((SlotSpan.line(-half, 0.0, half, 0.0),), PATH_CENTER)
+
+
+def lane_change_paths(length: float, side: str) -> tuple[SlotPath, ...]:
+    """Both through grooves plus the branch that changes lane.
+
+    ``left`` moves from lane 2 to lane 1, ``right`` the other way, ``both`` crosses.
+    """
+    half = length / 2.0
+    margin = length * 0.22
+    x0 = -half + margin
+    x1 = half - margin
+    paths: list[SlotPath] = list(_through_lanes(length, 2))
+    if side in {"left", "both"}:
+        paths.append(SlotPath(s_bend(x0, LANE_PITCH_MM / 2.0, x1, -LANE_PITCH_MM / 2.0)))
+    if side in {"right", "both"}:
+        paths.append(SlotPath(s_bend(x0, -LANE_PITCH_MM / 2.0, x1, LANE_PITCH_MM / 2.0)))
+    paths.append(_center_line(length))
+    return tuple(paths)
+
+
+def lateral_bow_paths(length: float, shift: float) -> tuple[SlotPath, ...]:
+    """Both lanes and the centre bow sideways by ``shift`` and return."""
+    half = length / 2.0
+    paths: list[SlotPath] = []
+    for index in range(2):
+        y = lane_offset_mm(index, 2)
+        spans = s_bend(-half, y, 0.0, y + shift) + s_bend(0.0, y + shift, half, y)
+        paths.append(SlotPath(spans))
+    center = s_bend(-half, 0.0, 0.0, shift) + s_bend(0.0, shift, half, 0.0)
+    paths.append(SlotPath(center, PATH_CENTER))
+    return tuple(paths)
+
+
+def chicane_paths(length: float) -> tuple[SlotPath, ...]:
+    """Both lanes weave to one side and then the other. The centre follows."""
+    half = length / 2.0
+    shift = LANE_PITCH_MM * 0.36
+    stations = (-half, -half / 3.0, half / 3.0, half)
+    offsets = (0.0, shift, -shift, 0.0)
+    bases = (lane_offset_mm(0, 2), lane_offset_mm(1, 2), 0.0)
+    kinds = (PATH_SLOT, PATH_SLOT, PATH_CENTER)
+    paths: list[SlotPath] = []
+    for base, kind in zip(bases, kinds, strict=True):
+        spans: list[SlotSpan] = []
+        points = tuple(zip(stations, offsets, strict=True))
+        for (x_a, off_a), (x_b, off_b) in pairwise(points):
+            spans.extend(s_bend(x_a, base + off_a, x_b, base + off_b))
+        paths.append(SlotPath(tuple(spans), kind))
+    return tuple(paths)
+
+
+def encode_slot_paths(paths: tuple[SlotPath, ...]) -> list[dict[str, object]]:
+    encoded: list[dict[str, object]] = []
+    for path in paths:
+        spans: list[dict[str, object]] = []
+        for span in path.spans:
+            if span.kind == SPAN_ARC:
+                spans.append(
+                    {
+                        "kind": SPAN_ARC,
+                        "cx": span.x0,
+                        "cy": span.y0,
+                        "radius": span.radius_mm,
+                        "start_deg": span.start_deg,
+                        "sweep_deg": span.sweep_deg,
+                    }
+                )
+            else:
+                spans.append(
+                    {
+                        "kind": SPAN_LINE,
+                        "x0": span.x0,
+                        "y0": span.y0,
+                        "x1": span.x1,
+                        "y1": span.y1,
+                    }
+                )
+        encoded.append({"kind": path.kind, "spans": spans})
+    return encoded
+
+
+def decode_slot_paths(payload: object) -> tuple[SlotPath, ...]:
+    """Read stored grooves. A missing or broken value means the ordinary lanes."""
+    if not isinstance(payload, list):
+        return ()
+    paths: list[SlotPath] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            return ()
+        raw_spans = entry.get("spans")
+        if not isinstance(raw_spans, list):
+            return ()
+        spans: list[SlotSpan] = []
+        for raw in raw_spans:
+            span = _decode_span(raw)
+            if span is None:
+                return ()
+            spans.append(span)
+        kind = entry.get("kind", PATH_SLOT)
+        if kind not in {PATH_SLOT, PATH_CENTER} or not spans:
+            return ()
+        paths.append(SlotPath(tuple(spans), str(kind)))
+    return tuple(paths)
+
+
+def _decode_span(raw: object) -> SlotSpan | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    try:
+        if kind == SPAN_ARC:
+            return SlotSpan.arc(
+                float(raw["cx"]),
+                float(raw["cy"]),
+                float(raw["radius"]),
+                float(raw["start_deg"]),
+                float(raw["sweep_deg"]),
+            )
+        if kind == SPAN_LINE:
+            return SlotSpan.line(
+                float(raw["x0"]), float(raw["y0"]), float(raw["x1"]), float(raw["y1"])
+            )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def standard_catalog() -> tuple[PartSpec, ...]:
+    """Carrera rails. Evolution and Digital 132 share these pieces, so each one is stored once.
+
+    Identity is the designation plus the article number. The stored scale is 1:24, the scale
+    of these rails, even when 1:32 cars run on them. Lengths, radii and angles follow the
+    catalogue: straights 345 / 115 / 86 mm, centre radii 300 / 500 / 700 / 900 mm.
+    """
+    scale = CATALOG_SCALE
     specs: list[PartSpec] = []
 
     def add(spec: PartSpec) -> None:
         specs.append(spec)
 
-    def straight(article: str, name: str, length: float, category: str = STRAIGHT) -> None:
+    def straight(
+        article: str,
+        name: str,
+        length: float,
+        category: str = STRAIGHT,
+        slot_paths: tuple[SlotPath, ...] = (),
+    ) -> None:
         width = track_width(2)
         add(
             PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                category,
-                length,
-                width,
-                None,
-                None,
-                0.0,
-                2,
-                straight_connectors(length, 2),
-                rectangle(length, width),
+                article_number=article,
+                scale=scale,
+                name=name,
+                category=category,
+                length_mm=length,
+                width_mm=width,
+                height_mm=None,
+                radius_mm=None,
+                angle_deg=0.0,
+                lane_count=2,
+                connectors=straight_connectors(length, 2),
+                outline=rectangle(length, width),
+                slot_paths=slot_paths,
             )
         )
 
     straight("20020601", "Standardgerade", 345.0)
     straight("20020611", "1/3-Gerade", 115.0)
     straight("20020612", "1/4-Gerade", 86.0)
-    straight("20030343", "Spurwechsel links", 345.0, LANE_CHANGE)
-    straight("20030345", "Spurwechsel rechts", 345.0, LANE_CHANGE)
-    straight("20030347", "Doppelspurwechsel", 345.0, LANE_CHANGE)
-    straight("20020517", "Weiche", 345.0, SWITCH)
-    straight("20030350", "Engstelle links", 690.0, SPECIAL)
-    straight("20030351", "Engstelle rechts", 690.0, SPECIAL)
-    straight("20030373", "Schikane", 1035.0, SPECIAL)
+    straight("20030343", "Spurwechsel links", 345.0, LANE_CHANGE, lane_change_paths(345.0, "left"))
+    straight(
+        "20030345", "Spurwechsel rechts", 345.0, LANE_CHANGE, lane_change_paths(345.0, "right")
+    )
+    straight("20030347", "Doppelspurwechsel", 345.0, LANE_CHANGE, lane_change_paths(345.0, "both"))
+    straight("20020517", "Weiche", 345.0, SWITCH, lane_change_paths(345.0, "left"))
+    straight("20030350", "Engstelle links", 690.0, SPECIAL, lateral_bow_paths(690.0, -32.0))
+    straight("20030351", "Engstelle rechts", 690.0, SPECIAL, lateral_bow_paths(690.0, 32.0))
+    straight("20030373", "Schikane", 1035.0, SPECIAL, chicane_paths(1035.0))
 
     pit_width = track_width(1)
     add(
         PartSpec(
-            system,
-            "20030341",
-            scale,
-            "Pitlane-Gerade",
-            PITLANE,
-            345.0,
-            pit_width,
-            None,
-            None,
-            0.0,
-            1,
-            straight_connectors(345.0, 1),
-            rectangle(345.0, pit_width),
+            article_number="20030341",
+            scale=scale,
+            name="Pitlane-Gerade",
+            category=PITLANE,
+            length_mm=345.0,
+            width_mm=pit_width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=0.0,
+            lane_count=1,
+            connectors=straight_connectors(345.0, 1),
+            outline=rectangle(345.0, pit_width),
         )
     )
-    # Carrera sells the pit entry and exit inside kit 20030356, not as their own articles.
-    # These two bodies keep that kit number with a suffix so each joint pattern is one part.
-    add(pit_end(system, "20030356-E", "Pitlane-Einfahrt", pit_side=1.0))
-    add(pit_end(system, "20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0))
+    # Entry and exit are two different bodies. The article number keeps a suffix so each
+    # joint pattern stays one part.
+    add(pit_end("20030356-E", "Pitlane-Einfahrt", pit_side=1.0))
+    add(pit_end("20030356-A", "Pitlane-Ausfahrt", pit_side=-1.0))
 
     for article, name, radius, angle in (
         ("20020577", "Kurve R1 30°", 300.0, 30.0),
@@ -471,178 +707,74 @@ def standard_catalog() -> tuple[PartSpec, ...]:
         width = track_width(2)
         add(
             PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                CURVE,
-                None,
-                width,
-                None,
-                radius,
-                angle,
-                2,
-                curve_connectors(radius, angle, 2),
-                arc_outline(radius, angle, width),
+                article_number=article,
+                scale=scale,
+                name=name,
+                category=CURVE,
+                length_mm=None,
+                width_mm=width,
+                height_mm=None,
+                radius_mm=radius,
+                angle_deg=angle,
+                lane_count=2,
+                connectors=curve_connectors(radius, angle, 2),
+                outline=arc_outline(radius, angle, width),
             )
         )
-    add(
-        PartSpec(
-            system,
-            "20020574",
-            scale,
-            "Steilkurve R1 30°",
-            SPECIAL,
-            None,
-            track_width(2),
-            None,
-            300.0,
-            30.0,
-            2,
-            curve_connectors(300.0, 30.0, 2),
-            arc_outline(300.0, 30.0, track_width(2)),
-        )
-    )
-    add(
-        PartSpec(
-            system,
-            "20020587",
-            scale,
-            "Kreuzung",
-            CROSSING,
-            345.0,
-            track_width(2),
-            None,
-            None,
-            90.0,
-            2,
-            crossing_connectors(345.0, 2),
-            rectangle(345.0, 345.0),
-        )
-    )
-    border_width = 40.0
-    add(
-        PartSpec(
-            system,
-            "20020560",
-            scale,
-            "Randstreifen Standardgerade",
-            BORDER,
-            345.0,
-            border_width,
-            None,
-            None,
-            0.0,
-            2,
-            straight_connectors(345.0, 2, kind=BORDER_JOINT),
-            rectangle(345.0, border_width),
-        )
-    )
-    return tuple(specs) + evolution_catalog()
-
-
-def evolution_catalog() -> tuple[PartSpec, ...]:
-    """Carrera Evolution rails. The same articles fit Digital 132; the system is separate.
-
-    Carrera sells 20020601 (two 345 mm straights) and 20020571 (three 60° curves) for
-    EVOLUTION as well as Digital 124/132. The other numbers are the same rail family
-    already measured for Digital 132: straights 345 / 115 / 86 mm and centre radii
-    300 / 500 / 700 / 900 mm. The stored scale is 1:32, the scale kept for this system.
-    """
-    system = "Carrera Evolution"
-    scale = resolved_scale(system, "1:32")
-    specs: list[PartSpec] = []
-
-    def add(spec: PartSpec) -> None:
-        specs.append(spec)
-
-    def straight(article: str, name: str, length: float) -> None:
-        width = track_width(2)
-        add(
-            PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                STRAIGHT,
-                length,
-                width,
-                None,
-                None,
-                0.0,
-                2,
-                straight_connectors(length, 2),
-                rectangle(length, width),
-            )
-        )
-
-    straight("20020601", "Standardgerade", 345.0)
-    straight("20020611", "1/3-Gerade", 115.0)
-    straight("20020612", "1/4-Gerade", 86.0)
     width = track_width(2)
-    for article, name, radius, angle in (
-        ("20020577", "Kurve R1 30°", 300.0, 30.0),
-        ("20020571", "Kurve R1 60°", 300.0, 60.0),
-        ("20020572", "Kurve R2 30°", 500.0, 30.0),
-        ("20020573", "Kurve R3 30°", 700.0, 30.0),
-        ("20020578", "Kurve R4 15°", 900.0, 15.0),
-    ):
-        add(
-            PartSpec(
-                system,
-                article,
-                scale,
-                name,
-                CURVE,
-                None,
-                width,
-                None,
-                radius,
-                angle,
-                2,
-                curve_connectors(radius, angle, 2),
-                arc_outline(radius, angle, width),
-            )
-        )
     add(
         PartSpec(
-            system,
-            "20020587",
-            scale,
-            "Kreuzung",
-            CROSSING,
-            345.0,
-            width,
-            None,
-            None,
-            90.0,
-            2,
-            crossing_connectors(345.0, 2),
-            rectangle(345.0, 345.0),
+            article_number="20020574",
+            scale=scale,
+            name="Steilkurve R1 30°",
+            category=SPECIAL,
+            length_mm=None,
+            width_mm=width,
+            height_mm=None,
+            radius_mm=300.0,
+            angle_deg=30.0,
+            lane_count=2,
+            connectors=curve_connectors(300.0, 30.0, 2),
+            outline=arc_outline(300.0, 30.0, width),
+        )
+    )
+    add(
+        PartSpec(
+            article_number="20020587",
+            scale=scale,
+            name="Kreuzung",
+            category=CROSSING,
+            length_mm=345.0,
+            width_mm=width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=90.0,
+            lane_count=2,
+            connectors=crossing_connectors(345.0, 2),
+            outline=rectangle(345.0, 345.0),
         )
     )
     border_width = 40.0
     add(
         PartSpec(
-            system,
-            "20020560",
-            scale,
-            "Randstreifen Standardgerade",
-            BORDER,
-            345.0,
-            border_width,
-            None,
-            None,
-            0.0,
-            2,
-            straight_connectors(345.0, 2, kind=BORDER_JOINT),
-            rectangle(345.0, border_width),
+            article_number="20020560",
+            scale=scale,
+            name="Randstreifen Standardgerade",
+            category=BORDER,
+            length_mm=345.0,
+            width_mm=border_width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=0.0,
+            lane_count=2,
+            connectors=straight_connectors(345.0, 2, kind=BORDER_JOINT),
+            outline=rectangle(345.0, border_width),
         )
     )
     return tuple(specs)
 
 
-def pit_end(system: str, article: str, name: str, *, pit_side: float) -> PartSpec:
+def pit_end(article: str, name: str, *, pit_side: float) -> PartSpec:
     """Main line plus the pit spur. The spur is one lane and only fits a pit straight."""
     length = 345.0
     width = track_width(2) + track_width(1)
@@ -656,25 +788,23 @@ def pit_end(system: str, article: str, name: str, *, pit_side: float) -> PartSpe
         ConnectorSpec("pit", 0.0, side, 0.0, 90.0 if pit_side > 0 else 270.0, TRACK, pit),
     )
     return PartSpec(
-        system,
-        article,
-        resolved_scale(system, None),
-        name,
-        PITLANE,
-        length,
-        width,
-        None,
-        None,
-        0.0,
-        2,
-        connectors,
-        rectangle(length, width),
+        article_number=article,
+        scale=CATALOG_SCALE,
+        name=name,
+        category=PITLANE,
+        length_mm=length,
+        width_mm=width,
+        height_mm=None,
+        radius_mm=None,
+        angle_deg=0.0,
+        lane_count=2,
+        connectors=connectors,
+        outline=rectangle(length, width),
     )
 
 
 def build_part(
     *,
-    system: str,
     article_number: str,
     scale: str | None,
     name: str,
@@ -687,9 +817,13 @@ def build_part(
     lane_count: int,
 ) -> PartSpec:
     """A part entered in the library. Joints follow the category and the measures."""
-    system_name, article, _scale = identity_key(system, article_number, scale)
+    if not isinstance(name, str):
+        raise ValidationError("error.planner.part")
     title = name.strip()
-    if not title or category not in CATEGORIES:
+    article = normalize_article(article_number)
+    identity_key(title, article)
+    stored_scale = require_scale(scale)
+    if category not in CATEGORIES:
         raise ValidationError("error.planner.part")
     lanes = lanes_for(lane_count)
     width = track_width(len(lanes)) if width_mm is None else width_mm
@@ -699,12 +833,14 @@ def build_part(
         connectors = curve_connectors(radius_mm, angle_deg, len(lanes))
         outline = arc_outline(radius_mm, angle_deg, width)
         length = None
+        paths: tuple[SlotPath, ...] = ()
     elif category == CROSSING:
         if length_mm is None or length_mm <= 0:
             raise ValidationError("error.planner.part")
         connectors = crossing_connectors(length_mm, len(lanes))
         outline = rectangle(length_mm, length_mm)
         length = length_mm
+        paths = ()
     else:
         if length_mm is None or length_mm <= 0:
             raise ValidationError("error.planner.part")
@@ -717,10 +853,15 @@ def build_part(
         connectors = straight_connectors(length_mm, len(lanes), kind=kind)
         outline = rectangle(length_mm, width)
         length = length_mm
+        if category == SWITCH:
+            paths = lane_change_paths(length_mm, "left")
+        elif category == LANE_CHANGE:
+            paths = lane_change_paths(length_mm, "both")
+        else:
+            paths = ()
     return PartSpec(
-        system=system_name,
         article_number=article,
-        scale=stored_scale(system_name, scale),
+        scale=stored_scale,
         name=title,
         category=category,
         length_mm=length,
@@ -731,6 +872,7 @@ def build_part(
         lane_count=len(lanes),
         connectors=connectors,
         outline=outline,
+        slot_paths=paths,
     )
 
 

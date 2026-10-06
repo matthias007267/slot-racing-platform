@@ -265,6 +265,7 @@ def test_library_filters_follow_scale_compatibility_and_reset(qtbot: QtBot, env:
     page.scale_filter.setCurrentIndex(page.scale_filter.findData("1:32"))
     assert "1:43" not in _scales(page)
     assert "1:32" in _scales(page)
+    page.scale_filter.setCurrentIndex(page.scale_filter.findData("1:24"))
     page.library.setCurrentRow(_library_row(page, "20020601"))
     page.place_part.click()
     assert page.compatible.isEnabled()
@@ -306,7 +307,7 @@ def test_the_library_manager_edits_definitions_and_keeps_used_ones(
     manager.resize(640, 520)
     manager.show()
     row = next(item for item in manager._rows if item.part_id == created.id)
-    row.resize(480, 72)
+    row.resize(480, max(96, row.sizeHint().height()))
     layout = row.layout()
     assert layout is not None
     layout.activate()
@@ -314,14 +315,23 @@ def test_the_library_manager_edits_definitions_and_keeps_used_ones(
     name = row.findChild(QLabel, "library-manager-name")
     scale = row.findChild(QLabel, "library-manager-scale")
     assert preview is not None and name is not None and scale is not None
+    article = row.findChild(QLabel, "library-manager-article")
     names = {label.objectName() for label in row.findChildren(QLabel)}
-    assert names == {"library-manager-name", "library-manager-scale"}
+    assert names == {
+        "library-manager-name",
+        "library-manager-article",
+        "library-manager-scale",
+    }
+    assert article is not None
     preview_right = preview.mapTo(row, preview.rect().bottomRight()).x()
     name_left = name.mapTo(row, name.rect().topLeft()).x()
     name_bottom = name.mapTo(row, name.rect().bottomLeft()).y()
+    article_top = article.mapTo(row, article.rect().topLeft()).y()
     scale_top = scale.mapTo(row, scale.rect().topLeft()).y()
     assert preview_right <= name_left
-    assert name_bottom <= scale_top
+    assert name_bottom <= article_top
+    assert article.text() == "EB-EDIT"
+    assert article_top <= scale_top
     assert scale.text() == "1:32"
     assert name.text() == "A" * 80
     manager.search.setText("EB-EDIT")
@@ -451,10 +461,7 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Gruppe", lane_count=2))
         part = next(
-            record
-            for record in planner.list_parts()
-            if record.spec.article_number == "20020601"
-            and record.spec.system == "Carrera Digital 132"
+            record for record in planner.list_parts() if record.spec.article_number == "20020601"
         )
         catalog = {part.id: part.spec}
         plan = place_instance(empty_plan(track.id), part.id, part.spec, 0, 0, 0, catalog)
@@ -493,12 +500,9 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
         runtime.shutdown()
 
 
-def test_carrera_evolution_parts_are_seeded_beside_digital(env: Env) -> None:
+def test_carrera_rails_are_seeded_once_at_one_to_twenty_four(env: Env) -> None:
     planner = _planner(env)
-    evolution = [
-        record for record in planner.list_parts() if record.spec.system == "Carrera Evolution"
-    ]
-    by_article = {record.spec.article_number: record.spec for record in evolution}
+    by_article = {record.spec.article_number: record.spec for record in planner.list_parts()}
     assert set(by_article) >= {
         "20020601",
         "20020611",
@@ -510,24 +514,25 @@ def test_carrera_evolution_parts_are_seeded_beside_digital(env: Env) -> None:
         "20020578",
         "20020587",
         "20020560",
+        "20020517",
+        "20030343",
+        "20030341",
+        "20030356-E",
     }
-    assert all(spec.scale == "1:32" for spec in by_article.values())
+    assert all(spec.scale == "1:24" for spec in by_article.values())
+    assert by_article["20020601"].name == "Standardgerade"
     assert by_article["20020601"].category == STRAIGHT
     assert by_article["20020601"].length_mm == pytest.approx(345)
     assert by_article["20020571"].category == CURVE
     assert by_article["20020571"].radius_mm == pytest.approx(300)
     assert by_article["20020571"].angle_deg == pytest.approx(60)
     assert by_article["20020560"].category == BORDER
-    digital = next(
-        record
-        for record in planner.list_parts()
-        if record.spec.article_number == "20020601" and record.spec.system == "Carrera Digital 132"
-    )
-    same_article = next(
-        record.id for record in evolution if record.spec.article_number == "20020601"
-    )
-    assert digital.id != same_article
-    assert "manufacturer" not in digital.spec.__dataclass_fields__
+    straights = [
+        record for record in planner.list_parts() if record.spec.article_number == "20020601"
+    ]
+    assert len(straights) == 1
+    assert "system" not in straights[0].spec.__dataclass_fields__
+    assert "manufacturer" not in straights[0].spec.__dataclass_fields__
 
 
 def _select_ids(page: PlannerPage, ids: set[str]) -> None:
@@ -575,8 +580,10 @@ def _articles(page: PlannerPage) -> list[str]:
     found: list[str] = []
     for row in range(page.library.count()):
         item = page.library.item(row)
-        if item is not None:
-            found.append(item.text())
+        card = None if item is None else page.library.itemWidget(item)
+        label = None if card is None else card.findChild(QLabel, "planner-part-article")
+        if label is not None:
+            found.append(label.text())
     return found
 
 
@@ -596,7 +603,6 @@ def _custom(
 ) -> PartSpec:
     del planner
     spec = build_part(
-        system="Eigenbau",
         article_number=article,
         scale=scale,
         name=name,

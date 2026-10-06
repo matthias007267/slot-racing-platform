@@ -4,39 +4,53 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QMimeData, QPointF, QSize, Qt
-from PySide6.QtGui import QColor, QDrag, QPainter, QPen, QPolygonF
+from PySide6.QtCore import QMimeData, QSize, Qt
+from PySide6.QtGui import QDrag, QPainter, QResizeEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from slot_racing.core.i18n import Translator
-from slot_racing.modules.track_planner.parts import PartRecord
-from slot_racing.uikit.theme import COLORS
+from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
+from slot_racing.modules.track_planner.ui.track_paint import apply_preview_transform, paint_part
 
 PART_MIME = "application/x-slot-racing-part"
+_CAPTION_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class PartPreview(QWidget):
-    """Small top view of a definition. The outline is the one stored on the part."""
+    """Small top view of a definition. The plan paints the same way."""
 
-    def __init__(self, outline: tuple[tuple[float, float], ...]) -> None:
+    def __init__(self, spec: PartSpec, *, color_coding: bool = False) -> None:
         super().__init__()
         self.setObjectName("planner-part-preview")
-        self.setFixedSize(72, 48)
-        self._outline = outline
+        line = max(self.fontMetrics().height(), 16)
+        self.setFixedSize(line * 5, line * 3)
+        self._spec = spec
+        self.color_coding = color_coding
+
+    def set_color_coding(self, enabled: bool) -> None:
+        if self.color_coding == enabled:
+            return
+        self.color_coding = enabled
+        self.update()
 
     def paintEvent(self, _event: object) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(QColor(COLORS.accent), 1.5))
-        painter.setBrush(QColor(COLORS.elevated))
-        painter.drawPolygon(_fitted(self._outline, self.width(), self.height()))
+        apply_preview_transform(painter, self._spec, self.width(), self.height())
+        paint_part(
+            painter,
+            self._spec,
+            color_coding=self.color_coding,
+            selected=False,
+            start_straight=False,
+        )
 
 
 class PartLibrary(QListWidget):
@@ -44,6 +58,8 @@ class PartLibrary(QListWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._color_coding = False
+        self._fitting = False
         self.setObjectName("planner-library")
         self.setMinimumWidth(340)
         self.setUniformItemSizes(False)
@@ -53,23 +69,51 @@ class PartLibrary(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-    def set_records(self, records: Sequence[PartRecord], translator: Translator) -> None:
+    def set_records(self, records: Sequence[PartRecord]) -> None:
         self.clear()
         for record in records:
             spec = record.spec
-            item = QListWidgetItem(f"{spec.name} ({spec.article_number})")
+            item = QListWidgetItem()
+            item.setText("")
             item.setData(Qt.ItemDataRole.UserRole, record.id)
-            card = _card(record, translator)
-            item.setSizeHint(card.sizeHint().expandedTo(QSize(300, 64)))
+            item.setData(_CAPTION_ROLE, f"{spec.name} ({spec.article_number})")
+            card = _card(record, color_coding=self._color_coding)
+            item.setSizeHint(_card_size(card))
             self.addItem(item)
             self.setItemWidget(item, card)
+        self._fit_item_widths()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_item_widths()
+
+    def _fit_item_widths(self) -> None:
+        """Lay each card out at the visible width so a long name can ellipsize."""
+        if self._fitting:
+            return
+        width = self.viewport().width()
+        if width <= 0:
+            return
+        self._fitting = True
+        try:
+            for row in range(self.count()):
+                item = self.item(row)
+                if item is None:
+                    continue
+                hint = item.sizeHint()
+                if hint.width() == width:
+                    continue
+                item.setSizeHint(QSize(width, hint.height()))
+        finally:
+            self._fitting = False
 
     def mimeData(self, items: Sequence[QListWidgetItem]) -> QMimeData:  # noqa: N802
         mime = QMimeData()
         if items:
             part_id = items[0].data(Qt.ItemDataRole.UserRole)
             mime.setData(PART_MIME, str(int(part_id)).encode("ascii"))
-            mime.setText(items[0].text())
+            caption = items[0].data(_CAPTION_ROLE)
+            mime.setText("" if caption is None else str(caption))
         return mime
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
@@ -85,49 +129,75 @@ class PartLibrary(QListWidget):
             )
         drag.exec(supported_actions)
 
+    def set_color_coding(self, enabled: bool) -> None:
+        """Restyle the visible cards. The list itself is not rebuilt."""
+        self._color_coding = enabled
+        for row in range(self.count()):
+            item = self.item(row)
+            card = self.itemWidget(item) if item is not None else None
+            if card is None:
+                continue
+            preview = card.findChild(PartPreview)
+            if preview is not None:
+                preview.set_color_coding(enabled)
 
-def _card(record: PartRecord, translator: Translator) -> QWidget:
+
+def _card(record: PartRecord, *, color_coding: bool) -> QWidget:
+    """Preview on the left. The text beside it is designation, article number and scale."""
     spec = record.spec
     card = QWidget()
     card.setObjectName("planner-part-card")
-    preview = PartPreview(spec.outline)
-    name = QLabel(spec.name)
-    name.setObjectName("planner-part-name")
-    system = QLabel(spec.system)
-    system.setObjectName("planner-part-system")
+    preview = PartPreview(spec, color_coding=color_coding)
+    name = _NameLabel(spec.name)
     article = QLabel(spec.article_number)
     article.setObjectName("planner-part-article")
     scale = QLabel(spec.scale)
     scale.setObjectName("planner-part-scale")
-    category = QLabel(translator.translate(f"planner.category.{spec.category}"))
-    category.setObjectName("planner-part-category")
     text = QVBoxLayout()
-    text.setContentsMargins(0, 0, 0, 0)
-    text.setSpacing(0)
+    text.setContentsMargins(8, 0, 0, 0)
+    text.setSpacing(1)
     text.addWidget(name)
-    text.addWidget(system)
     text.addWidget(article)
     text.addWidget(scale)
-    text.addWidget(category)
+    text.addStretch(1)
     row = QHBoxLayout(card)
-    row.setContentsMargins(4, 4, 4, 4)
-    row.addWidget(preview)
+    row.setContentsMargins(6, 4, 6, 4)
+    row.setSpacing(8)
+    row.addWidget(preview, 0, Qt.AlignmentFlag.AlignVCenter)
     row.addLayout(text, 1)
     return card
 
 
-def _fitted(outline: tuple[tuple[float, float], ...], width: int, height: int) -> QPolygonF:
-    points = outline or ((-20.0, -10.0), (20.0, -10.0), (20.0, 10.0), (-20.0, 10.0))
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    span_x = max(max(xs) - min(xs), 1.0)
-    span_y = max(max(ys) - min(ys), 1.0)
-    scale = min((width - 8) / span_x, (height - 8) / span_y)
-    center_x = (min(xs) + max(xs)) / 2
-    center_y = (min(ys) + max(ys)) / 2
-    polygon = QPolygonF()
-    for x, y in points:
-        polygon.append(
-            QPointF(width / 2 + (x - center_x) * scale, height / 2 + (y - center_y) * scale)
+class _NameLabel(QLabel):
+    """Designation beside the preview. A narrow column ellipsizes instead of overflowing."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setObjectName("planner-part-name")
+        self.setToolTip(text)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def paintEvent(self, _event: object) -> None:  # noqa: N802
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        shown = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, max(rect.width(), 0)
         )
-    return polygon
+        painter.drawText(
+            rect,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            shown,
+        )
+        painter.end()
+
+
+def _card_size(card: QWidget) -> QSize:
+    """Three text lines beside the preview. The height follows the current font."""
+    preview = card.findChild(PartPreview)
+    name_label = card.findChild(QLabel, "planner-part-name")
+    if preview is None or name_label is None:
+        return QSize(320, 72)
+    line = max(name_label.fontMetrics().height(), 1)
+    height = max(preview.height() + 12, line * 3 + 16)
+    return QSize(320, height)
