@@ -183,18 +183,48 @@ def test_a_valid_camera_provider_starts_the_race(qtbot: QtBot, env: Env) -> None
 
 
 def test_a_race_with_the_simulation_still_starts_through_the_ui(qtbot: QtBot, env: Env) -> None:
-    _, page = open_page(qtbot, env, "races")
+    window, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)
+    window.show()
     page.refresh()
     configure_race(page, env)
     wizard = page.wizard
     assert wizard.go_next() and wizard.step == OVERVIEW
     assert "Zeitmessung: Simulation" in wizard.overview_label.text()
     assert wizard.go_next() and wizard.step == START
+    page.live.cue_interval_ms = 60_000
     wizard.start_button.click()
     assert isinstance(page.current_view(), LiveRaceView)
+    live = page.live
     race = wizard.race
     assert race is not None
-    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
     assert env.races.require_race(race.id).timing_provider == "simulation"
-    assert not page.live.start_lights.isVisible()
+    assert live.start_lights.isVisible()
+    assert live.start_lights.lit_lights == 1
+    assert not live.start_lights.showing_go
+    runner = live.runner
+    assert runner is not None
+    assert runner.status is RaceStatus.CREATED
+    assert runner.snapshot().elapsed_ns == 0
+    for lit in (2, 3, 4, 5):
+        live.advance_start_cue()
+        assert live.start_lights.lit_lights == lit
+        assert not live.start_lights.showing_go
+        assert runner.status is RaceStatus.CREATED
+        assert runner.snapshot().elapsed_ns == 0
+    env.clock.advance(5_000_000_000)
+    live.refresh()
+    assert runner.status is RaceStatus.CREATED
+    assert runner.snapshot().elapsed_ns == 0
+    assert all(row.laps_completed == 0 for row in runner.snapshot().rows)
+    live.advance_start_cue()
+    assert live.start_lights.showing_go
+    assert live.start_lights.lit_lights == 0
+    assert runner.status is RaceStatus.RUNNING
+    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
+    env.clock.advance(2_000_000_000)
+    live.refresh()
+    assert runner.snapshot().elapsed_ns == 2_000_000_000
+    live.advance_start_cue()
+    assert runner.status is RaceStatus.RUNNING
+    assert not live.start_lights.isVisible()

@@ -18,6 +18,7 @@ from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.wizard import MODE, PARTICIPANTS
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import open_page
+from tests.support.start_sequence import release_start_lights
 
 
 def test_rotation_gives_every_driver_every_lane_once() -> None:
@@ -261,6 +262,7 @@ def test_the_live_board_has_one_column_per_lane(qtbot: QtBot, env: Env, lanes: i
     page.buttons["start"].click()
     live = page.live
     assert isinstance(live, LiveRaceView)
+    release_start_lights(live)
     assert not live.stage.isHidden()
     labels = [live.findChild(QFrame, f"live-lane-{lane}") for lane in range(1, lanes + 1)]
     assert all(label is not None for label in labels)
@@ -309,6 +311,7 @@ def test_postponing_and_disqualifying_from_the_waiting_window(qtbot: QtBot, env:
     assert "Bahn 1:" in wizard.ready_label.text()
     wizard.start_button.click()
     live = page.live
+    release_start_lights(live)
     for _ in range(80):
         env.clock.advance(100_000_000)
         live.refresh()

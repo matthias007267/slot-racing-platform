@@ -211,8 +211,7 @@ class RacesPage(QWidget):
         self.stack.setCurrentWidget(self.wizard)
 
     def _start(self, race_id: RaceId) -> None:
-        info = self._service.get_race(race_id)
-        if info is not None and uses_start_cue(info.timing_provider):
+        if uses_start_cue():
             runner = self._controller.prepare_race(race_id)
         else:
             runner = self._controller.start_race(race_id)

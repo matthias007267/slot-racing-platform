@@ -11,6 +11,7 @@ from slot_racing.modules.races.ui.wizard import MODE, PARTICIPANTS, TRACK
 from slot_racing.modules.tracks.service import TrackInput
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import cells, open_page
+from tests.support.start_sequence import release_start_lights
 
 
 @pytest.mark.parametrize("lanes", [2, 3, 4])
@@ -73,6 +74,7 @@ def test_the_time_trial_board_lists_only_configured_lanes(
     page.table.selectRow(0)
     page.buttons["start"].click()
     live = page.live
+    release_start_lights(live)
     assert live.board.records_table.rowCount() == lanes
     assert live.board.active_table.rowCount() == lanes
     assert [cells(live.board.records_table, row)[0] for row in range(lanes)] == [

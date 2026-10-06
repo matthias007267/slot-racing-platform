@@ -12,10 +12,9 @@ from slot_racing.modules.races.ui.start_cue import (
 )
 
 
-def test_only_a_camera_race_uses_the_start_cue() -> None:
-    assert uses_start_cue("camera")
-    assert not uses_start_cue("simulation")
-    assert not uses_start_cue("sensor")
+def test_every_race_start_uses_the_lights() -> None:
+    """The lights are the race start. The timing provider is not an argument."""
+    assert uses_start_cue()
 
 
 def test_the_race_starts_when_the_lights_go_out_and_not_before(qtbot: QtBot) -> None:

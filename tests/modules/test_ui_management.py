@@ -32,6 +32,7 @@ from slot_racing.modules.races.ui.wizard import MODE, NAME, OVERVIEW, PARTICIPAN
 from slot_racing.modules.tracks.ui.tracks_area import TracksArea
 from slot_racing.modules.tracks.ui.tracks_page import TrackDialog, TracksPage
 from tests.modules.conftest import Env
+from tests.support.start_sequence import release_start_lights
 
 
 def open_page(qtbot: QtBot, env: Env, page_id: str) -> tuple[MainWindow, object]:
@@ -514,6 +515,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     wizard.start_button.click()
     assert isinstance(page.current_view(), LiveRaceView)
     live = page.live
+    release_start_lights(live)
     assert live.status_label.text().endswith("Läuft")
     assert live.name_label.text() == "Finale"
     assert live.track_label.text().endswith("Heimbahn")
@@ -545,6 +547,7 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert not live.heat_gate.isHidden()
     assert "Spurwechsel" in live.heat_gate.body_label.text()
     live.heat_gate.start_button.click()
+    release_start_lights(live)
     assert live.runner is not None and live.runner.is_active
 
     for _ in range(160):

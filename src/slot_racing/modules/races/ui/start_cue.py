@@ -1,8 +1,9 @@
-"""Start sequence for a camera race.
+"""Start sequence for a race.
 
 The cue only decides when to ask the race to start. The race engine still owns
-the clock and the first lap. The start-light widget only draws the step this
-cue publishes. It does not start the race.
+the clock and the first lap. The timing provider only measures laps after that
+start. The start-light widget only draws the step this cue publishes. It does
+not start the race.
 
 The moments stay separate:
 
@@ -22,10 +23,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from PySide6.QtCore import QObject, QTimer, Signal
-
-# Provider id registered by the camera timing plugin. The race module does not
-# import that plugin; the id is the value stored on the race.
-CAMERA_PROVIDER_ID = "camera"
 
 
 class StartPhase(StrEnum):
@@ -68,9 +65,14 @@ def _light_steps(count: int = START_LIGHT_COUNT) -> tuple[StartCueStep, ...]:
 DEFAULT_START_STEPS: tuple[StartCueStep, ...] = _light_steps()
 
 
-def uses_start_cue(timing_provider: str) -> bool:
-    """Camera races wait for the cue. Every other provider starts immediately."""
-    return timing_provider == CAMERA_PROVIDER_ID
+def uses_start_cue() -> bool:
+    """Whether the race UI waits for the lights before the engine starts.
+
+    This is the only decision. It does not look at the timing provider: simulation,
+    camera and a later sensor provider all measure laps, and the lights are how a
+    race from the UI is started. ``False`` would start at once.
+    """
+    return True
 
 
 class StartCue(QObject):

@@ -222,9 +222,9 @@ class LiveRaceView(QWidget):
             self._timer.start()
 
     def open_for_start(self, runner: RaceRunner) -> None:
-        """Show the race. A camera race shows the start lights before the engine starts."""
+        """Show the race and the start lights. The engine stays stopped until they go out."""
         self.show_runner(runner)
-        if uses_start_cue(runner.race.timing_provider) and not runner.is_active:
+        if uses_start_cue() and not runner.is_active:
             self.begin_start_cue()
 
     def begin_start_cue(self, interval_ms: int | None = None) -> None:
@@ -646,7 +646,7 @@ class LiveRaceView(QWidget):
         if runner is None:
             return
         try:
-            if uses_start_cue(runner.race.timing_provider):
+            if uses_start_cue():
                 started = self._controller.prepare_race(runner.race.id)
             else:
                 started = self._controller.start_race(runner.race.id)
