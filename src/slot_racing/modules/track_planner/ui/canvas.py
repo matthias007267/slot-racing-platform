@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
@@ -172,8 +172,11 @@ class PlanCanvas(QGraphicsView):
         lane_count: int,
         selected: str | set[str] | None,
         parts: Mapping[int, PartSpec] | None = None,
+        *,
+        excess: Collection[str] | None = None,
     ) -> None:
         chosen = {selected} if isinstance(selected, str) else set(selected or ())
+        extra = set(excess or ())
         self._loading = True
         self._lane_count = lane_count
         self._direction = plan.direction
@@ -193,6 +196,7 @@ class PlanCanvas(QGraphicsView):
                 continue
             placed = InstanceItem(instance, spec, self._report_group)
             placed.set_color_coding(self._color_coding)
+            placed.set_shortage(placed.item_id in extra)
             self._scene.addItem(placed)
             placed.setSelected(placed.item_id in chosen)
         for piece in plan.pieces:
@@ -681,6 +685,7 @@ class InstanceItem(QGraphicsItem):
         self.group_id = instance.group_id
         self._start_straight = instance.start_straight
         self._color_coding = False
+        self._shortage = False
         self._report = report
         self._ready = False
         self._press: QPointF | None = None
@@ -715,16 +720,23 @@ class InstanceItem(QGraphicsItem):
         self._color_coding = enabled
         self.update()
 
+    def set_shortage(self, enabled: bool) -> None:
+        if self._shortage == enabled:
+            return
+        self._shortage = enabled
+        self.update()
+
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
         painter.save()
         painter.scale(MM, MM)
-        # The accent stroke is the part outline. A curve follows its arc, not the bounds.
+        # Selection and shortage both follow the roadway. The bounds stay a hit target.
         paint_part(
             painter,
             self.spec,
             color_coding=self._color_coding,
             selected=self.isSelected(),
             start_straight=self._start_straight,
+            shortage=self._shortage,
         )
         painter.restore()
 

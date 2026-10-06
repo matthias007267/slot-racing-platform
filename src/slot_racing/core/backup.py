@@ -58,6 +58,7 @@ REQUIRED_TABLES = frozenset(
         "track_part_definitions",
         "track_part_connectors",
         "track_plan_instances",
+        "track_part_stock",
         "timing_configurations",
         "timing_positions",
         "timing_sensors",

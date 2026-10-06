@@ -58,6 +58,7 @@ def paint_part(
     color_coding: bool,
     selected: bool,
     start_straight: bool,
+    shortage: bool = False,
 ) -> None:
     """Draw ``spec`` in local millimetres. The caller sets the transform."""
     paint_figure(
@@ -67,6 +68,7 @@ def paint_part(
         selected=selected,
         start_straight=start_straight,
         part_width=spec.width_mm or 0.0,
+        shortage=shortage,
     )
 
 
@@ -78,6 +80,7 @@ def paint_figure(
     selected: bool,
     start_straight: bool,
     part_width: float,
+    shortage: bool = False,
 ) -> None:
     drawn = _drawn(figure)
     painter.save()
@@ -91,6 +94,17 @@ def paint_figure(
     _stroke(painter, drawn.centers, CENTER_LINE, CENTER_WIDTH_MM, round_cap=False)
     if start_straight and part_width > 0.0:
         _start_line(painter, part_width)
+    # The shortage stroke is the roadway itself. It sits under the selection
+    # stroke and stays a few screen pixels wider, so a selected extra part keeps
+    # a green centre and a red rim. Neither stroke is a bounding box.
+    if shortage:
+        _stroke(
+            painter,
+            drawn.roadway,
+            COLORS.error,
+            _halo_mm(painter, EDGE_WIDTH_MM * 1.6, 4.0),
+            round_cap=False,
+        )
     if selected:
         _stroke(painter, drawn.roadway, COLORS.accent, EDGE_WIDTH_MM * 1.6, round_cap=False)
     painter.restore()
@@ -146,6 +160,16 @@ def _stroke(
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawPath(path)
+
+
+def _halo_mm(painter: QPainter, inner_mm: float, extra_px: float) -> float:
+    """Millimetre width that stays ``extra_px`` wider on screen than ``inner_mm``."""
+    transform = painter.transform()
+    scale = math.hypot(transform.m11(), transform.m12())
+    if scale <= 1e-6:
+        return inner_mm
+    inner = max(inner_mm, _MIN_PX / scale)
+    return inner + extra_px / scale
 
 
 def _width_mm(painter: QPainter, nominal_mm: float) -> float:

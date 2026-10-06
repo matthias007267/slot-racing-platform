@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from PySide6.QtCore import QMimeData, QSize, Qt
 from PySide6.QtGui import QDrag, QPainter, QResizeEvent
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
 from slot_racing.modules.track_planner.ui.track_paint import apply_preview_transform, paint_part
+from slot_racing.uikit.theme import set_tone
 
 PART_MIME = "application/x-slot-racing-part"
 _CAPTION_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -69,7 +70,10 @@ class PartLibrary(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-    def set_records(self, records: Sequence[PartRecord]) -> None:
+    def set_records(
+        self, records: Sequence[PartRecord], remaining: Mapping[int, str] | None = None
+    ) -> None:
+        notes = {} if remaining is None else remaining
         self.clear()
         for record in records:
             spec = record.spec
@@ -77,7 +81,7 @@ class PartLibrary(QListWidget):
             item.setText("")
             item.setData(Qt.ItemDataRole.UserRole, record.id)
             item.setData(_CAPTION_ROLE, f"{spec.name} ({spec.article_number})")
-            card = _card(record, color_coding=self._color_coding)
+            card = _card(record, color_coding=self._color_coding, remaining=notes.get(record.id))
             item.setSizeHint(_card_size(card))
             self.addItem(item)
             self.setItemWidget(item, card)
@@ -142,7 +146,7 @@ class PartLibrary(QListWidget):
                 preview.set_color_coding(enabled)
 
 
-def _card(record: PartRecord, *, color_coding: bool) -> QWidget:
+def _card(record: PartRecord, *, color_coding: bool, remaining: str | None = None) -> QWidget:
     """Preview on the left. The text beside it is designation, article number and scale."""
     spec = record.spec
     card = QWidget()
@@ -159,6 +163,11 @@ def _card(record: PartRecord, *, color_coding: bool) -> QWidget:
     text.addWidget(name)
     text.addWidget(article)
     text.addWidget(scale)
+    if remaining is not None:
+        note = QLabel(remaining)
+        note.setObjectName("planner-part-remaining")
+        set_tone(note, "muted")
+        text.addWidget(note)
     text.addStretch(1)
     row = QHBoxLayout(card)
     row.setContentsMargins(6, 4, 6, 4)
@@ -193,11 +202,12 @@ class _NameLabel(QLabel):
 
 
 def _card_size(card: QWidget) -> QSize:
-    """Three text lines beside the preview. The height follows the current font."""
+    """Text lines beside the preview. The height follows the current font."""
     preview = card.findChild(PartPreview)
     name_label = card.findChild(QLabel, "planner-part-name")
     if preview is None or name_label is None:
         return QSize(320, 72)
     line = max(name_label.fontMetrics().height(), 1)
-    height = max(preview.height() + 12, line * 3 + 16)
+    lines = 4 if card.findChild(QLabel, "planner-part-remaining") is not None else 3
+    height = max(preview.height() + 12, line * lines + 16)
     return QSize(320, height)
