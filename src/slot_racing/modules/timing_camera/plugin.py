@@ -56,6 +56,7 @@ class CameraTimingPlugin(Plugin):
             "camera.diagnostic.snapshot": "Snapshot speichern",
             "camera.diagnostic.view": "Ansicht",
             "camera.diagnostic.view.analysis": "Analysebild",
+            "camera.diagnostic.view.reference": "Referenz",
             "camera.diagnostic.view.difference": "Frame-Differenz",
             "camera.diagnostic.view.threshold": "Schwellwert",
             "camera.diagnostic.view.zones": "Zonen",

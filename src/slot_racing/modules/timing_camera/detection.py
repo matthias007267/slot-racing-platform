@@ -5,10 +5,11 @@ is not a bright pixel: a connected group of blocks has to move through the zone
 in the configured travel direction, inside a time window. One pass emits one
 crossing. The zone has to return to clear before the next car counts.
 
-The reference is the block matrix of the calibration frame. It is not blended
-while a car may be crossing, so the car cannot become part of the background.
-Adapting that reference to a slow lighting change is a later step; a fixed
-reference stays stable for the race.
+The reference starts as the block matrix of the calibration frame. Blocks that
+stay quiet follow slow lighting changes. Blocks that belong to a car, or to a
+group that is still moving, stay frozen so the car is not learned as background.
+A zone is released when that car has gone, even if a smaller static remainder
+is still different from the original calibration frame.
 
 The detector knows frames, geometry, lanes, positions and timestamps. It does
 not know races, drivers, vehicles or how a crossing becomes a race event.
@@ -16,6 +17,7 @@ not know races, drivers, vehicles or how a crossing becomes a race event.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
@@ -180,6 +182,56 @@ class ZoneInspection:
     min_shift: float
     window_ns: int
     direction: TravelDirection
+    reference_frozen: bool
+    reference_updates: int
+    background_stable: bool
+    release_candidate: bool
+
+
+# Quiet blocks follow the picture with this time constant. One second of real
+# time moves a stable block most of the way. The step uses the frame timestamp,
+# not an assumed frame rate.
+_BACKGROUND_TAU_NS = 1_000_000_000
+
+# A connected group must sit still this long, and the zone must be clear,
+# before those blocks may join the background. A car that already counted
+# stays occupied, so this delay does not absorb a stopped car.
+_BACKGROUND_SETTLE_NS = 2_000_000_000
+
+# After a crossing, the group that remains is leftover background when it is
+# at most half the vehicle peak of this occupation, in both size and mean
+# difference, and it is no longer travelling. Half is a relative split between
+# "the object that occupied the zone" and "what was left behind", not a car size.
+_RELEASE_RATIO = 0.5
+
+# The remainder has to stay still for this long before the zone is armed again.
+# At about 25 fps that is a few frames. It is not a cooldown between cars.
+_RELEASE_STABLE_NS = 100_000_000
+
+# Motion below this many blocks is not travel. Every sensitivity profile asks
+# for a larger shift than this (0.75 to 1.25 blocks).
+_STABLE_SHIFT = 0.5
+
+# Ignore blends smaller than this gray level so an unchanged frame is not
+# reported as a reference update.
+_REFERENCE_EPSILON = 0.05
+
+
+@dataclass
+class _ZoneMemory:
+    """Runtime background state for one zone. Not saved with the configuration."""
+
+    peak_blocks: int = 0
+    peak_strength: float = 0.0
+    stable_since_ns: int | None = None
+    stable_centroid: tuple[float, float] | None = None
+    stable_blocks: int = 0
+    last_ns: int | None = None
+    reference_updates: int = 0
+    reference_frozen: bool = False
+    background_stable: bool = False
+    release_candidate: bool = False
+    pending: np.ndarray | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +249,8 @@ class LaneCrossingDetector:
     one, the first :meth:`observe` call stores its block matrix and reports no
     crossing. A static object that is part of that reference never becomes a
     crossing. A car that afterwards moves through the zone in the configured
-    direction does, once, until the zone is clear again.
+    direction does, once, until the car has left. A smaller static remainder
+    does not keep the zone occupied.
     """
 
     def __init__(self, settings: DetectorSettings, background: GrayFrame | None = None) -> None:
@@ -215,6 +268,7 @@ class LaneCrossingDetector:
         self._inspect = False
         self._last_inspection: FrameInspection | None = None
         self._zone_inspections: list[ZoneInspection] = []
+        self._memory = [_ZoneMemory() for _ in settings.zones]
         self.pixels_compared = 0
         if background is not None:
             self._check_frame(background)
@@ -375,66 +429,111 @@ class LaneCrossingDetector:
         component = _largest_component(mask, required)
         key = (zone.position_id, zone.lane)
         samples = self._samples[index]
+        memory = self._memory[index]
+        strength, count, centroid = _component_facts(component, difference)
         if not emit:
+            memory.last_ns = None
             return self._synchronize_zone(
-                zone, key, samples, component, current, reference, difference, mask, block
-            )
-
-        assert timestamp_ns is not None
-        if component is None:
-            return None, self._without_component(
                 zone,
                 key,
                 samples,
-                timestamp_ns,
-                current,
-                reference,
-                mask,
-                difference,
-                block,
-            )
-        centroid_x, centroid_y = _centroid(component)
-        centroid = (centroid_x, centroid_y)
-        count = int(component.shape[0])
-        if self._states[key] is ZoneState.OCCUPIED:
-            return None, self._trace(
-                zone,
-                current,
-                reference,
-                mask,
-                difference,
                 component,
-                None,
-                centroid,
-                len(samples),
-                0,
+                current,
+                reference,
+                difference,
+                mask,
                 block,
-                ZoneState.OCCUPIED,
-                False,
-                "occupied",
+                strength,
+                count,
             )
+
+        assert timestamp_ns is not None
+        self._follow_component(memory, timestamp_ns, strength, count, centroid)
+        crossing, shift, expired, accepted, reason, sample_count = self._classify(
+            zone,
+            key,
+            samples,
+            component,
+            centroid,
+            count,
+            timestamp_ns,
+            memory,
+            mask,
+        )
+        if reason in {"clear", "insufficient_motion", "below_size"} and _absorbing(
+            memory, mask, self._states[key], component is not None
+        ):
+            reason = "background_adapting"
+        self._prepare_reference(index, current, mask, timestamp_ns, component is not None)
+        trace = self._trace(
+            zone,
+            current,
+            reference,
+            mask,
+            difference,
+            component,
+            shift,
+            centroid,
+            sample_count,
+            expired,
+            block,
+            self._states[key],
+            accepted,
+            reason,
+            memory,
+        )
+        self._apply_reference(index)
+        return crossing, trace
+
+    def _classify(
+        self,
+        zone: DetectionZone,
+        key: tuple[str, int],
+        samples: list[tuple[int, float, float]],
+        component: np.ndarray | None,
+        centroid: tuple[float, float] | None,
+        count: int,
+        timestamp_ns: int,
+        memory: _ZoneMemory,
+        mask: np.ndarray,
+    ) -> tuple[LaneCrossing | None, float | None, int, bool, str, int]:
+        """Direction decision. The reference is still the one this frame compared."""
+        profile = self._profile
+        if component is None or centroid is None:
+            expired = 0
+            if self._states[key] is ZoneState.OCCUPIED:
+                self._states[key] = ZoneState.CLEAR
+                samples.clear()
+                reason = "released"
+            else:
+                before = len(samples)
+                _drop_old(samples, timestamp_ns, profile.window_ns)
+                expired = before - len(samples)
+                # A few changed blocks that never form a group are noise, not a car.
+                reason = "below_size" if self._settings.debug and bool(np.any(mask)) else "clear"
+            return None, None, expired, False, reason, len(samples)
+
+        if self._states[key] is ZoneState.OCCUPIED:
+            stable = _held_for(memory, timestamp_ns, _RELEASE_STABLE_NS)
+            if memory.release_candidate and stable:
+                self._states[key] = ZoneState.CLEAR
+                samples.clear()
+                memory.peak_blocks = 0
+                memory.peak_strength = 0.0
+                memory.release_candidate = False
+                memory.stable_since_ns = timestamp_ns
+                memory.background_stable = False
+                return None, None, 0, False, "released_to_background", 0
+            return None, None, 0, False, "occupied", len(samples)
+
+        centroid_x, centroid_y = centroid
         samples.append((timestamp_ns, centroid_x, centroid_y))
         before = len(samples)
         _drop_old(samples, timestamp_ns, profile.window_ns)
         expired = before - len(samples)
         used = len(samples)
         if used < 2:
-            return None, self._trace(
-                zone,
-                current,
-                reference,
-                mask,
-                difference,
-                component,
-                None,
-                centroid,
-                used,
-                expired,
-                block,
-                ZoneState.CLEAR,
-                False,
-                "too_short",
-            )
+            return None, None, expired, False, "too_short", used
         oldest = samples[0]
         shift = _travel_shift(
             self._settings.direction, oldest[1], oldest[2], centroid_x, centroid_y
@@ -448,57 +547,97 @@ class LaneCrossingDetector:
                 timestamp_ns=timestamp_ns,
                 foreground_pixels=count,
             )
-            return crossing, self._trace(
-                zone,
-                current,
-                reference,
-                mask,
-                difference,
-                component,
-                shift,
-                centroid,
-                used,
-                expired,
-                block,
-                ZoneState.OCCUPIED,
-                True,
-                "accepted",
-            )
+            return crossing, shift, expired, True, "accepted", used
         if shift <= -profile.min_shift:
             samples.clear()
             samples.append((timestamp_ns, centroid_x, centroid_y))
-            return None, self._trace(
-                zone,
-                current,
-                reference,
-                mask,
-                difference,
-                component,
-                shift,
-                centroid,
-                used,
-                expired,
-                block,
-                ZoneState.CLEAR,
-                False,
-                "wrong_direction",
-            )
-        return None, self._trace(
-            zone,
-            current,
-            reference,
-            mask,
-            difference,
-            component,
-            shift,
-            centroid,
-            used,
-            expired,
-            block,
-            ZoneState.CLEAR,
-            False,
-            "insufficient_motion",
+            return None, shift, expired, False, "wrong_direction", 1
+        return None, shift, expired, False, "insufficient_motion", used
+
+    def _follow_component(
+        self,
+        memory: _ZoneMemory,
+        timestamp_ns: int,
+        strength: float,
+        count: int,
+        centroid: tuple[float, float] | None,
+    ) -> None:
+        """Track the vehicle peak and whether the current group has stopped moving."""
+        memory.release_candidate = False
+        if centroid is None or count == 0:
+            memory.stable_since_ns = None
+            memory.stable_centroid = None
+            memory.stable_blocks = 0
+            memory.peak_blocks = 0
+            memory.peak_strength = 0.0
+            memory.background_stable = True
+            return
+        if count > memory.peak_blocks:
+            memory.peak_blocks = count
+        if strength > memory.peak_strength:
+            memory.peak_strength = strength
+        anchor = memory.stable_centroid
+        if anchor is None or memory.stable_since_ns is None:
+            moved = True
+        else:
+            distance = math.hypot(centroid[0] - anchor[0], centroid[1] - anchor[1])
+            size_delta = abs(count - memory.stable_blocks)
+            moved = distance >= _STABLE_SHIFT or size_delta > max(1, memory.stable_blocks // 4)
+        if moved:
+            memory.stable_since_ns = timestamp_ns
+            memory.stable_centroid = centroid
+            memory.stable_blocks = count
+        since = memory.stable_since_ns
+        age = 0 if since is None else timestamp_ns - since
+        memory.background_stable = age >= _BACKGROUND_SETTLE_NS
+        memory.release_candidate = (
+            memory.peak_blocks >= 2
+            and count <= memory.peak_blocks * _RELEASE_RATIO
+            and memory.peak_strength > 0.0
+            and strength <= memory.peak_strength * _RELEASE_RATIO
         )
+
+    def _prepare_reference(
+        self,
+        index: int,
+        current: np.ndarray,
+        mask: np.ndarray,
+        timestamp_ns: int,
+        has_component: bool,
+    ) -> None:
+        """Decide the reference step. The matrix itself changes only after inspection copies it."""
+        memory = self._memory[index]
+        memory.pending = None
+        references = self._references
+        if references is None:
+            return
+        reference = references[index]
+        zone = self._settings.zones[index]
+        clear = self._states[(zone.position_id, zone.lane)] is ZoneState.CLEAR
+        absorb = clear and (not has_component or memory.background_stable)
+        eligible = np.ones(mask.shape, dtype=bool) if absorb else ~mask
+        memory.reference_frozen = bool(np.any(mask & ~eligible))
+        previous = memory.last_ns
+        memory.last_ns = timestamp_ns
+        if previous is None or timestamp_ns <= previous or reference.size == 0:
+            return
+        alpha = 1.0 - math.exp(-(timestamp_ns - previous) / _BACKGROUND_TAU_NS)
+        if alpha <= 0.0:
+            return
+        step = alpha * (current - reference) * eligible
+        if float(np.max(np.abs(step))) <= _REFERENCE_EPSILON:
+            return
+        memory.pending = step
+        memory.reference_updates += 1
+
+    def _apply_reference(self, index: int) -> None:
+        memory = self._memory[index]
+        pending = memory.pending
+        memory.pending = None
+        references = self._references
+        if pending is None or references is None:
+            return
+        references[index] += pending
 
     def _synchronize_zone(
         self,
@@ -511,11 +650,20 @@ class LaneCrossingDetector:
         difference: np.ndarray,
         mask: np.ndarray,
         block: int,
+        strength: float,
+        count: int,
     ) -> tuple[None, DetectionTrace | None]:
         samples.clear()
+        memory = self._memory[self._settings.zones.index(zone)]
         centroid = None if component is None else _centroid(component)
+        memory.release_candidate = False
+        memory.last_ns = None
         if component is None:
             self._states[key] = ZoneState.CLEAR
+            memory.peak_blocks = 0
+            memory.peak_strength = 0.0
+            memory.background_stable = True
+            memory.reference_frozen = False
             return None, self._trace(
                 zone,
                 current,
@@ -531,8 +679,13 @@ class LaneCrossingDetector:
                 ZoneState.CLEAR,
                 False,
                 "synchronized_clear",
+                memory,
             )
         self._states[key] = ZoneState.OCCUPIED
+        memory.peak_blocks = max(memory.peak_blocks, count)
+        memory.peak_strength = max(memory.peak_strength, strength)
+        memory.background_stable = False
+        memory.reference_frozen = True
         return None, self._trace(
             zone,
             current,
@@ -548,46 +701,7 @@ class LaneCrossingDetector:
             ZoneState.OCCUPIED,
             False,
             "synchronized_occupied",
-        )
-
-    def _without_component(
-        self,
-        zone: DetectionZone,
-        key: tuple[str, int],
-        samples: list[tuple[int, float, float]],
-        timestamp_ns: int,
-        current: np.ndarray,
-        reference: np.ndarray,
-        mask: np.ndarray,
-        difference: np.ndarray,
-        block: int,
-    ) -> DetectionTrace | None:
-        expired = 0
-        if self._states[key] is ZoneState.OCCUPIED:
-            self._states[key] = ZoneState.CLEAR
-            samples.clear()
-            reason = "released"
-        else:
-            before = len(samples)
-            _drop_old(samples, timestamp_ns, self._profile.window_ns)
-            expired = before - len(samples)
-            # A few changed blocks that never form a group are noise, not a car.
-            reason = "below_size" if self._settings.debug and bool(np.any(mask)) else "clear"
-        return self._trace(
-            zone,
-            current,
-            reference,
-            mask,
-            difference,
-            None,
-            None,
-            None,
-            len(samples),
-            expired,
-            block,
-            ZoneState.CLEAR,
-            False,
-            reason,
+            memory,
         )
 
     def _trace(
@@ -606,6 +720,7 @@ class LaneCrossingDetector:
         state: ZoneState,
         accepted: bool,
         reason: str,
+        memory: _ZoneMemory,
     ) -> DetectionTrace | None:
         if self._inspect:
             reported = reason
@@ -631,6 +746,7 @@ class LaneCrossingDetector:
                     reported,
                     self._profile,
                     self._settings.direction,
+                    memory,
                 )
             )
         if not self._settings.debug:
@@ -676,6 +792,7 @@ class LaneCrossingDetector:
                         "calibrated",
                         self._profile,
                         self._settings.direction,
+                        self._memory[index],
                     )
                 )
             self._last_inspection = FrameInspection(True, tuple(zones))
@@ -830,6 +947,7 @@ def _zone_inspection(
     reason: str,
     profile: SensitivityProfile,
     direction: TravelDirection,
+    memory: _ZoneMemory,
 ) -> ZoneInspection:
     """Copy the block matrices this decision compared. Not the camera frame."""
     if difference.size == 0:
@@ -876,6 +994,10 @@ def _zone_inspection(
         min_shift=profile.min_shift,
         window_ns=profile.window_ns,
         direction=direction,
+        reference_frozen=memory.reference_frozen,
+        reference_updates=memory.reference_updates,
+        background_stable=memory.background_stable,
+        release_candidate=memory.release_candidate,
     )
 
 
@@ -979,6 +1101,35 @@ def _largest_component(mask: np.ndarray, minimum: int) -> np.ndarray | None:
 
 def _centroid(cells: np.ndarray) -> tuple[float, float]:
     return float(cells[:, 1].mean()), float(cells[:, 0].mean())
+
+
+def _component_facts(
+    component: np.ndarray | None, difference: np.ndarray
+) -> tuple[float, int, tuple[float, float] | None]:
+    if component is None:
+        return 0.0, 0, None
+    selected = difference[component[:, 0], component[:, 1]]
+    strength = float(selected.mean()) if selected.size else 0.0
+    return strength, int(component.shape[0]), _centroid(component)
+
+
+def _held_for(memory: _ZoneMemory, timestamp_ns: int, required_ns: int) -> bool:
+    since = memory.stable_since_ns
+    if since is None:
+        return False
+    return timestamp_ns - since >= required_ns
+
+
+def _absorbing(
+    memory: _ZoneMemory, mask: np.ndarray, state: ZoneState, has_component: bool
+) -> bool:
+    """True when a settled clear zone is taking above-threshold blocks into the background."""
+    return (
+        state is ZoneState.CLEAR
+        and has_component
+        and memory.background_stable
+        and bool(np.any(mask))
+    )
 
 
 def _travel_shift(direction: TravelDirection, x0: float, y0: float, x1: float, y1: float) -> float:
