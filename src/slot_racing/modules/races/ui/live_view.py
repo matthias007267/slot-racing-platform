@@ -10,6 +10,7 @@ from PySide6.QtGui import QCloseEvent, QHideEvent
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
 
 from slot_racing.core.clock import format_duration
+from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.events import (
     Event,
@@ -97,6 +98,7 @@ class LiveRaceView(QWidget):
         controller: RaceController,
         store: HudConfigurationStore | None = None,
         service: RaceService | None = None,
+        config: AppConfig | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -112,7 +114,7 @@ class LiveRaceView(QWidget):
         self._announced_finishers: set[int] = set()
         self._message = ""
         self._cue: StartCue | None = None
-        self.audio = RaceAudio(parent=self)
+        self.audio = RaceAudio(parent=self, config=config)
         self.cue_interval_ms = 1000
         self._unsubscribe_hud: Callable[[], None] | None = None
         self.confirm: Callable[[str], bool] = lambda text: (

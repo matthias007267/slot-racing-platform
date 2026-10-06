@@ -18,7 +18,11 @@ from slot_racing.modules.races.ui.race_audio import (
     SAMPLE_RATE_HZ,
     ToneSpec,
     render_tone,
+    volume_gain,
 )
+
+# 100 % of the setting is this share of full PCM, so a tone does not clip.
+_FULL_VOLUME = 0.8
 
 
 class QtToneOutput:
@@ -57,7 +61,7 @@ class QtToneOutput:
 
 
 def _scale(pcm: bytes, volume: int) -> bytes:
-    gain = max(0.0, min(volume, 100) / 100) * 0.8
+    gain = volume_gain(volume) * _FULL_VOLUME
     source = array.array("h")
     source.frombytes(pcm)
     scaled = array.array("h", (int(sample * gain) for sample in source))

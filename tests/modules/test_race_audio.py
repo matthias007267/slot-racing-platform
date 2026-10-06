@@ -13,6 +13,8 @@ import pytest
 from PySide6.QtWidgets import QWidget
 from pytestqt.qtbot import QtBot
 
+from slot_racing.core.config import AppConfig
+from slot_racing.core.config.models import AUDIO_VOLUME_DEFAULT
 from slot_racing.core.domain import RaceStatus
 from slot_racing.modules.races.runner import RaceRunner
 from slot_racing.modules.races.ui.race_audio import (
@@ -23,6 +25,7 @@ from slot_racing.modules.races.ui.race_audio import (
     ToneSpec,
     open_tone_output,
     render_tone,
+    volume_gain,
 )
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.start_cue import START_LIGHT_COUNT, StartCue
@@ -115,7 +118,7 @@ def test_stopping_the_cue_does_not_play_go_later(qtbot: QtBot) -> None:
     cue.advance()
     assert started == []
     assert GO_TONE not in [tone for tone, _volume in output.calls]
-    assert output.calls == [(LAMP_TONE, 80), (LAMP_TONE, 80)]
+    assert output.calls == [(LAMP_TONE, AUDIO_VOLUME_DEFAULT), (LAMP_TONE, AUDIO_VOLUME_DEFAULT)]
 
 
 def test_playback_returns_immediately_with_or_without_qt(qtbot: QtBot) -> None:
@@ -198,6 +201,43 @@ def test_volume_is_one_setting_on_the_player() -> None:
     audio.set_volume(0)
     audio.play("light-1")
     assert output.calls == [(LAMP_TONE, 40), (GO_TONE, 40)]
+
+
+def test_volume_percent_is_the_level_passed_to_the_backend() -> None:
+    assert volume_gain(0) == 0
+    assert volume_gain(50) == 0.5
+    assert volume_gain(100) == 1
+    output = RecordingOutput()
+    config = AppConfig(audio_volume=100)
+    audio = RaceAudio(output, config=config)
+    audio.play("go")
+    assert output.calls == [(GO_TONE, 100)]
+    config.audio_volume = 0
+    audio.play("light-1")
+    assert output.calls == [(GO_TONE, 100)]
+    config.audio_enabled = False
+    config.audio_volume = 50
+    audio.play("light-2")
+    assert output.calls == [(GO_TONE, 100)]
+    config.audio_enabled = True
+    audio.play("light-2")
+    assert output.calls[-1] == (LAMP_TONE, 50)
+
+
+def test_the_live_view_reads_audio_from_the_configuration(qtbot: QtBot, env: Env) -> None:
+    env.runtime.config.audio_volume = 42
+    env.runtime.config.audio_enabled = False
+    _window, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    assert page.live.audio.volume == 42
+    assert page.live.audio.enabled is False
+    env.runtime.config.audio_enabled = True
+    env.runtime.config.audio_volume = 15
+    assert page.live.audio.volume == 15
+    output = RecordingOutput()
+    page.live.audio = RaceAudio(output, config=env.runtime.config)
+    page.live.audio.play("go")
+    assert output.calls == [(GO_TONE, 15)]
 
 
 def test_the_live_view_plays_tones_and_still_starts_on_lights_out(qtbot: QtBot, env: Env) -> None:

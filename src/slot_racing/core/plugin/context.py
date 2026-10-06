@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import TypeVar
 
 from slot_racing.core.clock import Clock
@@ -55,11 +56,13 @@ class PluginContext:
         clock: Clock,
         config: AppConfig,
         translator: Translator,
+        config_path: Path | None = None,
     ) -> None:
         self.plugin_name = plugin_name
         self.events = ScopedEventBus(bus)
         self.clock = clock
         self.config = config
+        self.config_path = config_path
         self.translator = translator
         self._services = services
         self._contributions = contributions

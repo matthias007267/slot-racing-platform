@@ -14,6 +14,10 @@ class ConfigError(Exception):
     """The configuration file could not be read."""
 
 
+AUDIO_ENABLED_DEFAULT = True
+AUDIO_VOLUME_DEFAULT = 70
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -34,6 +38,10 @@ class AppConfig(BaseModel):
     """Automatic backups. ``off`` creates none, ``daily`` one per day, ``on_exit`` when closing."""
     backup_keep: int = Field(default=10, ge=1, le=100)
     """How many automatic backups to keep. Manual and safety copies are left in place."""
+    audio_enabled: bool = AUDIO_ENABLED_DEFAULT
+    """Whether race sounds play. The race start does not depend on this."""
+    audio_volume: int = Field(default=AUDIO_VOLUME_DEFAULT, ge=0, le=100)
+    """Race-sound level from 0 (silent) to 100 (full)."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()

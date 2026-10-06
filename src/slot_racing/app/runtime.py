@@ -79,6 +79,7 @@ class Runtime:
             translator=translator,
             clock=clock,
             config=config,
+            config_path=config_path,
         )
         if plugins is None:
             discovery = discover_plugins()

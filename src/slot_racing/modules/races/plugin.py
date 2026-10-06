@@ -96,6 +96,7 @@ class RacesPlugin(Plugin):
                 tracks,
                 providers,
                 hud_store,
+                context.config,
             )
 
         def hud_settings() -> QWidget:
@@ -103,8 +104,21 @@ class RacesPlugin(Plugin):
 
             return HudEditor(translator, hud_store)
 
+        def audio_settings() -> QWidget:
+            from slot_racing.modules.races.ui.audio_settings import AudioSettings
+
+            return AudioSettings(translator, context.config, context.config_path)
+
         context.add_navigation(
             NavigationItem(id="races", title_key="nav.races", order=40, page_factory=races_page)
+        )
+        context.add_settings_section(
+            SettingsSection(
+                id="audio",
+                title_key="audio.settings.title",
+                order=5,
+                factory=audio_settings,
+            )
         )
         context.add_settings_section(
             SettingsSection(

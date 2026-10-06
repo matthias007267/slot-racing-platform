@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from slot_racing.core.clock import Clock
 from slot_racing.core.config import AppConfig
@@ -62,6 +63,7 @@ class PluginManager:
         translator: Translator,
         clock: Clock,
         config: AppConfig,
+        config_path: Path | None = None,
     ) -> None:
         self._bus = bus
         self._services = services
@@ -69,6 +71,7 @@ class PluginManager:
         self._translator = translator
         self._clock = clock
         self._config = config
+        self._config_path = config_path
         self._records: dict[str, _Record] = {}
         self._load_failures: dict[str, str] = {}
         self._activation_order: list[str] = []
@@ -132,6 +135,7 @@ class PluginManager:
             clock=self._clock,
             config=self._config,
             translator=self._translator,
+            config_path=self._config_path,
         )
         try:
             record.plugin.activate(context)
