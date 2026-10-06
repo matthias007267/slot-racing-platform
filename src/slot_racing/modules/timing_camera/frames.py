@@ -60,3 +60,21 @@ class GrayFrame:
             for x in range(roi.x, roi.x + roi.width):
                 pixels[row + x] = value
         return GrayFrame(self.width, self.height, tuple(pixels))
+
+    def crop(self, roi: DetectionRoi) -> GrayFrame:
+        """Copy only ``roi``. A rectangle outside the frame is rejected, not clipped."""
+        if not isinstance(roi, DetectionRoi):
+            raise TypeError("roi must be a DetectionRoi")
+        if roi.x + roi.width > self.width or roi.y + roi.height > self.height:
+            raise ValueError("roi extends outside the frame")
+        if isinstance(self.pixels, bytes):
+            packed = bytearray()
+            for y in range(roi.y, roi.y + roi.height):
+                start = y * self.width + roi.x
+                packed.extend(self.pixels[start : start + roi.width])
+            return GrayFrame(roi.width, roi.height, bytes(packed))
+        copied: list[int] = []
+        for y in range(roi.y, roi.y + roi.height):
+            start = y * self.width + roi.x
+            copied.extend(self.pixels[start : start + roi.width])
+        return GrayFrame(roi.width, roi.height, tuple(copied))

@@ -1,10 +1,12 @@
 """Global camera setup page.
 
-The page edits the saved camera document: device, resolution, frame rate and
-detection zones. The picture is a configuration preview. A detection on that
-preview only flashes the zone that saw it. The page does not start a race and
-does not publish sensor events. Leaving the page stops the preview and releases
-the device.
+The page edits the saved camera document: device, resolution, frame rate,
+travel direction, sensitivity and detection zones. Block size stays at the
+stored value; it is not a control on this page. The picture is a configuration
+preview. It is not scanned for cars: lane detection starts with the camera
+race, not while the page is open.
+The page does not start a race and does not publish sensor events. Leaving the
+page stops the preview and releases the device.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import ValidationError
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -41,13 +44,8 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredCamera,
     StoredDetection,
     StoredDetectionZone,
-    roi_to_pixels,
 )
-from slot_racing.modules.timing_camera.detection import (
-    DetectionZone,
-    DetectorSettings,
-    LaneCrossingDetector,
-)
+from slot_racing.modules.timing_camera.detection import TravelDirection
 from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.lease import CameraBusyError
@@ -111,6 +109,7 @@ class CameraSetupPage(QWidget):
         self._preview = preview
         self._lane_limit = lane_limit or (lambda: MAX_LANE_COUNT)
         self._drafts: list[ZoneDraft] = []
+        self._block_size = 20
         self._snapshot: _State = ()
         self._source: FrameSource | None = None
         self._loading = False
@@ -120,9 +119,6 @@ class CameraSetupPage(QWidget):
         self._error_key: str | None = None
         self._detail: str | None = None
         self._camera_state = "unknown"
-        self._detector: LaneCrossingDetector | None = None
-        self._detector_key: object = None
-        self._seen_ns = 0
         self._timer = QTimer(self)
         self._timer.setInterval(_PREVIEW_INTERVAL_MS)
         self._timer.timeout.connect(self._pull_frame)
@@ -136,6 +132,13 @@ class CameraSetupPage(QWidget):
         self.resolution.setObjectName("camera-resolution")
         self.fps = QComboBox()
         self.fps.setObjectName("camera-fps")
+        self.direction = QComboBox()
+        self.direction.setObjectName("camera-direction")
+        self.sensitivity = QSlider(Qt.Orientation.Horizontal)
+        self.sensitivity.setObjectName("camera-sensitivity")
+        self.sensitivity.setRange(0, 100)
+        self.sensitivity_less = QLabel(self._tr("camera.sensitivity.less"))
+        self.sensitivity_more = QLabel(self._tr("camera.sensitivity.more"))
         self.zones = QListWidget()
         self.zones.setObjectName("camera-zones")
         self.position = QLineEdit()
@@ -163,6 +166,12 @@ class CameraSetupPage(QWidget):
         camera_form.addRow(self._tr("camera.field.device"), self.device)
         camera_form.addRow(self._tr("camera.field.resolution"), self.resolution)
         camera_form.addRow(self._tr("camera.field.fps"), self.fps)
+        camera_form.addRow(self._tr("camera.field.direction"), self.direction)
+        sensitivity_row = QHBoxLayout()
+        sensitivity_row.addWidget(self.sensitivity_less)
+        sensitivity_row.addWidget(self.sensitivity, 1)
+        sensitivity_row.addWidget(self.sensitivity_more)
+        camera_form.addRow(self._tr("camera.field.sensitivity"), sensitivity_row)
         zone_form = QFormLayout()
         zone_form.addRow(self._tr("camera.field.position"), self.position)
 
@@ -194,6 +203,8 @@ class CameraSetupPage(QWidget):
         self.device.currentIndexChanged.connect(self._on_camera_changed)
         self.resolution.currentIndexChanged.connect(self._on_camera_changed)
         self.fps.currentIndexChanged.connect(self._on_camera_changed)
+        self.direction.currentIndexChanged.connect(self._note_edit)
+        self.sensitivity.valueChanged.connect(self._note_edit)
         self.zones.currentRowChanged.connect(self._on_list)
         self.position.textChanged.connect(self._on_position)
         self.add_zone.clicked.connect(self._on_add)
@@ -241,6 +252,9 @@ class CameraSetupPage(QWidget):
         self._drafts = [
             ZoneDraft(zone.position_id, zone.lane, zone.roi) for zone in config.detection.zones
         ]
+        self._block_size = config.detection.block_size
+        self._fill_direction(config.detection.direction)
+        self.sensitivity.setValue(config.detection.sensitivity)
         self._fill_devices(self._probe(), config.camera.device_index)
         self._fill_choices(
             self.resolution,
@@ -287,6 +301,15 @@ class CameraSetupPage(QWidget):
             )
             for item_width, item_height in sizes
         ]
+
+    def _fill_direction(self, selected: TravelDirection) -> None:
+        items = [
+            (self._tr("camera.direction.top_to_bottom"), TravelDirection.TOP_TO_BOTTOM.value),
+            (self._tr("camera.direction.bottom_to_top"), TravelDirection.BOTTOM_TO_TOP.value),
+            (self._tr("camera.direction.left_to_right"), TravelDirection.LEFT_TO_RIGHT.value),
+            (self._tr("camera.direction.right_to_left"), TravelDirection.RIGHT_TO_LEFT.value),
+        ]
+        self._fill_choices(self.direction, items, selected.value)
 
     def _fps_items(self, fps: int) -> list[tuple[str, int]]:
         rates = list(_FRAME_RATES)
@@ -379,6 +402,15 @@ class CameraSetupPage(QWidget):
             fps=self._frame_rate(),
         )
 
+    def _direction(self) -> TravelDirection:
+        value = self.direction.currentData()
+        if isinstance(value, str):
+            try:
+                return TravelDirection(value)
+            except ValueError:
+                return TravelDirection.LEFT_TO_RIGHT
+        return TravelDirection.LEFT_TO_RIGHT
+
     def _state(self) -> _State:
         width, height = self._resolution()
         zones = tuple(
@@ -392,7 +424,16 @@ class CameraSetupPage(QWidget):
             )
             for draft in self._drafts
         )
-        return (self._device_index(), width, height, self._frame_rate(), zones)
+        return (
+            self._device_index(),
+            width,
+            height,
+            self._frame_rate(),
+            self._direction(),
+            self.sensitivity.value(),
+            self._block_size,
+            zones,
+        )
 
     def _is_dirty(self) -> bool:
         return self._state() != self._snapshot
@@ -412,7 +453,10 @@ class CameraSetupPage(QWidget):
                         position_id=draft.position_id, lane=draft.lane, roi=draft.roi
                     )
                     for draft in self._drafts
-                )
+                ),
+                block_size=self._block_size,
+                sensitivity=self.sensitivity.value(),
+                direction=self._direction(),
             ),
         )
 
@@ -630,66 +674,6 @@ class CameraSetupPage(QWidget):
             return
         if delivered is not None:
             self.stage.set_frame(delivered.frame)
-            self._watch_frame(delivered.frame)
-
-    def _watch_frame(self, frame: GrayFrame) -> None:
-        """Run the race detector on the preview and flash only the zone that fired.
-
-        The first frame of a setup is the empty background, same as in a race.
-        Nothing here is published, and the race view never calls this.
-        """
-        watched = tuple(
-            (index, draft)
-            for index, draft in enumerate(self._drafts)
-            if _complete(draft.position_id)
-        )
-        if not watched:
-            self._detector = None
-            self._detector_key = None
-            return
-        key = (
-            frame.width,
-            frame.height,
-            tuple(
-                (
-                    draft.position_id,
-                    draft.lane,
-                    draft.roi.x,
-                    draft.roi.y,
-                    draft.roi.width,
-                    draft.roi.height,
-                )
-                for _index, draft in watched
-            ),
-        )
-        detector = self._detector
-        if key != self._detector_key or detector is None:
-            try:
-                settings = DetectorSettings(
-                    tuple(
-                        DetectionZone(
-                            draft.position_id,
-                            draft.lane,
-                            roi_to_pixels(draft.roi, frame.width, frame.height),
-                        )
-                        for _index, draft in watched
-                    )
-                )
-            except ValueError as error:
-                self._detector = None
-                self._detector_key = None
-                self._detail = str(error)
-                self._refresh_status()
-                return
-            detector = LaneCrossingDetector(settings)
-            self._detector = detector
-            self._detector_key = key
-        self._seen_ns += 1_000_000
-        for crossing in detector.observe(frame, self._seen_ns):
-            for index, draft in watched:
-                if draft.position_id == crossing.position_id and draft.lane == crossing.lane:
-                    self.stage.highlight(index)
-                    break
 
     def _stop_preview(self, *_args: object) -> None:
         timer = getattr(self, "_timer", None)

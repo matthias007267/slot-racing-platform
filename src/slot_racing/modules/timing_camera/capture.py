@@ -31,6 +31,7 @@ from typing import Protocol
 from slot_racing.modules.timing_camera._checks import require_range
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
+from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
 
 # Newest frames only. Two pictures are enough for the next 100 ms poll to see
@@ -222,6 +223,18 @@ class CameraFrameSource(FrameSource):
         self._paused = False
         return True
 
+    def use_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
+        """Ask the device to read only these rectangles. Ignored when it cannot.
+
+        An empty tuple restores a full-frame read. The capture thread picks the
+        change up on its next picture, so the frame already in hand stays whole.
+        """
+        if not isinstance(regions, tuple):
+            raise TypeError("regions must be a tuple")
+        setter = getattr(self._device, "set_regions", None)
+        if callable(setter):
+            setter(regions)
+
     def check(self) -> None:
         with self._error_lock:
             error = self._error
@@ -246,7 +259,7 @@ class CameraFrameSource(FrameSource):
         while not self._stop.is_set():
             try:
                 started = time.perf_counter_ns()
-                image = self._device.read()
+                grabbed = self._grab()
                 self._last_read_ns = time.perf_counter_ns() - started
             except CameraClosedError:
                 return
@@ -264,10 +277,34 @@ class CameraFrameSource(FrameSource):
             timestamp_ns = time.perf_counter_ns()
             if self._paused or (self._resume_ns is not None and timestamp_ns < self._resume_ns):
                 continue
-            self._queue.put(TimedFrame(image, timestamp_ns))
+            self._queue.put(_timed(grabbed, timestamp_ns))
+
+    def _grab(self) -> GrayFrame | tuple[GrayFrame, ...]:
+        """One full picture, or the zone crops when the device was asked for them."""
+        reader = getattr(self._device, "read_zoned", None)
+        if callable(reader):
+            zoned = reader()
+            if zoned is not None:
+                _width, _height, crops = zoned
+                if not isinstance(crops, tuple) or any(
+                    not isinstance(crop, GrayFrame) for crop in crops
+                ):
+                    raise CameraReadError("camera frame is missing")
+                return crops
+        return self._device.read()
 
     def _fail(self, error: BaseException) -> None:
         with self._error_lock:
             if self._error is None:
                 self._error = error
         self._device.close()
+
+
+# A crop delivery has no full picture. The carrier is not scanned.
+_CROP_CARRIER = GrayFrame(1, 1, b"\x00")
+
+
+def _timed(grabbed: GrayFrame | tuple[GrayFrame, ...], timestamp_ns: int) -> TimedFrame:
+    if isinstance(grabbed, GrayFrame):
+        return TimedFrame(grabbed, timestamp_ns)
+    return TimedFrame(_CROP_CARRIER, timestamp_ns, crops=grabbed)

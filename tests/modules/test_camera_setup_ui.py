@@ -18,6 +18,7 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredDetectionZone,
     roi_to_pixels,
 )
+from slot_racing.modules.timing_camera.detection import TravelDirection
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
@@ -283,6 +284,38 @@ def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
     assert pixels(again) == roi_to_pixels(zone.roi, *FRAME)
 
 
+def test_direction_and_sensitivity_are_saved_and_block_size_is_kept(qtbot: QtBot) -> None:
+    stored = database()
+    base = saved_configuration()
+    CameraConfigurationStore(stored).save(
+        base.model_copy(
+            update={
+                "detection": StoredDetection(
+                    zones=base.detection.zones,
+                    block_size=12,
+                    sensitivity=20,
+                    direction=TravelDirection.BOTTOM_TO_TOP,
+                )
+            }
+        )
+    )
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    assert page.direction.currentData() == TravelDirection.BOTTOM_TO_TOP.value
+    assert "↑" in page.direction.currentText()
+    assert "↓" in page.direction.itemText(0)
+    assert page.sensitivity.value() == 20
+    assert page.sensitivity_less.text() == "weniger"
+    assert page.sensitivity_more.text() == "mehr"
+    page.direction.setCurrentIndex(page.direction.findData(TravelDirection.RIGHT_TO_LEFT.value))
+    page.sensitivity.setValue(80)
+    page.save.click()
+    loaded = CameraConfigurationStore(stored).load()
+    assert loaded.detection.block_size == 12
+    assert loaded.detection.sensitivity == 80
+    assert loaded.detection.direction is TravelDirection.RIGHT_TO_LEFT
+    assert "←" in page.direction.currentText()
+
+
 def test_cancel_restores_the_saved_configuration(qtbot: QtBot) -> None:
     stored = database()
     CameraConfigurationStore(stored).save(saved_configuration())
@@ -479,6 +512,11 @@ def _two_lane_configuration() -> CameraConfiguration:
 
 
 def test_a_detection_flashes_only_that_zone_and_then_clears(qtbot: QtBot) -> None:
+    """Preview keeps the picture and does not run lane detection on it.
+
+    The stage can still flash one zone on its own. That timer is not fed by the
+    preview, so a car in the picture leaves every zone dark.
+    """
     stored = database()
     CameraConfigurationStore(stored).save(_two_lane_configuration())
     page, opener = open_page(qtbot, CameraConfigurationStore(stored))
@@ -487,8 +525,11 @@ def test_a_detection_flashes_only_that_zone_and_then_clears(qtbot: QtBot) -> Non
     lane_one = roi_to_pixels(page.stage.zones()[0], *FRAME)
     source.frame = GrayFrame.blank(*FRAME, 30).paint(lane_one, 255)
     page._pull_frame()
+    page._pull_frame()
+    assert page.stage.highlighted() == ()
+    assert not hasattr(page, "_detector")
+    page.stage.highlight(0, duration_ms=40)
     assert page.stage.highlighted() == (0,)
-    # The preview keeps polling. Expiry belongs to the zone timer alone.
     page._timer.stop()
     qtbot.waitUntil(lambda: page.stage.highlighted() == (), timeout=1000)
     assert page.stage.highlighted() == ()

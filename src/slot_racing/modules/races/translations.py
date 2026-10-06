@@ -16,6 +16,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.list.new": "Neues Rennen",
         "race.list.edit": "Bearbeiten",
         "race.list.start": "Starten",
+        "race.list.restart": "Rennen Neustart",
+        "race.list.restarted": "Das Rennen wurde erneut angelegt.",
         "race.list.live": "Live-Ansicht",
         "race.list.results": "Ergebnisse",
         "race.list.delete": "Löschen",
@@ -216,6 +218,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.race.not_startable": (
             "Ein Rennen mit dem Status „{status}“ kann nicht gestartet werden."
         ),
+        "error.race.not_restartable": "Nur ein abgebrochenes Rennen kann neu gestartet werden.",
         "error.race.already_running": "Es läuft bereits ein Rennen.",
         "error.race.provider_required": "Bitte wählen Sie eine Zeitmessung aus.",
         "error.race.provider_invalid": "Die Kennung der Zeitmessung ist ungültig.",
