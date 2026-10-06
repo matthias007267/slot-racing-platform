@@ -17,12 +17,16 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner.parts import (
     DEFAULT_GRID_MM,
     DEFAULT_SNAP_MM,
+    EXTEND_DIRECTIONS,
     STRAIGHT,
     PartInstance,
     PartSpec,
     Pose,
     connector_occupied,
     connectors_compatible,
+    extend_article,
+    extend_pose,
+    find_catalog_part,
     join_pose,
     rotate_xy,
     snap_pose,
@@ -492,6 +496,46 @@ def dock_copy(
     return place_instance(
         plan, current.part_id, spec, pose.x_mm, pose.y_mm, pose.rotation_z_deg, catalog
     )
+
+
+def extend_from_connector(
+    plan: TrackPlan,
+    instance_id: str,
+    connector_index: int,
+    direction: str,
+    catalog: dict[int, PartSpec],
+) -> TrackPlan:
+    """Append the standard part that continues ``direction`` from one free joint.
+
+    The result is one ordinary instance, snapped with the same rules as a library drop.
+    The caller records that plan as a single undo step. A joint that cannot take the part
+    leaves the plan untouched because this function raises instead of returning a new plan.
+    """
+    current = _require_instance(plan, instance_id)
+    current_spec = catalog.get(current.part_id)
+    if (
+        current_spec is None
+        or direction not in EXTEND_DIRECTIONS
+        or not 0 <= connector_index < len(current_spec.connectors)
+    ):
+        raise ValidationError("error.planner.extend")
+    target = current_spec.connectors[connector_index]
+    if connector_occupied(current, target, _placed(plan, catalog)):
+        raise ValidationError("error.planner.extend")
+    found = find_catalog_part(catalog, extend_article(direction))
+    if found is None:
+        raise ValidationError("error.planner.extend")
+    part_id, spec = found
+    pose = extend_pose(current, target, spec, direction)
+    if pose is None:
+        raise ValidationError("error.planner.extend")
+    updated = place_instance(
+        plan, part_id, spec, pose.x_mm, pose.y_mm, pose.rotation_z_deg, catalog
+    )
+    created = updated.instances[-1]
+    if not connector_occupied(current, target, ((created, spec),)):
+        raise ValidationError("error.planner.extend")
+    return updated
 
 
 def clone_plan(plan: TrackPlan, track_id: TrackId) -> TrackPlan:

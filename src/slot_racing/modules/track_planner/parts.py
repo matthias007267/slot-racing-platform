@@ -58,6 +58,18 @@ DEFAULT_GRID_MM = 10.0
 DEFAULT_SNAP_MM = 25.0
 _POSITION_LIMIT_MM = 100_000.0
 
+# Continue-build uses catalogue articles, never the displayed designation.
+STANDARD_STRAIGHT_ARTICLE = "20020601"
+STANDARD_CURVE_ARTICLE = "20020571"
+EXTEND_STRAIGHT = "straight"
+EXTEND_LEFT = "left"
+EXTEND_RIGHT = "right"
+EXTEND_DIRECTIONS = (EXTEND_LEFT, EXTEND_STRAIGHT, EXTEND_RIGHT)
+# Fan around the connector's outward heading. 45° puts a connector that faces
+# up on the screen at ↖ ↑ ↗. Positive is clockwise, which is a right turn.
+ARROW_FAN_DEG = 45.0
+_EXTEND_TURN_DEG = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class ConnectorSpec:
@@ -337,6 +349,166 @@ def connector_occupied(
             if turn <= 20.0:
                 return True
     return False
+
+
+def signed_delta_deg(start_deg: float, end_deg: float) -> float:
+    """Clockwise degrees from ``start_deg`` to ``end_deg``, in the range -180..180."""
+    return (normalize_deg(end_deg) - normalize_deg(start_deg) + 180.0) % 360.0 - 180.0
+
+
+def extend_article(direction: str) -> str:
+    """Catalogue article a continue-build direction inserts. Left and right share one curve."""
+    if direction == EXTEND_STRAIGHT:
+        return STANDARD_STRAIGHT_ARTICLE
+    if direction in {EXTEND_LEFT, EXTEND_RIGHT}:
+        return STANDARD_CURVE_ARTICLE
+    raise ValidationError("error.planner.part")
+
+
+def find_catalog_part(
+    catalog: Mapping[int, PartSpec], article_number: str
+) -> tuple[int, PartSpec] | None:
+    """The lowest id whose article number matches. The designation is not consulted."""
+    wanted = normalize_article(article_number)
+    matches = [
+        (part_id, spec)
+        for part_id, spec in catalog.items()
+        if normalize_article(spec.article_number) == wanted
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    return matches[0]
+
+
+def standard_extend_parts(catalog: Mapping[int, PartSpec]) -> dict[str, tuple[int, PartSpec]]:
+    """Straight continues with the standard straight; both turns use the standard curve."""
+    chosen: dict[str, tuple[int, PartSpec]] = {}
+    straight = find_catalog_part(catalog, STANDARD_STRAIGHT_ARTICLE)
+    curve = find_catalog_part(catalog, STANDARD_CURVE_ARTICLE)
+    if straight is not None:
+        chosen[EXTEND_STRAIGHT] = straight
+    if curve is not None:
+        chosen[EXTEND_LEFT] = curve
+        chosen[EXTEND_RIGHT] = curve
+    return chosen
+
+
+def arrow_heading_deg(outward_deg: float, direction: str) -> float:
+    """Screen heading of one continue arrow. It is the connector heading plus the local fan."""
+    if direction == EXTEND_STRAIGHT:
+        return normalize_deg(outward_deg)
+    if direction == EXTEND_LEFT:
+        return normalize_deg(outward_deg - ARROW_FAN_DEG)
+    if direction == EXTEND_RIGHT:
+        return normalize_deg(outward_deg + ARROW_FAN_DEG)
+    raise ValidationError("error.planner.part")
+
+
+def continuation_delta_deg(
+    target: PartInstance,
+    target_joint: ConnectorSpec,
+    spec: PartSpec,
+    source_joint: ConnectorSpec,
+) -> float | None:
+    """Signed turn at ``target_joint`` when ``spec`` is seated on ``source_joint``.
+
+    Zero continues straight. Negative is a left turn and positive is a right turn, both
+    relative to the joint's outward heading. ``None`` means the joint cannot take this part.
+    """
+    if not connectors_compatible(source_joint, target_joint):
+        return None
+    others = [joint for joint in spec.connectors if joint.name != source_joint.name]
+    if len(others) != 1:
+        return None
+    pose = join_pose(target, target_joint, source_joint)
+    # A second arc of the same radius keeps the circle centre and only changes rotation.
+    # Reject the join only when it would drop the part onto the one already there.
+    same_place = math.hypot(pose.x_mm - target.x_mm, pose.y_mm - target.y_mm) < 1.0
+    same_turn = (
+        abs(signed_delta_deg(target.rotation_z_deg, pose.rotation_z_deg)) <= _EXTEND_TURN_DEG
+    )
+    if same_place and same_turn:
+        return None
+    outward = normalize_deg(target_joint.direction_deg + target.rotation_z_deg)
+    leaving = normalize_deg(others[0].direction_deg + pose.rotation_z_deg)
+    return signed_delta_deg(outward, leaving)
+
+
+def _direction_matches(delta: float, direction: str) -> bool:
+    if direction == EXTEND_STRAIGHT:
+        return abs(delta) <= _EXTEND_TURN_DEG
+    if direction == EXTEND_LEFT:
+        return delta < -_EXTEND_TURN_DEG
+    if direction == EXTEND_RIGHT:
+        return delta > _EXTEND_TURN_DEG
+    return False
+
+
+def extend_pose(
+    target: PartInstance,
+    target_joint: ConnectorSpec,
+    spec: PartSpec,
+    direction: str,
+) -> Pose | None:
+    """Pose that seats ``spec`` on ``target_joint`` so the free end leaves in ``direction``."""
+    best: tuple[tuple[float, int], Pose] | None = None
+    for index, source in enumerate(spec.connectors):
+        delta = continuation_delta_deg(target, target_joint, spec, source)
+        if delta is None or not _direction_matches(delta, direction):
+            continue
+        pose = join_pose(target, target_joint, source)
+        rank = (abs(delta), index)
+        if best is None or rank < best[0]:
+            best = (rank, pose)
+    if best is None:
+        return None
+    return best[1]
+
+
+def offered_extend_directions(
+    target: PartInstance,
+    target_joint: ConnectorSpec,
+    straight: PartSpec | None,
+    curve: PartSpec | None,
+) -> tuple[str, ...]:
+    """Directions for which a standard part can actually be joined to this free joint."""
+    found: list[str] = []
+    for direction, spec in (
+        (EXTEND_LEFT, curve),
+        (EXTEND_STRAIGHT, straight),
+        (EXTEND_RIGHT, curve),
+    ):
+        if spec is None:
+            continue
+        if extend_pose(target, target_joint, spec, direction) is not None:
+            found.append(direction)
+    return tuple(found)
+
+
+def placed_continuation_delta_deg(
+    target: PartInstance,
+    target_joint: ConnectorSpec,
+    created: PartInstance,
+    created_spec: PartSpec,
+) -> float | None:
+    """Signed turn from ``target_joint`` to the free end of a part that is already seated."""
+    if not connector_occupied(target, target_joint, ((created, created_spec),)):
+        return None
+    point = world_xy(target, target_joint.x_mm, target_joint.y_mm)
+    free: ConnectorSpec | None = None
+    for source in created_spec.connectors:
+        other = world_xy(created, source.x_mm, source.y_mm)
+        if math.hypot(point[0] - other[0], point[1] - other[1]) <= 1.0:
+            continue
+        if free is not None:
+            return None
+        free = source
+    if free is None:
+        return None
+    outward = normalize_deg(target_joint.direction_deg + target.rotation_z_deg)
+    leaving = normalize_deg(free.direction_deg + created.rotation_z_deg)
+    return signed_delta_deg(outward, leaving)
 
 
 def can_dock(

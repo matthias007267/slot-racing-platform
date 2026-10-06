@@ -33,14 +33,19 @@ from slot_racing.modules.track_planner.parts import (
     world_xy,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
-from slot_racing.modules.track_planner.ui.canvas import MM, InstanceItem, PlusItem, RotationHandle
+from slot_racing.modules.track_planner.ui.canvas import (
+    MM,
+    ExtendArrow,
+    InstanceItem,
+    RotationHandle,
+)
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.page import PlannerPage
 from slot_racing.modules.tracks.service import TrackInput, TrackService
 from tests.modules.conftest import Env
 from tests.modules.test_track_parts import _library_row, _planner, _select
-from tests.modules.test_track_planner_ui import _instances, _key
+from tests.modules.test_track_planner_ui import _instances, _key, _knob_drag, _knob_point
 from tests.modules.test_ui_management import open_page
 
 
@@ -205,15 +210,16 @@ def test_a_part_rotates_only_from_the_handle(qtbot: QtBot, env: Env) -> None:
     qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=center + QPoint(40, 0))  # type: ignore[no-untyped-call]
     assert page.plan().instances[0].rotation_z_deg == pytest.approx(rotation)
     assert page.plan().instances[0].x_mm != pytest.approx(origin)
-    knob = page.canvas.mapFromScene(page.canvas.rotation_handle.pos()) + QPoint(0, -36)
+    knob = _knob_point(page)
     qtbot.mousePress(viewport, Qt.MouseButton.LeftButton, pos=knob)  # type: ignore[no-untyped-call]
     assert page.canvas.rotation_handle.dragging
-    qtbot.mouseMove(viewport, pos=knob + QPoint(30, 20))  # type: ignore[no-untyped-call]
-    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=knob + QPoint(30, 20))  # type: ignore[no-untyped-call]
+    turned = knob + _knob_drag(page)
+    qtbot.mouseMove(viewport, pos=turned)  # type: ignore[no-untyped-call]
+    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=turned)  # type: ignore[no-untyped-call]
     assert page.plan().instances[0].rotation_z_deg != pytest.approx(rotation)
 
 
-def test_a_plus_docks_another_copy_and_undo_removes_it(qtbot: QtBot, env: Env) -> None:
+def test_a_straight_arrow_extends_the_plan_and_undo_removes_it(qtbot: QtBot, env: Env) -> None:
     track = env.track("Plus", lanes=2)
     window, page = open_page(qtbot, env, "track_planner")
     window.show()
@@ -224,11 +230,12 @@ def test_a_plus_docks_another_copy_and_undo_removes_it(qtbot: QtBot, env: Env) -
     page.place_part.click()
     page.x_mm.setValue(0)
     page.y_mm.setValue(0)
-    pluses = _pluses(page)
-    assert len(pluses) == 2
+    arrows = _arrows(page)
+    assert arrows
+    assert all(arrow.direction in {"left", "straight", "right"} for arrow in arrows)
     original = page.plan().instances[0]
     spec = page._parts[original.part_id]
-    target = pluses[0]
+    target = next(arrow for arrow in arrows if arrow.direction == "straight")
     point = page.canvas.mapFromScene(target.scenePos()) + QPoint(
         int(target.offset.x()), int(target.offset.y())
     )
@@ -240,7 +247,9 @@ def test_a_plus_docks_another_copy_and_undo_removes_it(qtbot: QtBot, env: Env) -
     assert page.canvas.selected_ids() == [created.id]
     assert _joints_meet(original, created, spec.connectors)
     _select_ids(page, {original.id})
-    assert len(_pluses(page)) == 1
+    remaining = _arrows(page)
+    assert remaining
+    assert all(arrow.connector_index != target.connector_index for arrow in remaining)
     page.undo()
     assert [instance.id for instance in page.plan().instances] == [original.id]
 
@@ -541,8 +550,8 @@ def _select_ids(page: PlannerPage, ids: set[str]) -> None:
         item.setSelected(item.item_id in ids)
 
 
-def _pluses(page: PlannerPage) -> list[PlusItem]:
-    return [item for item in page.canvas.scene().items() if isinstance(item, PlusItem)]
+def _arrows(page: PlannerPage) -> list[ExtendArrow]:
+    return [item for item in page.canvas.scene().items() if isinstance(item, ExtendArrow)]
 
 
 def _joints_meet(
