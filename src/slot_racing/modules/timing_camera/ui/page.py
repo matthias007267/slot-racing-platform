@@ -3,10 +3,10 @@
 The page edits the saved camera document: device, resolution, frame rate,
 travel direction, sensitivity and detection zones. Block size stays at the
 stored value; it is not a control on this page. The picture is a configuration
-preview. It is not scanned for cars: lane detection starts with the camera
-race, not while the page is open.
-The page does not start a race and does not publish sensor events. Leaving the
-page stops the preview and releases the device.
+preview. The page does not start a race and does not publish sensor events.
+Erkennungsdiagnose, opened from this page, reads the same preview frames and
+runs the race detector on them. It does not open a second camera. Leaving the
+page stops the preview and the diagnosis.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredDetectionZone,
 )
 from slot_racing.modules.timing_camera.detection import TravelDirection
+from slot_racing.modules.timing_camera.diagnostic import CaptureCounters, DiagnosticListener
 from slot_racing.modules.timing_camera.frame_source import FrameSource
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.lease import CameraBusyError
@@ -112,6 +113,8 @@ class CameraSetupPage(QWidget):
         self._block_size = 20
         self._snapshot: _State = ()
         self._source: FrameSource | None = None
+        self._diagnostic_listener: DiagnosticListener | None = None
+        self._diagnostic_dialog: QWidget | None = None
         self._loading = False
         self._drawing = False
         self._corrupt = False
@@ -149,6 +152,8 @@ class CameraSetupPage(QWidget):
         self.delete_zone.setObjectName("camera-delete-zone")
         self.refresh = QPushButton(self._tr("camera.action.refresh"))
         self.refresh.setObjectName("camera-refresh")
+        self.diagnostic = QPushButton(self._tr("camera.diagnostic.open"))
+        self.diagnostic.setObjectName("camera-diagnostic")
         self.cancel = QPushButton(self._tr("camera.action.cancel"))
         self.cancel.setObjectName("camera-cancel")
         self.save = QPushButton(self._tr("camera.action.save"))
@@ -156,6 +161,7 @@ class CameraSetupPage(QWidget):
         set_role(self.add_zone, "secondary")
         set_role(self.delete_zone, "danger")
         set_role(self.refresh, "secondary")
+        set_role(self.diagnostic, "secondary")
         set_role(self.cancel, "ghost")
         set_role(self.save, "primary")
         self.status = QLabel()
@@ -181,6 +187,7 @@ class CameraSetupPage(QWidget):
         side_layout.addWidget(_section(self._tr("camera.section.camera")))
         side_layout.addLayout(camera_form)
         side_layout.addWidget(self.refresh)
+        side_layout.addWidget(self.diagnostic)
         side_layout.addWidget(_section(self._tr("camera.section.zones")))
         side_layout.addWidget(self.zones, 1)
         side_layout.addLayout(zone_form)
@@ -210,6 +217,7 @@ class CameraSetupPage(QWidget):
         self.add_zone.clicked.connect(self._on_add)
         self.delete_zone.clicked.connect(self._on_delete)
         self.refresh.clicked.connect(self._on_refresh)
+        self.diagnostic.clicked.connect(self._open_diagnostic)
         self.cancel.clicked.connect(self._on_cancel)
         self.save.clicked.connect(self._on_save)
         self.stage.selection_changed.connect(self._on_stage_selection)
@@ -223,12 +231,26 @@ class CameraSetupPage(QWidget):
         self._start_preview()
 
     def hideEvent(self, event: object) -> None:  # noqa: N802
+        self._close_diagnostic()
         self._stop_preview()
         super().hideEvent(event)  # type: ignore[arg-type]
 
     def closeEvent(self, event: object) -> None:  # noqa: N802
+        self._close_diagnostic()
         self._stop_preview()
         super().closeEvent(event)  # type: ignore[arg-type]
+
+    def diagnostic_document(self) -> CameraConfiguration:
+        """The zones and camera values the open page would save."""
+        return self._document()
+
+    def attach_diagnostic(self, listener: DiagnosticListener) -> None:
+        """Hand each preview frame to ``listener``. Does not open a camera."""
+        self._diagnostic_listener = listener
+
+    def detach_diagnostic(self, listener: DiagnosticListener) -> None:
+        if self._diagnostic_listener is listener:
+            self._diagnostic_listener = None
 
     def _tr(self, key: str) -> str:
         return self._translator.translate(key)
@@ -674,6 +696,36 @@ class CameraSetupPage(QWidget):
             return
         if delivered is not None:
             self.stage.set_frame(delivered.frame)
+            listener = self._diagnostic_listener
+            if listener is not None:
+                try:
+                    listener(delivered, _capture_counters(source))
+                except Exception:
+                    logger.exception("Camera diagnostic rejected a frame")
+
+    def _open_diagnostic(self) -> None:
+        existing = self._diagnostic_dialog
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            return
+        from slot_racing.modules.timing_camera.ui.diagnostic_dialog import (
+            DetectionDiagnosticDialog,
+        )
+
+        dialog = DetectionDiagnosticDialog(self._translator, self, self)
+        self._diagnostic_dialog = dialog
+        dialog.finished.connect(self._forget_diagnostic)
+        dialog.show()
+
+    def _forget_diagnostic(self) -> None:
+        self._diagnostic_dialog = None
+
+    def _close_diagnostic(self) -> None:
+        dialog = self._diagnostic_dialog
+        self._diagnostic_dialog = None
+        if dialog is not None:
+            dialog.close()
 
     def _stop_preview(self, *_args: object) -> None:
         timer = getattr(self, "_timer", None)
@@ -726,6 +778,15 @@ class CameraSetupPage(QWidget):
             self.message.show_error(self._tr("camera.status.busy"))
             return
         self.message.clear_message()
+
+
+def _capture_counters(source: FrameSource) -> CaptureCounters:
+    captured = getattr(source, "captured", None)
+    dropped = getattr(source, "dropped", None)
+    return CaptureCounters(
+        captured if isinstance(captured, int) and not isinstance(captured, bool) else None,
+        dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else None,
+    )
 
 
 def _section(text: str) -> QLabel:

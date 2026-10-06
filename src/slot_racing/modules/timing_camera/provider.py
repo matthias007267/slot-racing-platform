@@ -43,6 +43,7 @@ from slot_racing.modules.timing_camera.detection import (
     DetectorSettings,
     LaneCrossing,
     LaneCrossingDetector,
+    create_lane_detector,
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
@@ -364,7 +365,7 @@ class CameraTimingProvider(TimingSource):
         self._settings = scaled
         self._zone_frame = (frame.width, frame.height)
         self._background = background
-        self._detector = LaneCrossingDetector(scaled, background=background)
+        self._detector = create_lane_detector(scaled, background=background)
         # The next picture may have a different grid, so the crops are prepared again.
         self._regions_armed = False
 
@@ -416,7 +417,7 @@ class CameraTimingProvider(TimingSource):
         self._detector = (
             None
             if settings is None
-            else LaneCrossingDetector(settings, background=self._background)
+            else create_lane_detector(settings, background=self._background)
         )
 
 
