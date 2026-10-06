@@ -35,6 +35,7 @@ from tests.modules.conftest import Env
 from tests.modules.test_hud_editor import _translator
 from tests.modules.test_live_race_ui import _ready_race
 from tests.modules.test_ui_management import column_text, open_page
+from tests.support.start_sequence import release_start_lights
 
 
 def test_lap_progress_shows_the_target_and_an_open_race() -> None:
@@ -479,6 +480,7 @@ def _shown_race(qtbot: QtBot, env: Env) -> tuple[QWidget, LiveRaceView, RacesPag
     page.refresh()
     page.table.selectRow(0)
     page.buttons["start"].click()
+    release_start_lights(page.live)
     window.show()
     QApplication.processEvents()
     assert isinstance(page.live, LiveRaceView)

@@ -12,6 +12,7 @@ from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import column_text, open_page
+from tests.support.start_sequence import release_start_lights
 
 
 def test_participant_status_keeps_a_finisher_finished() -> None:
@@ -59,6 +60,7 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
 
     assert isinstance(page.current_view(), LiveRaceView)
     live = page.live
+    release_start_lights(live)
     assert live.board.isHidden()
     assert not live.stage.isHidden()
     runner = live.runner
@@ -163,6 +165,7 @@ def test_aborting_the_live_race_opens_the_stored_result(qtbot: QtBot, env: Env) 
     page.table.selectRow(0)
     page.buttons["start"].click()
     live = page.live
+    release_start_lights(live)
     assert live.runner is not None and live.runner.is_active
 
     live.confirm = lambda _text: False

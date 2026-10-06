@@ -15,6 +15,7 @@ from slot_racing.modules.races.ui.results_view import ResultsView
 from tests.modules.conftest import Env
 from tests.modules.test_live_race_ui import _ready_race
 from tests.modules.test_ui_management import column_text, open_page
+from tests.support.start_sequence import release_start_lights
 
 
 def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
@@ -26,6 +27,7 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     page.buttons["start"].click()
     live = page.live
     assert isinstance(live, LiveRaceView)
+    release_start_lights(live)
     runner = live.runner
     assert runner is not None and runner.status is RaceStatus.RUNNING
 
@@ -101,6 +103,7 @@ def test_a_saved_layout_hides_a_panel_on_the_live_view(qtbot: QtBot, env: Env) -
     page.table.selectRow(0)
     page.buttons["start"].click()
     live = page.live
+    release_start_lights(live)
     assert not live.clock.isVisibleTo(live)
     assert live.header.isVisibleTo(live)
     assert live.time_label.text() != ""

@@ -227,9 +227,10 @@ class RaceController:
     def prepare_race(self, race_id: RaceId) -> RaceRunner:
         """Wire the race and leave the clock stopped.
 
-        The live view uses this for the camera start cue. :meth:`start_prepared`
+        The live view uses this while the start lights are on. :meth:`start_prepared`
         is the same start the immediate path uses, so the engine still decides
-        when the clock and the first lap begin.
+        when the clock and the first lap begin. The timing provider stays stopped
+        until then.
         """
         if self.active is not None and not self.active.is_finished:
             raise ValidationError("error.race.already_running")

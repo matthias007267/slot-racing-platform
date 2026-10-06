@@ -16,6 +16,7 @@ from tests.modules.conftest import Env
 from tests.modules.test_race_flow import drive_until_done
 from tests.modules.test_races import key_of
 from tests.modules.test_ui_management import column_text, open_page
+from tests.support.start_sequence import release_start_lights
 
 STEP_NS = 100_000_000
 
@@ -198,6 +199,7 @@ def test_restart_button_is_only_offered_for_an_aborted_race(qtbot: QtBot, env: E
     page.buttons["start"].click()
     assert isinstance(page.current_view(), LiveRaceView)
     live = page.live
+    release_start_lights(live)
     assert live.runner is not None and live.runner.status is RaceStatus.RUNNING
     assert live.runner.race.id == restarted.id
     live.runner.stop()

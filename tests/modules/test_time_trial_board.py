@@ -20,6 +20,7 @@ from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import cells, column_text, open_page
+from tests.support.start_sequence import release_start_lights
 
 _ORIGIN = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -248,6 +249,7 @@ def test_a_running_time_trial_updates_the_board_from_each_new_lap(qtbot: QtBot, 
     assert column_text(page.table, 0, "Name") == "Heute"
     page.table.selectRow(0)
     page.buttons["start"].click()
+    release_start_lights(page.live)
     window.resize(1280, 800)
     window.show()
     QApplication.processEvents()
