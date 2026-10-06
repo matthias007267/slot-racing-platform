@@ -17,6 +17,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.direction.counterclockwise": "Gegen den Uhrzeigersinn",
         "planner.save": "Speichern",
         "planner.undo": "Rückgängig",
+        "planner.redo": "Wiederholen",
         "planner.selection.many": "{count} Bauteile",
         "planner.discard": "Verwerfen",
         "planner.reset": "Zurücksetzen",
@@ -45,6 +46,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.lane": "Die Bahn liegt außerhalb der Strecke.",
         "error.planner.piece": "Das Streckenelement ist ungültig.",
         "error.planner.part": "Das Bauteil ist ungültig.",
+        "error.planner.extend": "An dieser Stelle kann nicht weitergebaut werden.",
         "error.planner.part_exists": (
             "Ein Bauteil mit der Bezeichnung „{name}“ und der Artikelnummer "
             "„{article}“ existiert bereits."

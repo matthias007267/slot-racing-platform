@@ -250,12 +250,13 @@ def test_group_rotation_handle_and_both_directions(qtbot: QtBot, env: Env) -> No
     center = instances_center(selected)
     page.canvas.select_fully_inside(QRectF(-500, -500, 1000, 1000))
     assert page.canvas.rotation_handle.isVisible()
-    knob = page.canvas.mapFromScene(page.canvas.rotation_handle.pos()) + QPoint(0, -36)
+    knob = _knob_point(page)
     viewport = page.canvas.viewport()
     qtbot.mousePress(viewport, Qt.MouseButton.LeftButton, pos=knob)  # type: ignore[no-untyped-call]
     assert page.canvas.rotation_handle.dragging
-    qtbot.mouseMove(viewport, pos=knob + QPoint(48, 0))  # type: ignore[no-untyped-call]
-    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=knob + QPoint(48, 0))  # type: ignore[no-untyped-call]
+    turned = knob + _knob_drag(page)
+    qtbot.mouseMove(viewport, pos=turned)  # type: ignore[no-untyped-call]
+    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=turned)  # type: ignore[no-untyped-call]
     assert not page.canvas.rotation_handle.dragging
     dragged = page.plan().instances
     assert dragged[0].rotation_z_deg != selected[0].rotation_z_deg
@@ -376,6 +377,24 @@ def _key(
 ) -> None:
     page.canvas.setFocus()
     qtbot.keyClick(page.canvas, key, modifier)  # type: ignore[no-untyped-call]
+
+
+def _knob_point(page: PlannerPage) -> QPoint:
+    handle = page.canvas.rotation_handle
+    origin = page.canvas.mapFromScene(handle.pos())
+    knob = handle.knob_offset
+    return origin + QPoint(round(knob.x()), round(knob.y()))
+
+
+def _knob_drag(page: PlannerPage) -> QPoint:
+    """A step across the pointer angle. Moving straight out from the centre would not rotate."""
+    knob = page.canvas.rotation_handle.knob_offset
+    side = QPoint(round(-knob.y()), round(knob.x()))
+    length = math.hypot(side.x(), side.y())
+    if length < 12:
+        return QPoint(36, 24)
+    scale = 40 / length
+    return QPoint(round(side.x() * scale), round(side.y() * scale))
 
 
 def _instances(page: PlannerPage) -> list[InstanceItem]:

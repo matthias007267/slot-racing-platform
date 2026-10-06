@@ -37,9 +37,9 @@ from slot_racing.modules.track_planner.document import (
     Piece,
     TrackPlan,
     add_piece,
-    dock_copy,
     duplicate_instances,
     empty_plan,
+    extend_from_connector,
     move_instance,
     move_marker,
     move_piece,
@@ -100,6 +100,7 @@ class PlannerPage(QWidget):
         self._parts: dict[int, PartSpec] = {}
         self._records: tuple[PartRecord, ...] = ()
         self._history: list[TrackPlan] = []
+        self._future: list[TrackPlan] = []
         self._clipboard: tuple[PartInstance, ...] = ()
         self._keys_attached = False
         translate = translator.translate
@@ -117,6 +118,11 @@ class PlannerPage(QWidget):
         set_role(self.undo_button, "ghost")
         self.undo_button.clicked.connect(self.undo)
         self.undo_button.setEnabled(False)
+        self.redo_button = QPushButton(translate("planner.redo"))
+        self.redo_button.setObjectName("planner-redo")
+        set_role(self.redo_button, "ghost")
+        self.redo_button.clicked.connect(self.redo)
+        self.redo_button.setEnabled(False)
         self.save_button = QPushButton(translate("planner.save"))
         self.save_button.setObjectName("planner-save")
         self.save_button.clicked.connect(self.save)
@@ -203,7 +209,7 @@ class PlannerPage(QWidget):
         self.canvas.set_group_listener(self._moved_group)
         self.canvas.set_rotation_listener(self._rotated)
         self.canvas.set_drop_listener(self._dropped)
-        self.canvas.set_dock_listener(self._docked)
+        self.canvas.set_extend_listener(self._extended)
         self.canvas.scene().selectionChanged.connect(self._show_selection)
         self.start_straight = QCheckBox(translate("planner.start_straight"))
         self.start_straight.setObjectName("planner-start-straight")
@@ -274,6 +280,7 @@ class PlannerPage(QWidget):
         header.addWidget(self.lanes)
         header.addWidget(self.direction_button)
         header.addWidget(self.undo_button)
+        header.addWidget(self.redo_button)
         header.addWidget(self.save_button)
         header.addWidget(self.save_as_button)
         header.addWidget(self.color_coding)
@@ -370,13 +377,24 @@ class PlannerPage(QWidget):
     def undo(self) -> None:
         if not self._history:
             return
+        self._future.append(self._plan)
+        self._restore(self._history.pop())
+
+    def redo(self) -> None:
+        if not self._future:
+            return
+        self._history.append(self._plan)
+        self._restore(self._future.pop())
+
+    def _restore(self, plan: TrackPlan) -> None:
         selected = set(self.canvas.selected_ids())
-        self._plan = self._history.pop()
+        self._plan = plan
         self._dirty = True
         self.undo_button.setEnabled(bool(self._history))
-        known = {piece.id for piece in self._plan.pieces}
-        known.update(instance.id for instance in self._plan.instances)
-        known.update(marker.id for marker in self._plan.markers)
+        self.redo_button.setEnabled(bool(self._future))
+        known = {piece.id for piece in plan.pieces}
+        known.update(instance.id for instance in plan.instances)
+        known.update(marker.id for marker in plan.markers)
         self._draw(selected & known)
 
     def copy_selection(self) -> None:
@@ -441,8 +459,12 @@ class PlannerPage(QWidget):
         if key == Qt.Key.Key_Delete and not ctrl:
             self.delete_selected()
             return True
-        if ctrl and key == Qt.Key.Key_Z:
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and key == Qt.Key.Key_Z and not shift:
             self.undo()
+            return True
+        if (ctrl and key == Qt.Key.Key_Y) or (ctrl and shift and key == Qt.Key.Key_Z):
+            self.redo()
             return True
         if ctrl and key == Qt.Key.Key_C:
             self.copy_selection()
@@ -513,7 +535,9 @@ class PlannerPage(QWidget):
         self._lane_count = track.lane_count
         self._dirty = False
         self._history.clear()
+        self._future.clear()
         self.undo_button.setEnabled(False)
+        self.redo_button.setEnabled(False)
         self._load_parts()
         self._show_grid()
         self.lanes.setText(self._translator.format("planner.lanes", count=track.lane_count))
@@ -848,9 +872,11 @@ class PlannerPage(QWidget):
             rotate_instance(self._plan, selected.id, self.rotation_free.value()), selected.id
         )
 
-    def _docked(self, instance_id: str, connector_index: int) -> None:
+    def _extended(self, instance_id: str, connector_index: int, direction: str) -> None:
         try:
-            updated = dock_copy(self._plan, instance_id, connector_index, self._parts)
+            updated = extend_from_connector(
+                self._plan, instance_id, connector_index, direction, self._parts
+            )
         except Exception as error:
             self._report(error)
             return
@@ -971,9 +997,11 @@ class PlannerPage(QWidget):
         self._history.append(self._plan)
         if len(self._history) > 50:
             self._history.pop(0)
+        self._future.clear()
         self._plan = plan
         self._dirty = True
         self.undo_button.setEnabled(True)
+        self.redo_button.setEnabled(False)
         self._draw(selected)
 
     def _report(self, error: Exception) -> None:

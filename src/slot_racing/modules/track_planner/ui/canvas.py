@@ -41,13 +41,16 @@ from slot_racing.modules.track_planner.document import (
     travel_vector,
 )
 from slot_racing.modules.track_planner.parts import (
-    ConnectorSpec,
+    EXTEND_LEFT,
+    EXTEND_STRAIGHT,
     PartInstance,
     PartSpec,
+    arrow_heading_deg,
     connector_occupied,
-    connectors_compatible,
-    join_pose,
+    normalize_deg,
+    offered_extend_directions,
     rotate_xy,
+    standard_extend_parts,
     world_xy,
 )
 from slot_racing.modules.track_planner.ui.library_view import PART_MIME
@@ -60,12 +63,19 @@ MM = 0.2
 ZOOM_MIN = 0.25
 ZOOM_MAX = 4.0
 _DRAG_PX = 4
+# Screen pixels. The arrows ignore the view transform, so zoom does not resize them.
+ARROW_DISTANCE_PX = 34.0
+ARROW_GLYPH_PX = 12.0
+ARROW_HIT_RADIUS = 12.0
+HANDLE_GAP_PX = 14.0
+HANDLE_KNOB_RADIUS = 6.0
+HANDLE_HIT_RADIUS = 8.0
 
 Moved = Callable[[str, int, int], None]
 MovedGroup = Callable[[str, list[tuple[str, float, float]]], None]
 Rotated = Callable[[list[str], float, float, float], None]
 Dropped = Callable[[int, float, float], None]
-Docked = Callable[[str, int], None]
+Extended = Callable[[str, int, str], None]
 
 
 def rect_fully_inside(inner: QRectF, outer: QRectF) -> bool:
@@ -105,10 +115,11 @@ class PlanCanvas(QGraphicsView):
         self._on_group: MovedGroup | None = None
         self._on_rotated: Rotated | None = None
         self._on_dropped: Dropped | None = None
-        self._on_docked: Docked | None = None
+        self._on_extended: Extended | None = None
         self._expanding = False
         self._placing = False
-        self._pluses: list[PlusItem] = []
+        self._arrows: list[ExtendArrow] = []
+        self._catalog: Mapping[int, PartSpec] = {}
         self._lane_count = 2
         self._direction = CLOCKWISE
         self._loading = False
@@ -140,8 +151,8 @@ class PlanCanvas(QGraphicsView):
     def set_drop_listener(self, listener: Dropped) -> None:
         self._on_dropped = listener
 
-    def set_dock_listener(self, listener: Docked) -> None:
-        self._on_docked = listener
+    def set_extend_listener(self, listener: Extended) -> None:
+        self._on_extended = listener
 
     def set_color_coding(self, enabled: bool) -> None:
         """Restyle the parts already on the plan. The scene is not rebuilt."""
@@ -171,7 +182,8 @@ class PlanCanvas(QGraphicsView):
         self.rotation_handle.hide()
         if self.rotation_handle.scene() is self._scene:
             self._scene.removeItem(self.rotation_handle)
-        self._pluses = []
+        self._arrows = []
+        self._catalog = {} if parts is None else parts
         self._scene.clear()
         self._scene.addItem(self.rotation_handle)
         catalog = {} if parts is None else parts
@@ -235,6 +247,7 @@ class PlanCanvas(QGraphicsView):
         after = self.mapToScene(view_pos.toPoint())
         shift = after - before
         self.translate(shift.x(), shift.y())
+        self._place_extras()
 
     def pan_by(self, dx: float, dy: float) -> None:
         """Move the view. Part coordinates are not part of this change."""
@@ -254,9 +267,9 @@ class PlanCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             hit = self.itemAt(event.position().toPoint())
-            if isinstance(hit, PlusItem):
-                if self._on_docked is not None:
-                    self._on_docked(hit.instance_id, hit.connector_index)
+            if isinstance(hit, ExtendArrow):
+                if self._on_extended is not None:
+                    self._on_extended(hit.instance_id, hit.connector_index, hit.direction)
                 event.accept()
                 return
             if isinstance(hit, RotationHandle):
@@ -357,6 +370,8 @@ class PlanCanvas(QGraphicsView):
             item.item_id: (item.pos().x() / MM, item.pos().y() / MM, item.rotation())
             for item in selected
         }
+        for arrow in self._arrows:
+            arrow.hide()
 
     def _preview_rotate(self, scene_pos: QPointF) -> None:
         if not self._rotate_ids:
@@ -370,6 +385,7 @@ class PlanCanvas(QGraphicsView):
             dx, dy = rotate_xy(x_mm - self._rotate_center[0], y_mm - self._rotate_center[1], delta)
             item.preview(self._rotate_center[0] + dx, self._rotate_center[1] + dy, rotation + delta)
         self.rotation_handle.setPos(center)
+        self.rotation_handle.set_knob(self._knob_offset(self._rotating_items()))
 
     def _end_rotate(self, scene_pos: QPointF) -> None:
         if not self._rotate_ids or self._on_rotated is None:
@@ -406,20 +422,20 @@ class PlanCanvas(QGraphicsView):
 
     def _place_extras(self) -> None:
         self._place_handle()
-        self._place_pluses()
+        self._place_arrows()
 
-    def _place_pluses(self) -> None:
+    def _place_arrows(self) -> None:
         if self._placing:
             return
         self._placing = True
-        self._replace_pluses()
+        self._replace_arrows()
         self._placing = False
 
-    def _replace_pluses(self) -> None:
-        for plus in self._pluses:
-            if plus.scene() is self._scene:
-                self._scene.removeItem(plus)
-        self._pluses = []
+    def _replace_arrows(self) -> None:
+        for arrow in self._arrows:
+            if arrow.scene() is self._scene:
+                self._scene.removeItem(arrow)
+        self._arrows = []
         if self._loading:
             return
         selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
@@ -428,19 +444,42 @@ class PlanCanvas(QGraphicsView):
         item = selected[0]
         placed = [(_live_instance(other), other.spec) for other in self._instances()]
         live = _live_instance(item)
+        chosen = standard_extend_parts(self._catalog)
+        straight = chosen.get(EXTEND_STRAIGHT)
+        curve = chosen.get(EXTEND_LEFT)
+        straight_spec = None if straight is None else straight[1]
+        curve_spec = None if curve is None else curve[1]
         for index, connector in enumerate(item.spec.connectors):
             if connector_occupied(live, connector, placed):
                 continue
-            if not _same_part_can_join(item.spec, live, connector):
-                continue
+            outward = normalize_deg(connector.direction_deg + live.rotation_z_deg)
             point = world_xy(live, connector.x_mm, connector.y_mm)
-            plus = PlusItem(item.item_id, index, _plus_offset(live, connector))
-            self._scene.addItem(plus)
-            plus.setPos(point[0] * MM, point[1] * MM)
-            self._pluses.append(plus)
+            for direction in offered_extend_directions(live, connector, straight_spec, curve_spec):
+                heading = arrow_heading_deg(outward, direction)
+                arrow = ExtendArrow(
+                    item.item_id,
+                    index,
+                    direction,
+                    _screen_step(heading, ARROW_DISTANCE_PX),
+                    heading,
+                )
+                arrow.setZValue(92 if direction == EXTEND_STRAIGHT else 90)
+                self._scene.addItem(arrow)
+                arrow.setPos(point[0] * MM, point[1] * MM)
+                self._arrows.append(arrow)
 
     def _instances(self) -> list[InstanceItem]:
         return [item for item in self._scene.items() if isinstance(item, InstanceItem)]
+
+    def _rotating_items(self) -> list[InstanceItem]:
+        wanted = set(self._rotate_ids)
+        if not wanted:
+            return []
+        return [
+            item
+            for item in self._scene.items()
+            if isinstance(item, InstanceItem) and item.item_id in wanted
+        ]
 
     def _place_handle(self) -> None:
         selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
@@ -450,8 +489,61 @@ class PlanCanvas(QGraphicsView):
         center_x = sum(item.pos().x() for item in selected) / len(selected)
         center_y = sum(item.pos().y() for item in selected) / len(selected)
         self.rotation_handle.setPos(center_x, center_y)
+        self.rotation_handle.set_knob(self._knob_offset(selected))
         self.rotation_handle.show()
         self.rotation_handle.setZValue(100)
+
+    def _knob_offset(self, selected: list[InstanceItem]) -> QPointF:
+        """Screen offset that sits just outside the parts, away from their joints."""
+        if not selected:
+            return QPointF(0, -HANDLE_GAP_PX)
+        union = selected[0].geometry_scene_rect()
+        for item in selected[1:]:
+            union = union.united(item.geometry_scene_rect())
+        center = QPointF(
+            sum(item.pos().x() for item in selected) / len(selected),
+            sum(item.pos().y() for item in selected) / len(selected),
+        )
+        view_center = self.mapFromScene(center)
+        edges = (
+            (QPointF((union.left() + union.right()) / 2, union.top()), QPointF(0, -1)),
+            (QPointF(union.right(), (union.top() + union.bottom()) / 2), QPointF(1, 0)),
+            (QPointF((union.left() + union.right()) / 2, union.bottom()), QPointF(0, 1)),
+            (QPointF(union.left(), (union.top() + union.bottom()) / 2), QPointF(-1, 0)),
+        )
+        joints: list[QPointF] = []
+        for item in selected:
+            live = _live_instance(item)
+            for connector in item.spec.connectors:
+                point = world_xy(live, connector.x_mm, connector.y_mm)
+                mapped = self.mapFromScene(QPointF(point[0] * MM, point[1] * MM))
+                joints.append(QPointF(mapped))
+        best_rank: tuple[float, float] | None = None
+        best = QPointF(0, -HANDLE_GAP_PX)
+        for mid, normal in edges:
+            view_mid = self.mapFromScene(mid)
+            nudged = self.mapFromScene(QPointF(mid.x() + normal.x(), mid.y() + normal.y()))
+            vx = float(nudged.x() - view_mid.x())
+            vy = float(nudged.y() - view_mid.y())
+            length = math.hypot(vx, vy)
+            if length < 1e-3:
+                continue
+            knob_view = QPointF(
+                view_mid.x() + vx / length * HANDLE_GAP_PX,
+                view_mid.y() + vy / length * HANDLE_GAP_PX,
+            )
+            if joints:
+                clearance = min(
+                    math.hypot(knob_view.x() - joint.x(), knob_view.y() - joint.y())
+                    for joint in joints
+                )
+            else:
+                clearance = 1_000.0
+            rank = (clearance, -knob_view.y())
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+                best = QPointF(knob_view.x() - view_center.x(), knob_view.y() - view_center.y())
+        return best
 
 
 class PlanScene(QGraphicsScene):
@@ -614,6 +706,10 @@ class InstanceItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:  # noqa: N802
         return self._bounds
 
+    def geometry_scene_rect(self) -> QRectF:
+        """Axis-aligned bounds of the visible outline, without the stroke padding."""
+        return self.mapToScene(self._polygon).boundingRect()
+
     def set_color_coding(self, enabled: bool) -> None:
         if self._color_coding == enabled:
             return
@@ -631,10 +727,6 @@ class InstanceItem(QGraphicsItem):
             start_straight=self._start_straight,
         )
         painter.restore()
-        if self.isSelected():
-            painter.setPen(QPen(QColor(COLORS.accent), 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(self._bounds)
 
     def preview(self, x_mm: float, y_mm: float, rotation: float) -> None:
         self._ready = False
@@ -702,10 +794,26 @@ class RotationHandle(QGraphicsItem):
         self._preview = preview
         self._finish = finish
         self.dragging = False
-        self._knob = QPointF(0, -36)
-        self._bounds = QRectF(-14, -50, 28, 64)
+        self._knob = QPointF(0, -HANDLE_GAP_PX)
+        self._bounds = QRectF(-16, -HANDLE_GAP_PX - 16, 32, HANDLE_GAP_PX + 32)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.hide()
+
+    @property
+    def knob_offset(self) -> QPointF:
+        """Knob centre in unscaled pixels, relative to the rotation centre."""
+        return self._knob
+
+    def set_knob(self, knob: QPointF) -> None:
+        self.prepareGeometryChange()
+        self._knob = knob
+        pad = HANDLE_HIT_RADIUS + 2
+        left = min(0.0, knob.x()) - pad
+        top = min(0.0, knob.y()) - pad
+        right = max(0.0, knob.x()) + pad
+        bottom = max(0.0, knob.y()) + pad
+        self._bounds = QRectF(left, top, right - left, bottom - top)
+        self.update()
 
     def boundingRect(self) -> QRectF:  # noqa: N802
         return self._bounds
@@ -713,14 +821,13 @@ class RotationHandle(QGraphicsItem):
     def shape(self) -> QPainterPath:
         """Only the knob starts a rotation. The part body underneath stays a move target."""
         path = QPainterPath()
-        path.addEllipse(self._knob, 8, 8)
+        path.addEllipse(self._knob, HANDLE_HIT_RADIUS, HANDLE_HIT_RADIUS)
         return path
 
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
-        painter.setPen(QPen(QColor(COLORS.accent), 2))
-        painter.drawLine(QPointF(0, 0), self._knob)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLORS.accent))
-        painter.drawEllipse(self._knob, 7, 7)
+        painter.drawEllipse(self._knob, HANDLE_KNOB_RADIUS, HANDLE_KNOB_RADIUS)
 
     def begin(self, scene_pos: QPointF) -> None:
         self.dragging = True
@@ -749,15 +856,27 @@ class RotationHandle(QGraphicsItem):
         event.accept()
 
 
-class PlusItem(QGraphicsItem):
-    """Click target outside one free joint. The part body underneath stays a move target."""
+class ExtendArrow(QGraphicsItem):
+    """One continue direction outside a free joint. The glyph is smaller than the hit area."""
 
-    def __init__(self, instance_id: str, connector_index: int, offset: QPointF) -> None:
+    def __init__(
+        self,
+        instance_id: str,
+        connector_index: int,
+        direction: str,
+        offset: QPointF,
+        heading_deg: float,
+    ) -> None:
         super().__init__()
         self.instance_id = instance_id
         self.connector_index = connector_index
+        self.direction = direction
         self.offset = offset
-        self._bounds = QRectF(offset.x() - 10, offset.y() - 10, 20, 20)
+        self.heading_deg = heading_deg
+        self.glyph_px = ARROW_GLYPH_PX
+        self.hit_radius = ARROW_HIT_RADIUS
+        pad = ARROW_HIT_RADIUS + 1
+        self._bounds = QRectF(offset.x() - pad, offset.y() - pad, pad * 2, pad * 2)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.setZValue(90)
 
@@ -766,15 +885,13 @@ class PlusItem(QGraphicsItem):
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
-        path.addEllipse(self.offset, 8, 8)
+        path.addEllipse(self.offset, self.hit_radius, self.hit_radius)
         return path
 
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
-        painter.setPen(QPen(QColor(COLORS.accent), 2))
-        painter.setBrush(QColor(COLORS.elevated))
-        painter.drawEllipse(self.offset, 7, 7)
-        painter.drawLine(self.offset + QPointF(-5, 0), self.offset + QPointF(5, 0))
-        painter.drawLine(self.offset + QPointF(0, -5), self.offset + QPointF(0, 5))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(COLORS.accent))
+        painter.drawPolygon(_arrow_polygon(self.offset, self.heading_deg, self.glyph_px))
 
 
 def _live_instance(item: InstanceItem) -> PartInstance:
@@ -787,21 +904,35 @@ def _live_instance(item: InstanceItem) -> PartInstance:
     )
 
 
-def _plus_offset(instance: PartInstance, connector: ConnectorSpec) -> QPointF:
-    """Pixels outside the joint, so the symbol does not cover the part body."""
-    direction = math.radians(connector.direction_deg + instance.rotation_z_deg)
-    return QPointF(math.cos(direction) * 22, math.sin(direction) * 22)
+def _screen_step(heading_deg: float, distance: float) -> QPointF:
+    """Unscaled pixels along a plan heading. Scene y and screen y both point down."""
+    radians = math.radians(heading_deg)
+    return QPointF(math.cos(radians) * distance, math.sin(radians) * distance)
 
 
-def _same_part_can_join(spec: PartSpec, live: PartInstance, connector: ConnectorSpec) -> bool:
-    for source in spec.connectors:
-        if not connectors_compatible(source, connector):
-            continue
-        pose = join_pose(live, connector, source)
-        distance = ((pose.x_mm - live.x_mm) ** 2 + (pose.y_mm - live.y_mm) ** 2) ** 0.5
-        if distance >= 1.0:
-            return True
-    return False
+def _arrow_polygon(center: QPointF, heading_deg: float, length: float) -> QPolygonF:
+    """A filled arrow and nothing around it. ``length`` is the tip-to-tail size in pixels."""
+    radians = math.radians(heading_deg)
+    forward_x = math.cos(radians)
+    forward_y = math.sin(radians)
+    side_x = -forward_y
+    side_y = forward_x
+    tip = QPointF(center.x() + forward_x * length * 0.5, center.y() + forward_y * length * 0.5)
+    tail = QPointF(center.x() - forward_x * length * 0.5, center.y() - forward_y * length * 0.5)
+    neck = QPointF(center.x() - forward_x * length * 0.05, center.y() - forward_y * length * 0.05)
+    wing = length * 0.34
+    shaft = length * 0.14
+    return QPolygonF(
+        [
+            tip,
+            QPointF(neck.x() + side_x * wing, neck.y() + side_y * wing),
+            QPointF(neck.x() + side_x * shaft, neck.y() + side_y * shaft),
+            QPointF(tail.x() + side_x * shaft, tail.y() + side_y * shaft),
+            QPointF(tail.x() - side_x * shaft, tail.y() - side_y * shaft),
+            QPointF(neck.x() - side_x * shaft, neck.y() - side_y * shaft),
+            QPointF(neck.x() - side_x * wing, neck.y() - side_y * wing),
+        ]
+    )
 
 
 def _triangle(origin: QPointF, tip: QPointF) -> QPolygonF:
