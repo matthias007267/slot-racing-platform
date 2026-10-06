@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
+from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
@@ -51,6 +52,7 @@ class RacesPage(QWidget):
         tracks: TrackCatalog,
         providers: TimingProviderRegistry,
         hud_store: HudConfigurationStore | None = None,
+        config: AppConfig | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -104,7 +106,7 @@ class RacesPage(QWidget):
         list_layout.addWidget(self.status)
 
         self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks, providers)
-        self.live = LiveRaceView(translator, controller, hud_store, service)
+        self.live = LiveRaceView(translator, controller, hud_store, service, config)
         self.results = ResultsView(translator, service)
         self.stack = QStackedWidget()
         # The list's preferred width must not stop the live race from using a small window.

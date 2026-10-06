@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError as ModelValidationError
 
 from slot_racing.core.clock import ManualClock, MonotonicClock, format_duration
 from slot_racing.core.config import AppConfig, ConfigError, load_config, save_config
@@ -41,6 +42,33 @@ def test_config_roundtrip_and_missing_file(tmp_path: Path) -> None:
     config = AppConfig(language="en", plugin_overrides={"statistics": False})
     save_config(config, path)
     assert load_config(path) == config
+
+
+def test_audio_settings_default_roundtrip_and_old_files(tmp_path: Path) -> None:
+    config = AppConfig()
+    assert config.audio_enabled is True
+    assert config.audio_volume == 70
+    path = tmp_path / "config.json"
+    path.write_text('{"language": "en", "backup_keep": 4}', encoding="utf-8")
+    loaded = load_config(path)
+    assert loaded.language == "en"
+    assert loaded.backup_keep == 4
+    assert loaded.audio_enabled is True
+    assert loaded.audio_volume == 70
+    loaded.audio_enabled = False
+    loaded.audio_volume = 0
+    save_config(loaded, path)
+    again = load_config(path)
+    assert again.audio_enabled is False
+    assert again.audio_volume == 0
+    assert AppConfig(audio_volume=100).audio_volume == 100
+    with pytest.raises(ModelValidationError):
+        AppConfig(audio_volume=-1)
+    with pytest.raises(ModelValidationError):
+        AppConfig(audio_volume=101)
+    path.write_text('{"audio_volume": 140}', encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
 def test_invalid_config_raises(tmp_path: Path) -> None:
