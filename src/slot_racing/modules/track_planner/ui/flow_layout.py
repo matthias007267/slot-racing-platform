@@ -57,9 +57,21 @@ class FlowLayout(QLayout):
         self._arrange(rect, apply=True)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
+        """Width of one unwrapped row. The layout may still be given less and wrap."""
+        margins = self.contentsMargins()
+        hints = [self._hint(item) for item in self._items]
+        if not hints:
+            return QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        gaps = self.spacing() * (len(hints) - 1)
+        width = sum(hint.width() for hint in hints) + gaps
+        height = max(hint.height() for hint in hints)
+        return QSize(
+            width + margins.left() + margins.right(),
+            height + margins.top() + margins.bottom(),
+        )
 
     def minimumSize(self) -> QSize:  # noqa: N802
+        """The widest single control. Narrower than that, a label would be clipped."""
         size = QSize()
         for item in self._items:
             size = size.expandedTo(self._hint(item))

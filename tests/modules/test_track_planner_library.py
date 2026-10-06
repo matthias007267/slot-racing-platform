@@ -235,13 +235,14 @@ def test_toolbar_buttons_stay_readable_when_the_window_shrinks(qtbot: QtBot, env
     buttons = [widget for widget in page._toolbar_widgets if isinstance(widget, QPushButton)]
     assert buttons
 
-    def readable(width: int, height: int) -> None:
+    def readable(width: int, height: int) -> set[int]:
         window.resize(width, height)
+        QApplication.processEvents()
         toolbar_layout = page.toolbar.layout()
         window_layout = window.layout()
         assert toolbar_layout is not None and window_layout is not None
-        toolbar_layout.activate()
         window_layout.activate()
+        toolbar_layout.activate()
         QApplication.processEvents()
         boxes = []
         for button in buttons:
@@ -264,16 +265,25 @@ def test_toolbar_buttons_stay_readable_when_the_window_shrinks(qtbot: QtBot, env
             page.manage_stock,
         ):
             assert control.width() >= control.fontMetrics().horizontalAdvance(control.text())
+        return {button.geometry().top() for button in buttons}
 
-    for size in ((1280, 800), (1024, 768), (860, 640), (720, 560)):
+    for size in ((1280, 800), (1024, 768), (860, 640)):
         readable(*size)
+    assert len(readable(720, 560)) > 1
 
-    wide = page.toolbar.sizeHint().width() + window.width() - page.toolbar.width() + 40
-    window.resize(max(wide, 1800), 800)
+    # sizeHint is one full row. A fixed 1800 px window is not enough when the
+    # font is wider than the one this test was first written against.
+    slack = 40
+    wide = page.toolbar.sizeHint().width() + window.width() - page.toolbar.width() + slack
+    window.resize(wide, 800)
+    QApplication.processEvents()
+    wide_window_layout = window.layout()
     wide_layout = page.toolbar.layout()
-    assert wide_layout is not None
+    assert wide_window_layout is not None and wide_layout is not None
+    wide_window_layout.activate()
     wide_layout.activate()
     QApplication.processEvents()
+    assert page.toolbar.width() + 1 >= page.toolbar.sizeHint().width()
     tops = {button.geometry().top() for button in buttons}
     assert len(tops) == 1
 
