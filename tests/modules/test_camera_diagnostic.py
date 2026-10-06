@@ -470,12 +470,14 @@ def test_analysis_time_and_capture_drops_are_recorded(monkeypatch: pytest.Monkey
         assert performance.maximum_analysis_ns == 4_000_000
         assert performance.average_analysis_ns == 3_500_000
         assert performance.capture_dropped == 3
+        assert performance.source_overwrites == 3
         assert performance.frames_captured == 12
         assert performance.camera_fps is not None
         assert performance.analysis_fps is not None
         session.stop()
         assert "average_analysis_ms=3.500" in session.text()
-        assert "capture_dropped=3" in session.text()
+        assert "source_overwrites=3" in session.text()
+        assert "capture_dropped=" not in session.text()
     finally:
         session.close()
 

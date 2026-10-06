@@ -26,11 +26,14 @@ class TimedFrame:
     frame: GrayFrame
     timestamp_ns: int
     crops: tuple[GrayFrame, ...] | None = None
+    sequence: int = 0
+    """Monotonic capture sequence. Zero means the producer did not assign one."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.frame, GrayFrame):
             raise TypeError("frame must be a GrayFrame")
         require_range("timestamp_ns", self.timestamp_ns, 0)
+        require_range("sequence", self.sequence, 0)
         if self.crops is None:
             return
         if not isinstance(self.crops, tuple) or any(

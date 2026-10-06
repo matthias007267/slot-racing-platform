@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from typing import Protocol
 
 from slot_racing.modules.timing_camera._checks import require_range
@@ -78,6 +80,8 @@ class CaptureDevice(Protocol):
 class LatestFrameBuffer:
     """At most one unread frame. ``put`` replaces it and never blocks.
 
+    ``dropped`` counts unread frames replaced by a newer one. That is a
+    latest-frame overwrite, not a failed camera read and not a detector skip.
     The grab timestamp on a frame is never rewritten. ``wait`` blocks until a
     frame is published or ``stop`` is set. It is the detection worker's wakeup,
     not a timer. A frame taken by ``wait`` stays in flight until :meth:`ack`,
@@ -88,10 +92,18 @@ class LatestFrameBuffer:
         self._cond = threading.Condition()
         self._frame: TimedFrame | None = None
         self._in_flight = False
+        self._retired = False
         self.dropped = 0
+
+    @property
+    def retired(self) -> bool:
+        with self._cond:
+            return self._retired
 
     def put(self, frame: TimedFrame) -> None:
         with self._cond:
+            if self._retired:
+                return
             if self._frame is not None:
                 self.dropped += 1
             self._frame = frame
@@ -100,6 +112,8 @@ class LatestFrameBuffer:
     def take(self) -> TimedFrame | None:
         """The unread frame, if there is one. Does not wait and is not in flight."""
         with self._cond:
+            if self._retired:
+                return None
             frame = self._frame
             self._frame = None
             return frame
@@ -108,17 +122,25 @@ class LatestFrameBuffer:
         """Block until the newest unread frame is available, or ``stop`` is set.
 
         A frame that arrives after ``stop`` is left unread. Detection does not
-        start it.
+        start it. A retired slot returns ``None`` so a replaced consumer can
+        attach to the new capture.
         """
         with self._cond:
-            while self._frame is None and not stop.is_set():
+            while self._frame is None and not stop.is_set() and not self._retired:
                 self._cond.wait()
-            if stop.is_set():
+            if stop.is_set() or self._retired:
                 return None
             frame = self._frame
             self._frame = None
             self._in_flight = True
             return frame
+
+    def retire(self) -> None:
+        """Unblock waiters. Further frames are ignored. The slot is not reused."""
+        with self._cond:
+            self._retired = True
+            self._frame = None
+            self._cond.notify_all()
 
     def ack(self) -> None:
         """Detection finished the frame taken by :meth:`wait`."""
@@ -162,11 +184,14 @@ class CameraFrameSource(FrameSource):
         max_read_failures: int = DEFAULT_READ_FAILURES,
         lease: CameraLease | None = None,
         lease_owner: str = CameraLease.RACE,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         if not callable(getattr(device, "open", None)):
             raise TypeError("device must be a capture device")
         if lease is not None and not isinstance(lease, CameraLease):
             raise TypeError("lease must be a CameraLease")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be a callable")
         self._device = device
         # Callers may still pass a size. The slot stays one frame either way:
         # a larger buffer would hold pictures detection is already too late for.
@@ -176,6 +201,7 @@ class CameraFrameSource(FrameSource):
         self._lease = lease
         self._lease_owner = lease_owner
         self._holding_lease = False
+        self._clock = time.perf_counter_ns if clock is None else clock
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._paused = False
@@ -183,8 +209,19 @@ class CameraFrameSource(FrameSource):
         self._running = False
         self._error: BaseException | None = None
         self._error_lock = threading.Lock()
+        self._subscribers: list[LatestFrameBuffer] = []
+        self._sub_lock = threading.Lock()
         self._captured = 0
+        self._sequence = 0
+        self._read_attempts = 0
+        self._read_failures = 0
+        self._previous_stamp: int | None = None
         self._last_read_ns = 0
+        self._last_capture_dt_ns = 0
+        self._last_publish_ns = 0
+        self.last_open_ns = 0
+        self.last_close_ns = 0
+        self.last_join_ns = 0
 
     @property
     def queued(self) -> int:
@@ -192,6 +229,11 @@ class CameraFrameSource(FrameSource):
 
     @property
     def dropped(self) -> int:
+        """Unread frames replaced in the primary slot.
+
+        This is a latest-frame overwrite. It is not a failed ``read``. Subscribers
+        keep their own overwrite counts; those are not added here.
+        """
         return self._queue.dropped
 
     @property
@@ -200,9 +242,45 @@ class CameraFrameSource(FrameSource):
         return self._captured
 
     @property
+    def sequence(self) -> int:
+        """Sequence of the last frame read from the device. Zero before the first one."""
+        return self._sequence
+
+    @property
+    def read_attempts(self) -> int:
+        return self._read_attempts
+
+    @property
+    def read_failures(self) -> int:
+        return self._read_failures
+
+    @property
     def last_read_ns(self) -> int:
         """How long the most recent ``read`` took, in nanoseconds. Zero before the first frame."""
         return self._last_read_ns
+
+    @property
+    def last_capture_dt_ns(self) -> int:
+        """Gap between the last two successful grabs. Zero until the second frame."""
+        return self._last_capture_dt_ns
+
+    @property
+    def last_publish_ns(self) -> int:
+        """Time spent handing the last frame to its slots. Zero before the first publish."""
+        return self._last_publish_ns
+
+    def subscribe(self) -> LatestFrameBuffer:
+        """A private latest-frame slot. Publishing does not wait for the consumer."""
+        slot = LatestFrameBuffer()
+        with self._sub_lock:
+            self._subscribers.append(slot)
+        return slot
+
+    def unsubscribe(self, slot: LatestFrameBuffer) -> None:
+        """Drop ``slot`` and wake anyone blocked in its ``wait``."""
+        with self._sub_lock, suppress(ValueError):
+            self._subscribers.remove(slot)
+        slot.retire()
 
     @property
     def is_capturing(self) -> bool:
@@ -219,16 +297,25 @@ class CameraFrameSource(FrameSource):
             self._error = None
         self._queue.clear()
         self._captured = 0
+        self._sequence = 0
+        self._read_attempts = 0
+        self._read_failures = 0
+        self._previous_stamp = None
         self._last_read_ns = 0
+        self._last_capture_dt_ns = 0
+        self._last_publish_ns = 0
         if self._lease is not None and not self._lease.try_acquire(self._lease_owner):
             raise CameraBusyError("camera is in use")
         self._holding_lease = self._lease is not None
+        opened = time.perf_counter_ns()
         try:
             self._device.open()
         except Exception:
+            self.last_open_ns = time.perf_counter_ns() - opened
             self._device.close()
             self._release_lease()
             raise
+        self.last_open_ns = time.perf_counter_ns() - opened
         self._running = True
         self._thread = threading.Thread(target=self._run, name="slot-racing-camera", daemon=True)
         self._thread.start()
@@ -237,13 +324,18 @@ class CameraFrameSource(FrameSource):
         self._stop.set()
         self._paused = False
         self._running = False
+        closed = time.perf_counter_ns()
         self._device.close()
+        self.last_close_ns = time.perf_counter_ns() - closed
         self._queue.clear()
+        self._retire_subscribers()
         self._release_lease()
         thread = self._thread
         self._thread = None
         if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            joined = time.perf_counter_ns()
             thread.join(timeout=2)
+            self.last_join_ns = time.perf_counter_ns() - joined
             if thread.is_alive():
                 raise RuntimeError("camera capture thread did not stop")
 
@@ -321,9 +413,28 @@ class CameraFrameSource(FrameSource):
         """True when the latest slot is empty and no waited frame is in flight."""
         return self._queue.idle()
 
+    def _retire_subscribers(self) -> None:
+        with self._sub_lock:
+            slots = tuple(self._subscribers)
+            self._subscribers.clear()
+        for slot in slots:
+            slot.retire()
+
+    def _emit(self, frame: TimedFrame) -> None:
+        started = time.perf_counter_ns()
+        with self._sub_lock:
+            slots = tuple(self._subscribers)
+        if slots:
+            for slot in slots:
+                slot.put(frame)
+        else:
+            self._queue.put(frame)
+        self._last_publish_ns = time.perf_counter_ns() - started
+
     def _run(self) -> None:
         failures = 0
         while not self._stop.is_set():
+            self._read_attempts += 1
             try:
                 started = time.perf_counter_ns()
                 grabbed = self._grab()
@@ -331,6 +442,7 @@ class CameraFrameSource(FrameSource):
             except CameraClosedError:
                 return
             except Exception as error:
+                self._read_failures += 1
                 if self._stop.is_set():
                     return
                 failures += 1
@@ -340,11 +452,16 @@ class CameraFrameSource(FrameSource):
                 continue
             failures = 0
             self._captured += 1
+            self._sequence += 1
             # The stamp belongs to the grab, not to a later poll.
-            timestamp_ns = time.perf_counter_ns()
+            timestamp_ns = self._clock()
+            previous = self._previous_stamp
+            if previous is not None:
+                self._last_capture_dt_ns = timestamp_ns - previous
+            self._previous_stamp = timestamp_ns
             if self._paused or (self._resume_ns is not None and timestamp_ns < self._resume_ns):
                 continue
-            self._queue.put(_timed(grabbed, timestamp_ns))
+            self._emit(_timed(grabbed, timestamp_ns, self._sequence))
 
     def _grab(self) -> GrayFrame | tuple[GrayFrame, ...]:
         """One full picture, or the zone crops when the device was asked for them."""
@@ -364,7 +481,13 @@ class CameraFrameSource(FrameSource):
         with self._error_lock:
             if self._error is None:
                 self._error = error
+        closed = time.perf_counter_ns()
         self._device.close()
+        self.last_close_ns = time.perf_counter_ns() - closed
+        # The device is released here. The lease stays with this source until
+        # ``stop``, so a preview cannot open a second capture while the race
+        # that owned the failure is still shutting down.
+        self._retire_subscribers()
         self._queue.wake()
 
 
@@ -372,7 +495,9 @@ class CameraFrameSource(FrameSource):
 _CROP_CARRIER = GrayFrame(1, 1, b"\x00")
 
 
-def _timed(grabbed: GrayFrame | tuple[GrayFrame, ...], timestamp_ns: int) -> TimedFrame:
+def _timed(
+    grabbed: GrayFrame | tuple[GrayFrame, ...], timestamp_ns: int, sequence: int = 0
+) -> TimedFrame:
     if isinstance(grabbed, GrayFrame):
-        return TimedFrame(grabbed, timestamp_ns)
-    return TimedFrame(_CROP_CARRIER, timestamp_ns, crops=grabbed)
+        return TimedFrame(grabbed, timestamp_ns, sequence=sequence)
+    return TimedFrame(_CROP_CARRIER, timestamp_ns, crops=grabbed, sequence=sequence)
