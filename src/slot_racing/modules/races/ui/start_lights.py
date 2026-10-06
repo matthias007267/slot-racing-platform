@@ -1,30 +1,43 @@
 """Five red start lights. This widget only draws a step it is given.
 
-It does not start a race, open a camera, or keep a clock. The start cue owns
-the sequence and tells the widget how many lamps are lit.
+It does not start a race, open a camera, keep a clock, or play a sound. The start
+cue owns the sequence and tells the widget how many lamps are lit.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent
+from dataclasses import dataclass
+
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QRadialGradient, QResizeEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from slot_racing.modules.races.ui.start_cue import START_LIGHT_COUNT, StartCueStep, StartPhase
 from slot_racing.uikit.theme import COLORS
 
-_LAMP = 78
-_GAP = 26
-_PAD_X = 36
-_PAD_Y = 28
-_GO_BAND = 72
+# Proportions of one lamp. The housing is derived from the widget width, then
+# capped so a large window does not hand the whole screen to the gantry.
+_MAX_LAMP = 92.0
+_SIDE_MARGIN = 12.0
+_PAD_X = 0.50
+_PAD_Y = 0.42
+_GAP = 0.40
+_SPAN = 2 * _PAD_X + START_LIGHT_COUNT + (START_LIGHT_COUNT - 1) * _GAP
+_MIN_WIDTH = 480
+
+
+@dataclass(frozen=True, slots=True)
+class _Gantry:
+    housing: QRectF
+    lamps: tuple[QRectF, ...]
+    go_band: float
 
 
 class StartLightWidget(QWidget):
     """A horizontal gantry of five lamps, dark until a step lights them.
 
     ``show_lights`` is the whole interface. ``lit`` counts lamps from the left.
-    ``go`` draws the lamps dark and shows GO. That word is feedback for the
+    ``go`` draws every lamp dark and shows GO. That word is feedback for the
     start signal the cue has already given. It is not a second start.
     """
 
@@ -33,12 +46,11 @@ class StartLightWidget(QWidget):
         self.setObjectName("start-lights")
         self._lit = 0
         self._go = False
-        lamps = START_LIGHT_COUNT * _LAMP + (START_LIGHT_COUNT - 1) * _GAP
-        self._housing_width = _PAD_X * 2 + lamps
-        self._housing_height = _PAD_Y * 2 + _LAMP
-        self.setMinimumWidth(self._housing_width)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._fit_height()
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.setMinimumWidth(_MIN_WIDTH)
+        self._sync_height()
         self.hide()
 
     @property
@@ -48,6 +60,10 @@ class StartLightWidget(QWidget):
     @property
     def showing_go(self) -> bool:
         return self._go
+
+    def lamp_rects(self) -> tuple[QRectF, ...]:
+        """The five lamp faces, left to right, in widget coordinates."""
+        return self._gantry().lamps
 
     def show_step(self, step: StartCueStep) -> None:
         """Draw one cue step. The race start stays with the cue."""
@@ -61,7 +77,7 @@ class StartLightWidget(QWidget):
             raise ValueError("the start signal shows every light off")
         self._lit = lit
         self._go = go
-        self._fit_height()
+        self._sync_height()
         self.show()
         self.update()
 
@@ -69,59 +85,121 @@ class StartLightWidget(QWidget):
         """Back to five dark lamps, and leave the live view clear."""
         self._lit = 0
         self._go = False
-        self._fit_height()
+        self._sync_height()
         self.hide()
 
-    def _fit_height(self) -> None:
-        extra = _GO_BAND if self._go else 0
-        self.setMinimumHeight(self._housing_height + extra + 8)
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._height_for(max(width, 1))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_height()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        housing = self._housing_rect()
-        painter.setPen(QColor(COLORS.border))
-        painter.setBrush(QColor(COLORS.elevated))
-        painter.drawRoundedRect(housing, 18, 18)
-        top = housing.top() + _PAD_Y
-        left = housing.left() + _PAD_X
-        for index in range(START_LIGHT_COUNT):
-            x = left + index * (_LAMP + _GAP)
-            self._draw_lamp(painter, x, top, on=index < self._lit)
+        gantry = self._gantry()
+        self._draw_housing(painter, gantry.housing)
+        for index, rect in enumerate(gantry.lamps):
+            self._draw_chamber(painter, rect)
+            self._draw_lamp(painter, rect, on=index < self._lit)
         if self._go:
-            self._draw_go(painter, housing.bottom())
+            self._draw_go(painter, gantry)
         painter.end()
 
-    def _housing_rect(self) -> QRect:
-        x = max(0, (self.width() - self._housing_width) // 2)
-        return QRect(x, 4, self._housing_width, self._housing_height)
+    def _sync_height(self) -> None:
+        width = self.width() if self.width() > 0 else _MIN_WIDTH
+        height = self._height_for(width)
+        if self.minimumHeight() != height:
+            self.setMinimumHeight(height)
 
-    def _draw_lamp(self, painter: QPainter, x: int, y: int, *, on: bool) -> None:
-        rect = QRectF(x, y, _LAMP, _LAMP)
-        if on:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(COLORS.error))
-            painter.drawEllipse(rect)
-            painter.setBrush(QColor(COLORS.error).lighter(150))
-            inset = rect.adjusted(_LAMP * 0.22, _LAMP * 0.16, -_LAMP * 0.42, -_LAMP * 0.48)
-            painter.drawEllipse(inset)
-            return
+    def _height_for(self, width: int) -> int:
+        gantry = self._measure(width)
+        extra = gantry.go_band if self._go else 0.0
+        return int(gantry.housing.bottom() + extra + 8)
+
+    def _gantry(self) -> _Gantry:
+        return self._measure(max(self.width(), 1))
+
+    def _measure(self, width: int) -> _Gantry:
+        span = max(float(width) - _SIDE_MARGIN * 2, 1.0)
+        lamp = min(_MAX_LAMP, span / _SPAN)
+        pad_x = _PAD_X * lamp
+        pad_y = _PAD_Y * lamp
+        gap = _GAP * lamp
+        housing_w = pad_x * 2 + START_LIGHT_COUNT * lamp + (START_LIGHT_COUNT - 1) * gap
+        housing_h = pad_y * 2 + lamp
+        origin_x = (float(width) - housing_w) / 2
+        housing = QRectF(origin_x, 6.0, housing_w, housing_h)
+        left = origin_x + pad_x
+        top = housing.top() + pad_y
+        lamps = tuple(
+            QRectF(left + index * (lamp + gap), top, lamp, lamp)
+            for index in range(START_LIGHT_COUNT)
+        )
+        return _Gantry(housing, lamps, lamp * 0.78)
+
+    def _draw_housing(self, painter: QPainter, housing: QRectF) -> None:
+        radius = min(housing.height() * 0.22, 22.0)
         painter.setPen(QColor(COLORS.border))
-        painter.setBrush(QColor(COLORS.error).darker(320))
-        painter.drawEllipse(rect)
+        painter.setBrush(QColor(COLORS.background).lighter(118))
+        painter.drawRoundedRect(housing, radius, radius)
 
-    def _draw_go(self, painter: QPainter, housing_bottom: int) -> None:
+    def _draw_chamber(self, painter: QPainter, lamp: QRectF) -> None:
+        inset = lamp.width() * 0.08
+        bezel = lamp.adjusted(-inset, -inset, inset, inset)
+        painter.setPen(QColor(COLORS.border).darker(140))
+        painter.setBrush(QColor(COLORS.background))
+        painter.drawEllipse(bezel)
+
+    def _draw_lamp(self, painter: QPainter, rect: QRectF, *, on: bool) -> None:
+        center = rect.center()
+        radius = rect.width() / 2
+        if on:
+            glow = QRadialGradient(center, radius * 1.35)
+            color = QColor(COLORS.error)
+            color.setAlpha(70)
+            glow.setColorAt(0.0, color)
+            glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(center, radius * 1.35, radius * 1.35)
+            body = QRadialGradient(center, radius)
+            body.setColorAt(0.0, QColor(COLORS.error).lighter(165))
+            body.setColorAt(0.45, QColor(COLORS.error))
+            body.setColorAt(1.0, QColor(COLORS.error).darker(140))
+            painter.setBrush(body)
+            painter.drawEllipse(rect)
+            painter.setBrush(QColor(255, 236, 230, 180))
+            highlight = rect.adjusted(radius * 0.42, radius * 0.28, -radius * 0.95, -radius * 1.05)
+            painter.drawEllipse(highlight)
+            return
+        body = QRadialGradient(center, radius)
+        body.setColorAt(0.0, QColor(COLORS.error).darker(220))
+        body.setColorAt(1.0, QColor(COLORS.error).darker(380))
+        painter.setPen(QColor(COLORS.border).darker(150))
+        painter.setBrush(body)
+        painter.drawEllipse(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 28))
+        reflection = rect.adjusted(radius * 0.55, radius * 0.38, -radius * 1.15, -radius * 1.25)
+        painter.drawEllipse(reflection)
+
+    def _draw_go(self, painter: QPainter, gantry: _Gantry) -> None:
         font = QFont(self.font())
-        font.setPixelSize(54)
+        font.setPixelSize(max(18, int(gantry.lamps[0].height() * 0.62)))
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(COLORS.accent))
         painter.drawText(
             0,
-            housing_bottom,
+            int(gantry.housing.bottom()),
             self.width(),
-            _GO_BAND,
+            int(gantry.go_band),
             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
             "GO",
         )

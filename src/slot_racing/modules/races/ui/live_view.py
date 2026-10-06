@@ -55,6 +55,7 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceStatusWidget,
 )
 from slot_racing.modules.races.ui.lane_board import LiveLaneBoard
+from slot_racing.modules.races.ui.race_audio import RaceAudio
 from slot_racing.modules.races.ui.start_cue import (
     StartCue,
     StartCueStep,
@@ -111,6 +112,7 @@ class LiveRaceView(QWidget):
         self._announced_finishers: set[int] = set()
         self._message = ""
         self._cue: StartCue | None = None
+        self.audio = RaceAudio(parent=self)
         self.cue_interval_ms = 1000
         self._unsubscribe_hud: Callable[[], None] | None = None
         self.confirm: Callable[[str], bool] = lambda text: (
@@ -233,6 +235,7 @@ class LiveRaceView(QWidget):
         interval = self.cue_interval_ms if interval_ms is None else interval_ms
         cue = StartCue(self._commit_start, interval_ms=interval, parent=self)
         cue.changed.connect(self._show_cue)
+        cue.changed.connect(self._play_start_sound)
         cue.finished.connect(self._hide_cue)
         self._cue = cue
         cue.begin()
@@ -256,6 +259,11 @@ class LiveRaceView(QWidget):
         if not isinstance(step, StartCueStep):
             return
         self.start_lights.show_lights(step.lit_lights, go=step.phase is StartPhase.START_SIGNAL)
+
+    def _play_start_sound(self, step: object) -> None:
+        """Start the step's tone. The cue does not wait for it, and neither does the race."""
+        if isinstance(step, StartCueStep):
+            self.audio.play(step.sound_id)
 
     def _hide_cue(self) -> None:
         self.start_lights.clear()
