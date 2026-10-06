@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import QGraphicsItem
 from pytestqt.qtbot import QtBot
 
@@ -46,10 +46,12 @@ from slot_racing.modules.track_planner.ui.canvas import (
     ARROW_GLYPH_PX,
     ARROW_HIT_RADIUS,
     HANDLE_GAP_PX,
+    MM,
     ExtendArrow,
     InstanceItem,
 )
 from slot_racing.modules.track_planner.ui.page import PlannerPage
+from slot_racing.modules.track_planner.ui.track_paint import _drawn
 from slot_racing.uikit.theme import COLORS
 from tests.modules.conftest import Env
 from tests.modules.test_track_parts import _library_row, _select
@@ -248,36 +250,73 @@ def test_an_arrow_glyph_has_no_ring_and_a_larger_hit_area() -> None:
     assert image.pixel(int(40 + arrow.hit_radius), 40) & 0xFF000000 == 0
 
 
-def test_a_selected_part_has_no_outer_rectangle(qtbot: QtBot, env: Env) -> None:
-    page = _open(qtbot, env, "Rand")
+def test_a_selected_part_follows_its_outline_not_a_bounding_box(qtbot: QtBot, env: Env) -> None:
+    page = _open(qtbot, env, "Kontur")
     _place(page, STANDARD_STRAIGHT_ARTICLE)
     item = _instances(page)[0]
     assert item.isSelected()
-    rect = item.sceneBoundingRect()
-    pad = 3
-    source = rect.adjusted(-pad, -pad, pad, pad)
-    width = max(math.ceil(source.width()), 1)
-    height = max(math.ceil(source.height()), 1)
-    image = QImage(width, height, QImage.Format.Format_RGB32)
-    image.fill(QColor(COLORS.background))
-    painter = QPainter(image)
-    page.canvas.scene().render(painter, QRectF(0, 0, width, height), source)
-    painter.end()
-    accent = QColor(COLORS.accent)
-    corners = (
-        (pad, pad),
-        (pad, height - pad - 1),
-        (width - pad - 1, pad),
-        (width - pad - 1, height - pad - 1),
-    )
-    for x, y in corners:
-        color = QColor(image.pixel(x, y))
-        assert abs(color.green() - accent.green()) > 40
-    # The roadway edge itself must not be redrawn as a selection rectangle.
-    edge = QColor(image.pixel(width // 2, pad + 4))
-    assert abs(edge.green() - accent.green()) > 40
-    center = QColor(image.pixel(width // 2, height // 2))
+    assert page.canvas.rotation_handle.isVisible()
+    assert len(_arrows(page)) == 6
+    image = _paint_items([item], 500, 320, 250, 160)
+    assert _accent_near(image, 250, 60)
+    assert not _accent_near(image, 250, 40)
+    assert not _accent_near(image, 442, 40)
+    assert not _accent_near(image, 58, 40)
+    center = image.pixelColor(250, 160)
+    assert not _is_accent(center)
     assert center.rgb() != QColor(COLORS.background).rgb()
+
+    page.rotation_free.setValue(45)
+    turned = _instances(page)[0]
+    assert turned.isSelected()
+    assert turned.rotation() == pytest.approx(45)
+    rotated = _paint_items([turned], 500, 500, 250, 250)
+    edge = _rotated(0.0, -100.0, 45.0)
+    assert _accent_near(rotated, 250 + edge[0], 250 + edge[1])
+    assert not _accent_near(rotated, 250 + 193, 250 - 193)
+
+    turned.setSelected(False)
+    plain = _paint_items([turned], 500, 500, 250, 250)
+    assert not _accent_near(plain, 250 + edge[0], 250 + edge[1])
+
+
+def test_a_selected_curve_follows_the_arc(qtbot: QtBot, env: Env) -> None:
+    page = _open(qtbot, env, "Bogen")
+    _place(page, STANDARD_CURVE_ARTICLE)
+    item = _instances(page)[0]
+    assert item.isSelected()
+    assert page.canvas.rotation_handle.isVisible()
+    assert _arrows(page)
+    path = _drawn(track_figure(item.spec)).roadway
+    assert _path_has_curve(path)
+    assert not _path_is_rectangle(path)
+    image = _paint_items([item], 480, 480, 40, 240)
+    assert _accent_near(image, 440, 240)
+    arc = (400.0 * math.cos(math.radians(25)), 400.0 * math.sin(math.radians(25)))
+    assert _accent_near(image, 40 + arc[0], 240 + arc[1])
+    assert _accent_near(image, 240, 240)
+    assert not _accent_near(image, 440, 360)
+    assert not _accent_near(image, 340, 40)
+    interior = image.pixelColor(340, 240)
+    assert not _is_accent(interior)
+    assert interior.rgb() != QColor(COLORS.background).rgb()
+
+
+def test_each_selected_part_has_its_own_contour(qtbot: QtBot, env: Env) -> None:
+    page = _open(qtbot, env, "Mehrfach")
+    _place(page, STANDARD_STRAIGHT_ARTICLE, x=0, y=0)
+    _place(page, STANDARD_CURVE_ARTICLE, x=2000, y=0)
+    items = _instances(page)
+    assert len(items) == 2
+    for item in items:
+        item.setSelected(True)
+    assert all(item.isSelected() for item in items)
+    image = _paint_items(items, 2800, 520, 300, 260)
+    assert _accent_near(image, 300, 160)
+    assert _accent_near(image, 2700, 260)
+    assert not _accent_near(image, 1300, 160)
+    assert not _accent_near(image, 1300, 60)
+    assert not _accent_near(image, 2700, 60)
 
 
 def test_the_rotation_handle_sits_just_outside_the_rail(qtbot: QtBot, env: Env) -> None:
@@ -537,6 +576,63 @@ def _view_rect(page: PlannerPage, item: InstanceItem) -> QRectF:
     top_left = page.canvas.mapFromScene(rect.topLeft())
     bottom_right = page.canvas.mapFromScene(rect.bottomRight())
     return QRectF(QPointF(top_left), QPointF(bottom_right)).normalized()
+
+
+def _paint_items(
+    items: list[InstanceItem], width: int, height: int, origin_x: float, origin_y: float
+) -> QImage:
+    """Paint parts at 1 px per millimetre, including each item's own rotation."""
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(QColor(COLORS.background))
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    for item in items:
+        painter.save()
+        painter.translate(origin_x + item.pos().x() / MM, origin_y + item.pos().y() / MM)
+        painter.rotate(item.rotation())
+        painter.scale(1.0 / MM, 1.0 / MM)
+        item.paint(painter, None)
+        painter.restore()
+    painter.end()
+    return image
+
+
+def _is_accent(color: QColor) -> bool:
+    accent = QColor(COLORS.accent)
+    return abs(color.green() - accent.green()) <= 40 and color.green() > color.red() + 40
+
+
+def _accent_near(image: QImage, x: float, y: float) -> bool:
+    cx = round(x)
+    cy = round(y)
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            px = cx + dx
+            py = cy + dy
+            if (
+                0 <= px < image.width()
+                and 0 <= py < image.height()
+                and _is_accent(image.pixelColor(px, py))
+            ):
+                return True
+    return False
+
+
+def _rotated(x_mm: float, y_mm: float, degrees: float) -> tuple[float, float]:
+    """Map a local point the way ``QPainter.rotate`` does: clockwise, +y down."""
+    radians = math.radians(degrees)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    return (x_mm * cosine - y_mm * sine, x_mm * sine + y_mm * cosine)
+
+
+def _path_has_curve(path: QPainterPath) -> bool:
+    curve = QPainterPath.ElementType.CurveToElement
+    return any(path.elementAt(index).type == curve for index in range(path.elementCount()))
+
+
+def _path_is_rectangle(path: QPainterPath) -> bool:
+    return not _path_has_curve(path) and path.elementCount() <= 6
 
 
 def _point_gap(point: QPointF, rect: QRectF) -> float:
