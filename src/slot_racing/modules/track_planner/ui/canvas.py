@@ -719,11 +719,12 @@ class InstanceItem(QGraphicsItem):
     def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
         painter.save()
         painter.scale(MM, MM)
+        # The accent stroke is the part outline. A curve follows its arc, not the bounds.
         paint_part(
             painter,
             self.spec,
             color_coding=self._color_coding,
-            selected=False,
+            selected=self.isSelected(),
             start_straight=self._start_straight,
         )
         painter.restore()
