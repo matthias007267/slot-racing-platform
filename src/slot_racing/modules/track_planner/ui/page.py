@@ -40,7 +40,6 @@ from slot_racing.modules.track_planner.document import (
     duplicate_instances,
     empty_plan,
     extend_from_connector,
-    move_instance,
     move_marker,
     move_piece,
     next_origin,
@@ -50,6 +49,7 @@ from slot_racing.modules.track_planner.document import (
     remove_marker,
     remove_piece,
     reposition_instance,
+    reposition_selection,
     reset_plan,
     rotate_instance,
     rotate_instances_around,
@@ -855,21 +855,11 @@ class PlannerPage(QWidget):
         if anchor not in raw:
             return
         try:
-            snapped = reposition_instance(
-                self._plan, anchor, raw[anchor][0], raw[anchor][1], self._parts
-            )
+            plan = reposition_selection(self._plan, raw, anchor, self._parts)
         except Exception as error:
             self._report(error)
             self._draw(set(raw))
             return
-        anchor_pose = next(instance for instance in snapped.instances if instance.id == anchor)
-        dx = anchor_pose.x_mm - raw[anchor][0]
-        dy = anchor_pose.y_mm - raw[anchor][1]
-        plan = snapped
-        for item_id, (x_mm, y_mm) in raw.items():
-            if item_id == anchor:
-                continue
-            plan = move_instance(plan, item_id, x_mm + dx, y_mm + dy)
         self._commit(plan, set(raw))
 
     def _rotated(self, ids: list[str], center_x: float, center_y: float, delta: float) -> None:

@@ -351,6 +351,34 @@ def connector_occupied(
     return False
 
 
+def connector_is_free(
+    instance: PartInstance,
+    connector: ConnectorSpec,
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+    *,
+    tolerance_mm: float = 1.0,
+) -> bool:
+    """True when this joint is not already met by another compatible joint.
+
+    Snap candidates and continue-build arrows both use this. A joint that is occupied for
+    one of them is occupied for the other.
+    """
+    return not connector_occupied(instance, connector, placed, tolerance_mm=tolerance_mm)
+
+
+def free_connector_indexes(
+    instance: PartInstance,
+    spec: PartSpec,
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+) -> tuple[int, ...]:
+    """Indexes of joints that may start a snap or a continue-build arrow."""
+    return tuple(
+        index
+        for index, connector in enumerate(spec.connectors)
+        if connector_is_free(instance, connector, placed)
+    )
+
+
 def signed_delta_deg(start_deg: float, end_deg: float) -> float:
     """Clockwise degrees from ``start_deg`` to ``end_deg``, in the range -180..180."""
     return (normalize_deg(end_deg) - normalize_deg(start_deg) + 180.0) % 360.0 - 180.0
@@ -551,43 +579,132 @@ def snap_pose(
     snap_mm: float,
     grid_mm: float | None,
 ) -> Pose:
-    """Move onto the nearest compatible joint, or onto the grid when nothing is close.
+    """Dock one new part onto the nearest free joint, or onto the grid.
 
-    Distance is measured between the joint that would meet and the joint already on the plan.
-    Equal distances prefer the earlier instance, then the earlier joint, so the result does not
-    jump between candidates.
+    The part is not on the plan yet, so every one of its joints is free. A joint on the plan
+    is a target only when it is free as well. One selected part uses :func:`snap_selection`
+    with the same rule; this entry keeps the placement of a part that has no previous pose.
     """
     if snap_mm < 0:
         raise ValidationError("error.planner.part")
-    best: tuple[tuple[float, str, int, int], Pose] | None = None
-    proposed_rotation = normalize_deg(proposed.rotation_z_deg)
-    proposed_instance = PartInstance(
-        "moving", 0, proposed.x_mm, proposed.y_mm, rotation_z_deg=proposed_rotation
+    rotation = normalize_deg(proposed.rotation_z_deg)
+    instance = PartInstance("moving", 0, proposed.x_mm, proposed.y_mm, rotation_z_deg=rotation)
+    poses = snap_selection(
+        ((instance, moving),),
+        placed,
+        anchor_id=instance.id,
+        snap_mm=snap_mm,
+        grid_mm=grid_mm,
+        source_blockers=(),
+        target_blockers=placed,
     )
-    for target_instance, target_part in placed:
-        for target_index, target in enumerate(target_part.connectors):
-            target_point = world_xy(target_instance, target.x_mm, target.y_mm)
-            target_dir = normalize_deg(target.direction_deg + target_instance.rotation_z_deg)
-            for source_index, source in enumerate(moving.connectors):
-                if not connectors_compatible(source, target):
+    return poses[instance.id]
+
+
+def snap_selection(
+    proposed: Sequence[tuple[PartInstance, PartSpec]],
+    stationary: Sequence[tuple[PartInstance, PartSpec]],
+    *,
+    anchor_id: str,
+    snap_mm: float,
+    grid_mm: float | None,
+    source_blockers: Sequence[tuple[PartInstance, PartSpec]],
+    target_blockers: Sequence[tuple[PartInstance, PartSpec]],
+) -> dict[str, Pose]:
+    """Dock a selection as one rigid body onto the nearest pair of free joints.
+
+    ``proposed`` carries the dragged poses. Occupancy is read from ``source_blockers`` and
+    ``target_blockers``, which are the poses from before this drag. A joint that was already
+    connected stays out of this snap, including a joint that meets another selected part or a
+    part that is not selected. The winning joint is the anchor: the whole selection rotates
+    around it, then shifts so the anchor lands on the target. Without a free pair in range,
+    the anchor falls onto the grid and the others keep their offset.
+    """
+    if snap_mm < 0 or not proposed or not any(instance.id == anchor_id for instance, _ in proposed):
+        raise ValidationError("error.planner.part")
+    original = {instance.id: instance for instance, _spec in source_blockers}
+    best: tuple[tuple[float, str, int, int, str], _SnapJoin] | None = None
+    for moving, spec in proposed:
+        prior = original.get(moving.id, moving)
+        blockers = source_blockers if moving.id in original else ()
+        for source_index in free_connector_indexes(prior, spec, blockers):
+            source = spec.connectors[source_index]
+            current = world_xy(moving, source.x_mm, source.y_mm)
+            for target_instance, target_spec in stationary:
+                if target_instance.id == moving.id:
                     continue
-                rotation = normalize_deg(target_dir + 180.0 - source.direction_deg)
-                rotated = rotate_xy(source.x_mm, source.y_mm, rotation)
-                origin = (target_point[0] - rotated[0], target_point[1] - rotated[1])
-                current = world_xy(proposed_instance, source.x_mm, source.y_mm)
-                distance = math.hypot(current[0] - target_point[0], current[1] - target_point[1])
-                if distance > snap_mm:
-                    continue
-                key = (distance, target_instance.id, target_index, source_index)
-                pose = Pose(origin[0], origin[1], rotation)
-                if best is None or key < best[0]:
-                    best = (key, pose)
-    if best is not None:
-        return best[1]
-    return apply_grid(
-        Pose(proposed.x_mm, proposed.y_mm, proposed_rotation),
+                indexes = free_connector_indexes(target_instance, target_spec, target_blockers)
+                for target_index in indexes:
+                    target = target_spec.connectors[target_index]
+                    if not connectors_compatible(source, target):
+                        continue
+                    target_point = world_xy(target_instance, target.x_mm, target.y_mm)
+                    distance = math.hypot(
+                        current[0] - target_point[0], current[1] - target_point[1]
+                    )
+                    if distance > snap_mm:
+                        continue
+                    key = (distance, target_instance.id, target_index, source_index, moving.id)
+                    join = _SnapJoin(moving, source, target_instance, target)
+                    if best is None or key < best[0]:
+                        best = (key, join)
+    if best is None:
+        return _grid_selection(proposed, anchor_id, grid_mm)
+    join = best[1]
+    seated = join_pose(join.target, join.target_joint, join.source_joint)
+    delta = signed_delta_deg(join.moving.rotation_z_deg, seated.rotation_z_deg)
+    anchor = world_xy(join.target, join.target_joint.x_mm, join.target_joint.y_mm)
+    return _rotate_selection(proposed, join.moving, join.source_joint, anchor, delta)
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapJoin:
+    moving: PartInstance
+    source_joint: ConnectorSpec
+    target: PartInstance
+    target_joint: ConnectorSpec
+
+
+def _rotate_selection(
+    proposed: Sequence[tuple[PartInstance, PartSpec]],
+    owner: PartInstance,
+    source_joint: ConnectorSpec,
+    target_point: tuple[float, float],
+    delta_deg: float,
+) -> dict[str, Pose]:
+    """One rotation about the moving joint, then one shift onto the target joint."""
+    pivot = world_xy(owner, source_joint.x_mm, source_joint.y_mm)
+    poses: dict[str, Pose] = {}
+    for instance, _spec in proposed:
+        dx, dy = rotate_xy(instance.x_mm - pivot[0], instance.y_mm - pivot[1], delta_deg)
+        poses[instance.id] = Pose(
+            target_point[0] + dx,
+            target_point[1] + dy,
+            normalize_deg(instance.rotation_z_deg + delta_deg),
+        )
+    return poses
+
+
+def _grid_selection(
+    proposed: Sequence[tuple[PartInstance, PartSpec]],
+    anchor_id: str,
+    grid_mm: float | None,
+) -> dict[str, Pose]:
+    anchor = next(instance for instance, _spec in proposed if instance.id == anchor_id)
+    gridded = apply_grid(
+        Pose(anchor.x_mm, anchor.y_mm, normalize_deg(anchor.rotation_z_deg)),
         grid_mm,
     )
+    dx = gridded.x_mm - anchor.x_mm
+    dy = gridded.y_mm - anchor.y_mm
+    return {
+        instance.id: Pose(
+            instance.x_mm + dx,
+            instance.y_mm + dy,
+            normalize_deg(instance.rotation_z_deg),
+        )
+        for instance, _spec in proposed
+    }
 
 
 def lane_world_point(

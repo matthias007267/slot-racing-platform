@@ -7,7 +7,7 @@ each piece sits on the grid and where later timing points can attach to a piece 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
@@ -30,6 +30,7 @@ from slot_racing.modules.track_planner.parts import (
     join_pose,
     rotate_xy,
     snap_pose,
+    snap_selection,
 )
 
 _POSITION_LIMIT_MM = 100_000.0
@@ -626,34 +627,56 @@ def reposition_instance(
     y_mm: float,
     catalog: dict[int, PartSpec],
 ) -> TrackPlan:
-    current = _require_instance(plan, instance_id)
-    spec = catalog.get(current.part_id)
-    if spec is None:
+    """Move one part. It is a selection of a single member and uses the same snap."""
+    return reposition_selection(plan, {instance_id: (x_mm, y_mm)}, instance_id, catalog)
+
+
+def reposition_selection(
+    plan: TrackPlan,
+    proposed_xy: Mapping[str, tuple[float, float]],
+    anchor_id: str,
+    catalog: dict[int, PartSpec],
+) -> TrackPlan:
+    """Move every listed part by one shared snap. Rotations stay coupled to that snap.
+
+    ``proposed_xy`` is the drag result. Connections are the joints that already meet on
+    ``plan``, before this drag. The anchor only decides which part falls onto the grid when
+    no free joint is in range.
+    """
+    if anchor_id not in proposed_xy:
         raise ValidationError("error.planner.part")
-    others = tuple(instance for instance in plan.instances if instance.id != instance_id)
-    pose = snap_pose(
-        spec,
-        Pose(x_mm, y_mm, current.rotation_z_deg),
-        _placed(with_instances(plan, others), catalog),
+    topology = _placed(plan, catalog)
+    by_id = {instance.id: (instance, spec) for instance, spec in topology}
+    proposed: list[tuple[PartInstance, PartSpec]] = []
+    for instance_id, (x_mm, y_mm) in proposed_xy.items():
+        found = by_id.get(instance_id)
+        if found is None:
+            raise ValidationError("error.planner.part")
+        instance, spec = found
+        proposed.append((replace(instance, x_mm=x_mm, y_mm=y_mm), spec))
+    selected = set(proposed_xy)
+    stationary = tuple(pair for pair in topology if pair[0].id not in selected)
+    poses = snap_selection(
+        tuple(proposed),
+        stationary,
+        anchor_id=anchor_id,
         snap_mm=plan.snap_mm,
         grid_mm=plan.grid_mm if plan.grid_enabled else None,
+        source_blockers=topology,
+        target_blockers=topology,
     )
-    return move_instance(
-        _replace(
-            plan,
-            instances=tuple(
-                replace(
-                    instance, x_mm=pose.x_mm, y_mm=pose.y_mm, rotation_z_deg=pose.rotation_z_deg
-                )
-                if instance.id == instance_id
-                else instance
-                for instance in plan.instances
-            ),
-        ),
-        instance_id,
-        pose.x_mm,
-        pose.y_mm,
+    updated = tuple(
+        replace(
+            instance,
+            x_mm=poses[instance.id].x_mm,
+            y_mm=poses[instance.id].y_mm,
+            rotation_z_deg=poses[instance.id].rotation_z_deg,
+        )
+        if instance.id in poses
+        else instance
+        for instance in plan.instances
     )
+    return _replace(plan, instances=updated)
 
 
 def _placed(
