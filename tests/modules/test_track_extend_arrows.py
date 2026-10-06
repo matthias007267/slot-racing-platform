@@ -33,6 +33,7 @@ from slot_racing.modules.track_planner.parts import (
     PartInstance,
     PartSpec,
     arrow_heading_deg,
+    connector_occupied,
     extend_article,
     extend_pose,
     find_catalog_part,
@@ -122,6 +123,32 @@ def test_left_and_right_use_one_curve_with_opposite_turns() -> None:
         assert placed_continuation_delta_deg(target, joint, seated, straight) == pytest.approx(
             0, abs=0.05
         )
+
+
+def test_another_curve_continues_around_the_same_centre() -> None:
+    catalog = _catalog()
+    straight_id, straight = standard_extend_parts(catalog)[EXTEND_STRAIGHT]
+    curve = standard_extend_parts(catalog)[EXTEND_LEFT][1]
+    plan = place_instance(empty_plan(TrackId(1)), straight_id, straight, 0, 0, 0, catalog)
+    plan = extend_from_connector(plan, plan.instances[0].id, 1, EXTEND_RIGHT, catalog)
+    first = plan.instances[-1]
+    spec = catalog[first.part_id]
+    free = [
+        index
+        for index, joint in enumerate(spec.connectors)
+        if not connector_occupied(first, joint, [(plan.instances[0], straight)])
+    ]
+    assert free == [1]
+    assert EXTEND_RIGHT in offered_extend_directions(first, spec.connectors[1], straight, curve)
+    updated = extend_from_connector(plan, first.id, 1, EXTEND_RIGHT, catalog)
+    second = updated.instances[-1]
+    assert second.part_id == first.part_id
+    assert second.x_mm == pytest.approx(first.x_mm, abs=0.01)
+    assert second.y_mm == pytest.approx(first.y_mm, abs=0.01)
+    assert second.rotation_z_deg != pytest.approx(first.rotation_z_deg)
+    assert placed_continuation_delta_deg(first, spec.connectors[1], second, spec) == pytest.approx(
+        spec.angle_deg or 0, abs=0.05
+    )
 
 
 def test_extend_respects_compatibility_snap_and_leaves_failures_unchanged() -> None:
@@ -246,6 +273,9 @@ def test_a_selected_part_has_no_outer_rectangle(qtbot: QtBot, env: Env) -> None:
     for x, y in corners:
         color = QColor(image.pixel(x, y))
         assert abs(color.green() - accent.green()) > 40
+    # The roadway edge itself must not be redrawn as a selection rectangle.
+    edge = QColor(image.pixel(width // 2, pad + 4))
+    assert abs(edge.green() - accent.green()) > 40
     center = QColor(image.pixel(width // 2, height // 2))
     assert center.rgb() != QColor(COLORS.background).rgb()
 

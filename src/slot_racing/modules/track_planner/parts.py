@@ -422,7 +422,13 @@ def continuation_delta_deg(
     if len(others) != 1:
         return None
     pose = join_pose(target, target_joint, source_joint)
-    if math.hypot(pose.x_mm - target.x_mm, pose.y_mm - target.y_mm) < 1.0:
+    # A second arc of the same radius keeps the circle centre and only changes rotation.
+    # Reject the join only when it would drop the part onto the one already there.
+    same_place = math.hypot(pose.x_mm - target.x_mm, pose.y_mm - target.y_mm) < 1.0
+    same_turn = (
+        abs(signed_delta_deg(target.rotation_z_deg, pose.rotation_z_deg)) <= _EXTEND_TURN_DEG
+    )
+    if same_place and same_turn:
         return None
     outward = normalize_deg(target_joint.direction_deg + target.rotation_z_deg)
     leaving = normalize_deg(others[0].direction_deg + pose.rotation_z_deg)

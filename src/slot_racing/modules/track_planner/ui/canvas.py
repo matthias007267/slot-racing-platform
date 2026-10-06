@@ -723,7 +723,7 @@ class InstanceItem(QGraphicsItem):
             painter,
             self.spec,
             color_coding=self._color_coding,
-            selected=self.isSelected(),
+            selected=False,
             start_straight=self._start_straight,
         )
         painter.restore()
