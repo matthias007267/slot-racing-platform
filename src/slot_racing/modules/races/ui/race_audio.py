@@ -2,8 +2,11 @@
 
 ``StartCue`` publishes a ``sound_id`` with each step. :class:`RaceAudio` maps that
 id onto a tone and asks an output to start it. The call returns immediately.
-A missing device or a failed output is ignored, so the cue's own timer and
-``_commit_start`` stay the only start clock.
+A missing device, or a machine without the Qt Multimedia libraries, stays silent.
+The cue's own timer and ``_commit_start`` stay the only start clock.
+
+Importing this module does not load Qt Multimedia. The concrete backend is
+opened later, so the race UI can still be imported when ``libpulse`` is absent.
 
 Further cues (race end, a new best lap, the last lap) can be added in
 :func:`resolve_tone`. They are not played today.
@@ -17,8 +20,7 @@ import math
 from dataclasses import dataclass
 from typing import Protocol
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject
-from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QtAudio
+from PySide6.QtCore import QObject
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ LAMP_TONE_HZ = 349
 LAMP_TONE_MS = 110
 GO_TONE_HZ = 698
 GO_TONE_MS = 260
+
+_backend_reported = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,58 +79,48 @@ class ToneOutput(Protocol):
     def play(self, tone: ToneSpec, *, volume: int) -> None: ...
 
 
-class QtToneOutput:
-    """Plays a tone through ``QAudioSink`` without waiting for the buffer to drain."""
-
-    def __init__(self, parent: QObject) -> None:
-        self._parent = parent
-        self._format = QAudioFormat()
-        self._format.setSampleRate(SAMPLE_RATE_HZ)
-        self._format.setChannelCount(1)
-        self._format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-        self._full_scale = {LAMP_TONE: render_tone(LAMP_TONE), GO_TONE: render_tone(GO_TONE)}
-        self._live: list[tuple[QAudioSink, QBuffer]] = []
+class SilentToneOutput:
+    """A player that returns at once. Used when Qt Multimedia cannot be loaded."""
 
     def play(self, tone: ToneSpec, *, volume: int) -> None:
-        device = QMediaDevices.defaultAudioOutput()
-        if device is None or device.isNull() or not device.isFormatSupported(self._format):
-            return
-        pcm = self._full_scale.get(tone)
-        if pcm is None:
-            pcm = render_tone(tone)
-        buffer = QBuffer(self._parent)
-        buffer.setData(_scale(pcm, volume))
-        if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
-            return
-        sink = QAudioSink(device, self._format, self._parent)
-        self._live.append((sink, buffer))
-        sink.stateChanged.connect(lambda _state, item=(sink, buffer): self._release(item))
-        sink.start(buffer)
-
-    def _release(self, item: tuple[QAudioSink, QBuffer]) -> None:
-        state = item[0].state()
-        finished = (QtAudio.State.IdleState, QtAudio.State.StoppedState)
-        if state in finished and item in self._live:
-            self._live.remove(item)
+        del tone, volume
 
 
-def _scale(pcm: bytes, volume: int) -> bytes:
-    gain = max(0.0, min(volume, 100) / 100) * 0.8
-    source = array.array("h")
-    source.frombytes(pcm)
-    scaled = array.array("h", (int(sample * gain) for sample in source))
-    return scaled.tobytes()
+def open_tone_output(parent: QObject) -> ToneOutput:
+    """The Qt player, or a silent player when the native backend cannot be loaded.
+
+    ``ImportError`` and ``OSError`` are what a missing ``libpulse.so.0`` raises
+    while Qt Multimedia is imported. Other exceptions stay visible.
+    """
+    try:
+        from slot_racing.modules.races.ui.qt_tone_output import QtToneOutput
+    except (ImportError, OSError) as error:
+        _report_missing_backend(error)
+        return SilentToneOutput()
+    return QtToneOutput(parent)
+
+
+def _report_missing_backend(error: BaseException) -> None:
+    global _backend_reported
+    if _backend_reported:
+        return
+    _backend_reported = True
+    logger.warning("Qt multimedia is unavailable (%s); start tones stay silent", error)
 
 
 class RaceAudio(QObject):
-    """Maps a start-cue id to a tone. Disabled audio and output errors stay here."""
+    """Maps a start-cue id to a tone. A missing backend stays silent."""
 
     def __init__(self, output: ToneOutput | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._output = QtToneOutput(self) if output is None else output
+        self._output = open_tone_output(self) if output is None else output
         self._enabled = True
         self._volume = 80
         self._reported = False
+
+    @property
+    def output(self) -> ToneOutput:
+        return self._output
 
     @property
     def enabled(self) -> bool:
@@ -147,7 +141,11 @@ class RaceAudio(QObject):
         self._volume = percent
 
     def play(self, sound_id: str) -> None:
-        """Start ``sound_id`` if audio is on. Returns before the tone finishes."""
+        """Start ``sound_id`` if audio is on. Returns before the tone finishes.
+
+        A missing native library is treated like a missing device. Programming
+        errors from the output are not caught.
+        """
         if not self._enabled or self._volume <= 0:
             return
         tone = resolve_tone(sound_id)
@@ -155,7 +153,8 @@ class RaceAudio(QObject):
             return
         try:
             self._output.play(tone, volume=self._volume)
-        except Exception:
-            if not self._reported:
-                self._reported = True
-                logger.warning("Race sound %s was not played", sound_id, exc_info=True)
+        except (ImportError, OSError) as error:
+            if self._reported:
+                return
+            self._reported = True
+            logger.warning("Race sound %s was not played: %s", sound_id, error)
