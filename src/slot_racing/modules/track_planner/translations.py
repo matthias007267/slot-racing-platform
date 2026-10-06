@@ -102,7 +102,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Dieses Bauteil wird noch von {count} Platzierungen verwendet "
             "und kann nicht gelöscht werden."
         ),
-        "error.planner.start_straight": "Nur eine normale Gerade kann die Startgerade sein.",
+        "error.planner.start_straight": "Nur die Anschlussgerade kann Start und Ziel sein.",
         "error.planner.stock": "Der Bestand muss eine ganze Zahl ab 0 sein.",
         "planner.mode": "Baumodus",
         "planner.mode.unlimited": "Unbegrenzt",

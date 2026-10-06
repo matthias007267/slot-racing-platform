@@ -44,6 +44,8 @@ class TrackPartDefinition(Base):
     outline: Mapped[list[Any]] = mapped_column(JSON, default=list)
     # Grooves for diverging parts. Null or empty means the ordinary lanes are derived.
     slot_paths: Mapped[list[Any] | None] = mapped_column(JSON)
+    # A catalog part the user removed. The row stays so seeding does not recreate it.
+    suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class TrackPartConnector(Base):
@@ -77,7 +79,7 @@ class TrackPlanInstance(Base):
     rotation_x_deg: Mapped[float] = mapped_column(Float, default=0.0)
     rotation_y_deg: Mapped[float] = mapped_column(Float, default=0.0)
     rotation_z_deg: Mapped[float] = mapped_column(Float, default=0.0)
-    # One straight on the plan may be the start straight. The definition stays unmarked.
+    # One placed connecting rail may be start and finish. The definition stays unmarked.
     is_start_straight: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # Instances that share a group id move and select together. Empty means ungrouped.
     group_id: Mapped[str | None] = mapped_column(String(40))
