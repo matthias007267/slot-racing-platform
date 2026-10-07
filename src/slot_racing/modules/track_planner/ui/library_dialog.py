@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLineEdit, QSpinBox
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLineEdit, QSpinBox, QWidget
 
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.i18n import Translator
@@ -23,9 +23,10 @@ class PartDialog(FormDialog):
         translator: Translator,
         planner: TrackPlannerService,
         record: PartRecord | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         title = "planner.library.edit" if record is not None else "planner.library.add"
-        super().__init__(translator, translator.translate(title))
+        super().__init__(translator, translator.translate(title), parent)
         self._planner = planner
         self._record = record
         self.created: PartSpec | None = None
