@@ -26,7 +26,9 @@ from slot_racing.modules.track_planner.document import (
     validate_lanes,
     with_instances,
 )
+from slot_racing.modules.track_planner.inventory import PhysicalStock
 from slot_racing.modules.track_planner.library import PartLibrary
+from slot_racing.modules.track_planner.packages import PackageSpec, PackageView
 from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
 
 PLAN_NAME = "plan"
@@ -77,6 +79,24 @@ class TrackPlannerService:
 
     def set_stock(self, part_id: int, quantity: int) -> None:
         self.library.set_stock(part_id, quantity)
+
+    def stock_breakdown(self) -> dict[int, PhysicalStock]:
+        return self.library.stock_breakdown()
+
+    def set_stock_adjustment(self, part_id: int, quantity: int) -> None:
+        self.library.set_stock_adjustment(part_id, quantity)
+
+    def list_packages(self) -> tuple[PackageView, ...]:
+        return self.library.list_packages()
+
+    def add_package(self, spec: PackageSpec) -> PackageView:
+        return self.library.add_package(spec)
+
+    def set_package_stock(self, package_id: int, quantity: int) -> None:
+        self.library.set_package_stock(package_id, quantity)
+
+    def delete_package(self, package_id: int) -> None:
+        self.library.delete_package(package_id)
 
     def delete_track(self, track_id: TrackId) -> None:
         """Remove one track and the rows that belong only to it.

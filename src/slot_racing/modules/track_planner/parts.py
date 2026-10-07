@@ -70,7 +70,12 @@ _POSITION_LIMIT_MM = 100_000.0
 
 # Continue-build uses catalogue articles, never the displayed designation.
 STANDARD_STRAIGHT_ARTICLE = "20020601"
+STANDARD_STRAIGHT_NAME = "Standardgerade"
 STANDARD_CURVE_ARTICLE = "20020571"
+# One sales article, two physical pieces. The package owns this number.
+OUTER_BORDER_K3_ARTICLE = "20020563"
+OUTER_BORDER_K3_NAME = "Außenrandstreifen Kurve 3/30°"
+END_PIECE_K3_NAME = "Endstück Kurve 3/30°"
 EXTEND_STRAIGHT = "straight"
 EXTEND_LEFT = "left"
 EXTEND_RIGHT = "right"
@@ -142,8 +147,8 @@ class SlotPath:
 class AttachmentProfile:
     """Where one accessory may sit. The numbers describe the host, not a world side.
 
-    A retail box is not a field here. Stock still counts this definition, and a
-    box that holds several strips is not expanded into those strips.
+    A retail box is not a field here. How many strips a box holds lives on the
+    package, and stock counts this physical definition.
     """
 
     host_shape: str
@@ -1005,7 +1010,7 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             )
         )
 
-    straight("20020601", "Standardgerade", 345.0)
+    straight(STANDARD_STRAIGHT_ARTICLE, STANDARD_STRAIGHT_NAME, 345.0)
     # 20020518 since 2021: electronic connecting rail, 345 mm, plus a separate
     # standard straight in the package. Only the connecting rail is this part.
     straight(START_FINISH_ARTICLE, "Anschlussgerade", 345.0)
@@ -1130,8 +1135,8 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             outline=rectangle(345.0, 345.0),
         )
     )
-    # One mountable strip per definition. The retail box holds several strips
-    # and, for the curves, end pieces. Those contents are not expanded here.
+    # One mountable piece per definition. A retail box that holds several of
+    # them is a package, not a second meaning of this row.
     border_width = 40.0
     add(
         PartSpec(
@@ -1160,9 +1165,9 @@ def standard_catalog() -> tuple[PartSpec, ...]:
     inner_radius = 700.0 - 100.0 - border_width / 2.0
     add(
         PartSpec(
-            article_number="20020563",
+            article_number=OUTER_BORDER_K3_ARTICLE,
             scale=scale,
-            name="Außenrandstreifen Kurve 3/30°",
+            name=OUTER_BORDER_K3_NAME,
             category=BORDER,
             length_mm=None,
             width_mm=border_width,
@@ -1179,6 +1184,24 @@ def standard_catalog() -> tuple[PartSpec, ...]:
                 host_angle_deg=30.0,
                 host_lanes=2,
             ),
+        )
+    )
+    # Same sales article as the strip. The name keeps the two pieces distinct.
+    # The outline is only a stand-in until a later catalogue gives it a shape.
+    add(
+        PartSpec(
+            article_number=OUTER_BORDER_K3_ARTICLE,
+            scale=scale,
+            name=END_PIECE_K3_NAME,
+            category=BORDER,
+            length_mm=40.0,
+            width_mm=border_width,
+            height_mm=None,
+            radius_mm=None,
+            angle_deg=0.0,
+            lane_count=2,
+            connectors=(),
+            outline=rectangle(40.0, border_width),
         )
     )
     add(

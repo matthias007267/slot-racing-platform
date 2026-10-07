@@ -8,12 +8,29 @@ from sqlalchemy.orm import Session
 
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
-from slot_racing.modules.track_planner.inventory import require_quantity
+from slot_racing.modules.track_planner.inventory import (
+    PackageContribution,
+    PhysicalStock,
+    derived_quantities,
+    physical_stocks,
+    require_adjustment,
+    require_quantity,
+)
 from slot_racing.modules.track_planner.models import (
     TrackPartConnector,
     TrackPartDefinition,
+    TrackPartPackage,
+    TrackPartPackageContent,
+    TrackPartPackageStock,
     TrackPartStock,
     TrackPlanInstance,
+)
+from slot_racing.modules.track_planner.packages import (
+    PackageContentSpec,
+    PackageContentView,
+    PackageSpec,
+    PackageView,
+    standard_packages,
 )
 from slot_racing.modules.track_planner.parts import (
     AttachmentProfile,
@@ -81,6 +98,7 @@ class PartLibrary:
                         delete(TrackPartConnector).where(TrackPartConnector.part_id == row.id)
                     )
                     self._add_connectors(session, row.id, known)
+            self._ensure_packages(session)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         try:
@@ -147,30 +165,106 @@ class PartLibrary:
             if used:
                 trace("PART_DELETE_BLOCKED", result="in_use", part_id=part_id)
                 raise ValidationError("error.planner.part_in_use", count=int(used))
+            referenced = session.scalar(
+                select(func.count())
+                .select_from(TrackPartPackageContent)
+                .where(TrackPartPackageContent.part_id == part_id)
+            )
             key = identity_key(definition.name, definition.article_number)
             if key in catalog:
                 definition.suppressed = True
+            elif referenced:
+                trace("PART_DELETE_BLOCKED", result="in_package", part_id=part_id)
+                raise ValidationError("error.planner.part_in_package")
             else:
                 session.delete(definition)
         trace("PART_DELETE_SUCCESS", result="deleted", part_id=part_id)
 
     def stock_quantities(self) -> dict[int, int]:
-        """Owned counts keyed by part id. A missing row means the user owns none."""
+        """Physical counts keyed by part id. A missing part means none."""
+        return {part_id: line.physical for part_id, line in self.stock_breakdown().items()}
+
+    def stock_breakdown(self) -> dict[int, PhysicalStock]:
+        """Derived pieces, the manual correction, and the clamped physical count."""
+        self.ensure_seed()
         with self._database.session() as session:
-            rows = session.scalars(select(TrackPartStock))
-            return {row.part_id: row.quantity for row in rows}
+            return self._breakdown(session)
 
     def set_stock(self, part_id: int, quantity: int) -> None:
-        """Store how many of this definition the user owns. Zero is kept on purpose."""
+        """Store a non-negative manual correction. Zero is kept on purpose.
+
+        With no owned packages this is also the physical count. Package-derived
+        pieces are added when the physical count is read.
+        """
+        amount = require_quantity(quantity)
+        self._store_adjustment(part_id, amount, trace_change=False)
+
+    def set_stock_adjustment(self, part_id: int, quantity: int) -> None:
+        """Store the manual correction. The physical count may not go below zero."""
+        amount = require_adjustment(quantity)
+        self._store_adjustment(part_id, amount, trace_change=True)
+
+    def list_packages(self) -> tuple[PackageView, ...]:
+        self.ensure_seed()
+        with self._database.session() as session:
+            return self._package_views(session)
+
+    def add_package(self, spec: PackageSpec) -> PackageView:
+        prepared = _require_package_spec(spec)
+        try:
+            with self._database.session() as session:
+                self._reject_package_duplicate(session, prepared)
+                package = self._insert_package(session, prepared)
+                session.flush()
+                created = self._one_package(session, package)
+        except IntegrityError as error:
+            raise ValidationError("error.planner.package_exists") from error
+        return created
+
+    def set_package_stock(self, package_id: int, quantity: int) -> None:
+        """Store how many of this box the user owns. Plans are left as they are."""
         amount = require_quantity(quantity)
         with self._database.session() as session:
-            if session.get(TrackPartDefinition, part_id) is None:
-                raise ValidationError("error.planner.part")
-            row = session.get(TrackPartStock, part_id)
+            package = session.get(TrackPartPackage, package_id)
+            if package is None:
+                raise ValidationError("error.planner.package")
+            row = session.get(TrackPartPackageStock, package_id)
+            previous = 0 if row is None else row.quantity
             if row is None:
-                session.add(TrackPartStock(part_id=part_id, quantity=amount))
+                session.add(TrackPartPackageStock(package_id=package_id, quantity=amount))
             else:
                 row.quantity = amount
+            article = package.article_number
+        if previous != amount:
+            trace(
+                "PART_PACKAGE_STOCK_UPDATE",
+                result="updated",
+                package_id=package_id,
+                article=article,
+                quantity=amount,
+            )
+
+    def delete_package(self, package_id: int) -> None:
+        """Hide a bundled package, or remove a custom one that has no stock.
+
+        Contents of a removed custom package go with it. Plan instances and the
+        manual corrections of the physical parts stay.
+        """
+        catalog = {_package_identity(spec) for spec in standard_packages()}
+        with self._database.session() as session:
+            package = session.get(TrackPartPackage, package_id)
+            if package is None:
+                raise ValidationError("error.planner.package")
+            owned = session.get(TrackPartPackageStock, package_id)
+            if owned is not None and owned.quantity > 0:
+                raise ValidationError("error.planner.package_in_use")
+            if _package_identity(package) in catalog:
+                package.suppressed = True
+                return
+            if owned is not None:
+                session.delete(owned)
+                session.flush()
+            session.delete(package)
 
     def require(self, part_id: int) -> PartRecord:
         with self._database.session() as session:
@@ -233,6 +327,154 @@ class PartLibrary:
                     attachment_slot=instance.attachment_slot,
                 )
             )
+
+    def _store_adjustment(self, part_id: int, amount: int, *, trace_change: bool) -> None:
+        self.ensure_seed()
+        with self._database.session() as session:
+            if session.get(TrackPartDefinition, part_id) is None:
+                raise ValidationError("error.planner.part")
+            if trace_change:
+                produced = self._derived_map(session).get(part_id, 0)
+                if produced + amount < 0:
+                    raise ValidationError("error.planner.stock_adjustment")
+            row = session.get(TrackPartStock, part_id)
+            previous = None if row is None else row.quantity
+            if row is None:
+                session.add(TrackPartStock(part_id=part_id, quantity=amount))
+            else:
+                row.quantity = amount
+        if trace_change and previous != amount:
+            trace(
+                "PART_STOCK_ADJUSTMENT",
+                result="updated",
+                part_id=part_id,
+                quantity=amount,
+            )
+
+    def _breakdown(self, session: Session) -> dict[int, PhysicalStock]:
+        adjustments = {row.part_id: row.quantity for row in session.scalars(select(TrackPartStock))}
+        return physical_stocks(self._derived_map(session), adjustments)
+
+    def _derived_map(self, session: Session) -> dict[int, int]:
+        stocks = {
+            row.package_id: row.quantity for row in session.scalars(select(TrackPartPackageStock))
+        }
+        contents = tuple(
+            PackageContribution(row.package_id, row.part_id, row.quantity)
+            for row in session.scalars(select(TrackPartPackageContent))
+        )
+        return derived_quantities(stocks, contents)
+
+    def _ensure_packages(self, session: Session) -> None:
+        definitions = list(session.scalars(select(TrackPartDefinition)))
+        by_key = {identity_key(row.name, row.article_number): row for row in definitions}
+        stored = {_package_identity(row) for row in session.scalars(select(TrackPartPackage))}
+        for spec in standard_packages():
+            if _package_identity(spec) in stored:
+                continue
+            resolved: list[tuple[TrackPartDefinition, int]] = []
+            missing = False
+            for content in spec.contents:
+                part = by_key.get(identity_key(content.part_name, content.article_number))
+                if part is None:
+                    missing = True
+                    break
+                resolved.append((part, content.quantity))
+            if missing:
+                continue
+            package = TrackPartPackage(
+                manufacturer=spec.manufacturer.strip(),
+                article_number=spec.article_number.strip(),
+                name=spec.name.strip(),
+            )
+            session.add(package)
+            session.flush()
+            for part, quantity in resolved:
+                session.add(
+                    TrackPartPackageContent(
+                        package_id=package.id,
+                        part_id=part.id,
+                        quantity=quantity,
+                    )
+                )
+            stored.add(_package_identity(spec))
+
+    def _insert_package(self, session: Session, spec: PackageSpec) -> TrackPartPackage:
+        package = TrackPartPackage(
+            manufacturer=spec.manufacturer.strip(),
+            article_number=spec.article_number.strip(),
+            name=spec.name.strip(),
+        )
+        session.add(package)
+        session.flush()
+        for content in spec.contents:
+            part = self._definition_for_content(session, content)
+            session.add(
+                TrackPartPackageContent(
+                    package_id=package.id,
+                    part_id=part.id,
+                    quantity=content.quantity,
+                )
+            )
+        return package
+
+    def _definition_for_content(
+        self, session: Session, content: PackageContentSpec
+    ) -> TrackPartDefinition:
+        key = identity_key(content.part_name, content.article_number)
+        for row in session.scalars(select(TrackPartDefinition)):
+            if identity_key(row.name, row.article_number) == key:
+                return row
+        raise ValidationError("error.planner.part")
+
+    def _reject_package_duplicate(self, session: Session, spec: PackageSpec) -> None:
+        key = _package_identity(spec)
+        for row in session.scalars(select(TrackPartPackage)):
+            if _package_identity(row) == key:
+                raise ValidationError("error.planner.package_exists")
+
+    def _package_views(
+        self, session: Session, *, include_suppressed: bool = False
+    ) -> tuple[PackageView, ...]:
+        query = select(TrackPartPackage).order_by(
+            TrackPartPackage.article_number, TrackPartPackage.id
+        )
+        if not include_suppressed:
+            query = query.where(TrackPartPackage.suppressed.is_(False))
+        packages = list(session.scalars(query))
+        stocks = {
+            row.package_id: row.quantity for row in session.scalars(select(TrackPartPackageStock))
+        }
+        names = {row.id: row.name for row in session.scalars(select(TrackPartDefinition))}
+        grouped: dict[int, list[PackageContentView]] = {}
+        content_rows = session.scalars(
+            select(TrackPartPackageContent).order_by(TrackPartPackageContent.id)
+        )
+        for content in content_rows:
+            grouped.setdefault(content.package_id, []).append(
+                PackageContentView(
+                    part_id=content.part_id,
+                    part_name=names.get(content.part_id, ""),
+                    quantity=content.quantity,
+                )
+            )
+        return tuple(
+            PackageView(
+                id=package.id,
+                manufacturer=package.manufacturer,
+                article_number=package.article_number,
+                name=package.name,
+                quantity=stocks.get(package.id, 0),
+                contents=tuple(grouped.get(package.id, [])),
+            )
+            for package in packages
+        )
+
+    def _one_package(self, session: Session, package: TrackPartPackage) -> PackageView:
+        for view in self._package_views(session, include_suppressed=True):
+            if view.id == package.id:
+                return view
+        raise ValidationError("error.planner.package")
 
     def _insert(self, session: Session, spec: PartSpec) -> TrackPartDefinition:
         definition = TrackPartDefinition(
@@ -357,6 +599,32 @@ class PartLibrary:
             name=spec.name.strip(),
             article=spec.article_number.strip(),
         )
+
+
+def _package_identity(item: PackageSpec | TrackPartPackage) -> tuple[str, str]:
+    return (item.manufacturer.strip().casefold(), item.article_number.strip())
+
+
+def _require_package_spec(spec: PackageSpec) -> PackageSpec:
+    manufacturer = spec.manufacturer.strip() if isinstance(spec.manufacturer, str) else ""
+    name = spec.name.strip() if isinstance(spec.name, str) else ""
+    article = spec.article_number.strip() if isinstance(spec.article_number, str) else ""
+    if not manufacturer or not name or not article or not spec.contents:
+        raise ValidationError("error.planner.package")
+    seen: set[tuple[str, str]] = set()
+    contents: list[PackageContentSpec] = []
+    for line in spec.contents:
+        amount = line.quantity
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
+            raise ValidationError("error.planner.package")
+        key = identity_key(line.part_name, line.article_number)
+        if key in seen:
+            raise ValidationError("error.planner.package")
+        seen.add(key)
+        contents.append(
+            PackageContentSpec(line.part_name.strip(), line.article_number.strip(), amount)
+        )
+    return PackageSpec(manufacturer, article, name, tuple(contents))
 
 
 def _attachment_profile(definition: TrackPartDefinition) -> AttachmentProfile | None:

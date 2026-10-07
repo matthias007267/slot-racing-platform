@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     false,
     func,
 )
@@ -98,13 +99,61 @@ class TrackPlanInstance(Base):
 
 
 class TrackPartStock(Base):
-    """How many of one library part the user owns. The definition itself is not copied."""
+    """Manual correction on top of package-derived pieces. May be negative.
+
+    The physical count is ``max(0, derived + quantity)``. A missing row means
+    no correction. This column is not a count of purchased boxes.
+    """
 
     __tablename__ = "track_part_stock"
-    __table_args__ = (CheckConstraint("quantity >= 0", name="quantity"),)
 
     part_id: Mapped[int] = mapped_column(
         ForeignKey("track_part_definitions.id", ondelete="CASCADE"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+
+
+class TrackPartPackage(Base):
+    """One retail box. The article number is the sales SKU, not a placed piece."""
+
+    __tablename__ = "track_part_packages"
+    __table_args__ = (UniqueConstraint("manufacturer", "article_number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    manufacturer: Mapped[str] = mapped_column(String(80))
+    article_number: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(120))
+    # A bundled package the user removed. Seeding must not insert it again.
+    suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+
+
+class TrackPartPackageContent(Base):
+    """How many of one physical definition a single package contains."""
+
+    __tablename__ = "track_part_package_contents"
+    __table_args__ = (
+        UniqueConstraint("package_id", "part_id"),
+        CheckConstraint("quantity > 0", name="quantity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("track_part_packages.id", ondelete="CASCADE")
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("track_part_definitions.id", ondelete="RESTRICT")
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+
+
+class TrackPartPackageStock(Base):
+    """How many of one package the user owns. Zero is stored on purpose."""
+
+    __tablename__ = "track_part_package_stock"
+    __table_args__ = (CheckConstraint("quantity >= 0", name="quantity"),)
+
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("track_part_packages.id", ondelete="RESTRICT"), primary_key=True
     )
     quantity: Mapped[int] = mapped_column(Integer)
 

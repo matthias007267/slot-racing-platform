@@ -205,6 +205,7 @@ class PlannerPage(QWidget):
         self._config = config
         self._config_path = config_path
         self._color_coding = False if config is None else config.track_planner_color_coding
+        # Physical pieces. Package counts are expanded before they are stored here.
         self._stock: dict[int, int] = {}
         self._build_mode: Literal["unlimited", "collection"] = TRACK_PLANNER_BUILD_UNLIMITED
         if config is not None and config.track_planner_build_mode == TRACK_PLANNER_BUILD_COLLECTION:
@@ -1504,7 +1505,10 @@ class PlannerPage(QWidget):
     def _manage_stock(self) -> None:
         self._destroy_collection_dialog()
         trace("COLLECTION_DIALOG_CREATE", result="started")
-        dialog = CollectionDialog(self._translator, self._planner, self)
+        usage: dict[int, int] = {}
+        for instance in self._plan.instances:
+            usage[instance.part_id] = usage.get(instance.part_id, 0) + 1
+        dialog = CollectionDialog(self._translator, self._planner, self, usage)
         self._collection_dialog = dialog
         dialog.destroyed.connect(self._release_collection_dialog)
         try:
