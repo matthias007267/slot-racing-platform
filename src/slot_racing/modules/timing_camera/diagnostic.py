@@ -92,10 +92,23 @@ class DiagnosticConfig:
 
 @dataclass(frozen=True, slots=True)
 class CaptureCounters:
-    """Counters from the capture source, when that source publishes them."""
+    """Counters sampled with one analyzed frame.
+
+    ``dropped`` and ``source_overwrites`` count unread frames replaced in the
+    consumer's latest-frame slot. They are not failed camera reads.
+    ``read_failures`` counts failed reads. ``sequence`` is the capture sequence
+    of this frame.
+    """
 
     captured: int | None = None
     dropped: int | None = None
+    read_attempts: int | None = None
+    read_failures: int | None = None
+    source_overwrites: int | None = None
+    sequence: int | None = None
+    capture_dt_ns: int | None = None
+    preview_frames: int | None = None
+    preview_replaced: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +126,13 @@ class DiagnosticPerformance:
     maximum_analysis_ns: int
     last_analysis_ns: int
     last_dt_ns: int | None
+    read_attempts: int | None = None
+    read_failures: int | None = None
+    source_overwrites: int | None = None
+    capture_sequence: int | None = None
+    last_capture_dt_ns: int | None = None
+    preview_frames: int | None = None
+    preview_replaced: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,10 +308,16 @@ def format_live(snapshot: DiagnosticSnapshot) -> str:
         f"Resolution: {_resolution(snapshot)}",
         f"Camera FPS: {_fps(performance.camera_fps)}",
         f"Analysis FPS: {_fps(performance.analysis_fps)}",
+        f"Capture frames: {_or_waiting(performance.frames_captured)}",
+        f"Capture read failures: {_or_waiting(performance.read_failures)}",
+        f"Source overwrites: {_or_waiting(performance.source_overwrites)}",
+        f"Preview frames: {_or_waiting(performance.preview_frames)}",
+        f"Preview replaced: {_or_waiting(performance.preview_replaced)}",
+        f"Capture sequence: {_or_waiting(performance.capture_sequence)}",
+        f"Capture dt ms: {_ms(performance.last_capture_dt_ns)}",
         f"Frames received: {performance.frames_submitted}",
         f"Frames analyzed: {performance.frames_analyzed}",
         f"Frames skipped: {performance.frames_skipped}",
-        f"Capture dropped: {_or_waiting(performance.capture_dropped)}",
         f"Average analysis ms: {_ms(performance.average_analysis_ns)}",
         f"Maximum analysis ms: {_ms(performance.maximum_analysis_ns)}",
     ]
@@ -717,6 +743,7 @@ class DiagnosticSession:
             " ".join(
                 [
                     f"FRAME {self._analyzed}",
+                    f"capture_seq={delivered.sequence}",
                     f"t_ns={delivered.timestamp_ns}",
                     f"t_s={elapsed_ns / 1_000_000_000:.3f}",
                     f"dt_ms={_ms(dt)}",
@@ -900,20 +927,27 @@ class DiagnosticSession:
         average = None
         if self._analyzed > 0:
             average = self._analysis_ns_total // self._analyzed
-        dropped = None if capture is None else capture.dropped
+        overwrites = _overwrites(capture)
         captured = None if capture is None else capture.captured
         return DiagnosticPerformance(
             frames_submitted=self._submitted,
             frames_analyzed=self._analyzed,
             frames_skipped=self._skipped,
             frames_captured=captured,
-            capture_dropped=dropped,
+            capture_dropped=overwrites,
             camera_fps=camera_fps,
             analysis_fps=analysis_fps,
             average_analysis_ns=average,
             maximum_analysis_ns=self._analysis_ns_max,
             last_analysis_ns=self._last_analysis_ns,
             last_dt_ns=self._last_dt_ns,
+            read_attempts=None if capture is None else capture.read_attempts,
+            read_failures=None if capture is None else capture.read_failures,
+            source_overwrites=overwrites,
+            capture_sequence=None if capture is None else capture.sequence,
+            last_capture_dt_ns=None if capture is None else capture.capture_dt_ns,
+            preview_frames=None if capture is None else capture.preview_frames,
+            preview_replaced=None if capture is None else capture.preview_replaced,
         )
 
     def _footer_locked(self) -> str:
@@ -923,16 +957,35 @@ class DiagnosticSession:
         return "\n".join(
             [
                 "PERF",
+                "CAPTURE",
                 f"camera_fps={_fps(performance.camera_fps)}",
+                f"capture_frames={_or_waiting(performance.frames_captured)}",
+                f"capture_read_attempts={_or_waiting(performance.read_attempts)}",
+                f"capture_read_failures={_or_waiting(performance.read_failures)}",
+                f"capture_dt_ms={_ms(performance.last_capture_dt_ns)}",
+                "PIPELINE",
+                f"source_overwrites={_or_waiting(performance.source_overwrites)}",
+                f"preview_frames={_or_waiting(performance.preview_frames)}",
+                f"preview_replaced={_or_waiting(performance.preview_replaced)}",
+                "DETECTOR",
                 f"analysis_fps={_fps(performance.analysis_fps)}",
-                f"frames_received={performance.frames_submitted}",
-                f"frames_analyzed={performance.frames_analyzed}",
-                f"frames_skipped={performance.frames_skipped}",
-                f"capture_dropped={_or_waiting(performance.capture_dropped)}",
+                f"detector_frames_received={performance.frames_submitted}",
+                f"detector_frames_analyzed={performance.frames_analyzed}",
+                f"detector_frames_skipped={performance.frames_skipped}",
+                f"capture_seq={_or_waiting(performance.capture_sequence)}",
                 f"average_analysis_ms={_ms(performance.average_analysis_ns)}",
                 f"maximum_analysis_ms={_ms(performance.maximum_analysis_ns)}",
             ]
         )
+
+
+def _overwrites(capture: CaptureCounters | None) -> int | None:
+    """Latest-frame replacements seen with this frame. Not a failed read."""
+    if capture is None:
+        return None
+    if capture.source_overwrites is not None:
+        return capture.source_overwrites
+    return capture.dropped
 
 
 def _measured_frame(delivered: TimedFrame) -> GrayFrame:

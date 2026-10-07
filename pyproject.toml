@@ -185,6 +185,7 @@ source_modules = [
     "slot_racing.modules.timing_camera.opencv_device",
     "slot_racing.modules.timing_camera.preview",
     "slot_racing.modules.timing_camera.provider",
+    "slot_racing.modules.timing_camera.session",
     "slot_racing.modules.timing_camera.store",
 ]
 forbidden_modules = ["PySide6", "slot_racing.uikit"]

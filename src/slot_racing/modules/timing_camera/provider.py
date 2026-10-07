@@ -49,6 +49,7 @@ from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFra
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
+from slot_racing.modules.timing_camera.session import CameraSession
 from slot_racing.modules.timing_camera.store import (
     CameraConfigurationError,
     CameraConfigurationSource,
@@ -445,6 +446,7 @@ class CameraTimingFactory(TimingSourceFactory):
         devices: DeviceFactory | None = None,
         configurations: CameraConfigurationSource | None = None,
         lease: CameraLease | None = None,
+        session: CameraSession | None = None,
     ) -> None:
         if frames is not None and not isinstance(frames, FrameSource):
             raise TypeError("frames must be a FrameSource")
@@ -458,6 +460,8 @@ class CameraTimingFactory(TimingSourceFactory):
             raise TypeError("configurations must load a camera configuration")
         if lease is not None and not isinstance(lease, CameraLease):
             raise TypeError("lease must be a CameraLease")
+        if session is not None and not isinstance(session, CameraSession):
+            raise TypeError("session must be a CameraSession")
         self._frames = frames
         self._settings = settings
         self._background = background
@@ -465,6 +469,7 @@ class CameraTimingFactory(TimingSourceFactory):
         self._devices = devices
         self._configurations = configurations
         self._lease = lease
+        self._session = session
         self._probe_cache: tuple[tuple[int, int, int, int], int, ProviderAvailability] | None = None
 
     @property
@@ -487,6 +492,14 @@ class CameraTimingFactory(TimingSourceFactory):
             camera = self._session_camera()
         except ProviderConfigurationError as error:
             return ProviderAvailability.unavailable(error.key)
+        # Navigation asks this on every page. A session must not open the device
+        # to answer. The device opens when a preview or a race actually starts.
+        if self._session is not None:
+            if self._session.hardware_state(camera) == "failed":
+                return ProviderAvailability.unavailable(
+                    "error.timing_provider.camera_not_connected"
+                )
+            return ProviderAvailability.ok()
         key = (camera.device_index, camera.width, camera.height, camera.fps)
         cached = self._probe_cache
         now = time.monotonic_ns()
@@ -530,6 +543,8 @@ class CameraTimingFactory(TimingSourceFactory):
         camera, settings, zone_frame = self._prepare(spec)
         if self._frames is not None:
             frames = self._frames
+        elif self._session is not None:
+            frames = self._session.race_consumer(camera)
         else:
             frames = CameraFrameSource(
                 self._make_device(camera),

@@ -4,14 +4,16 @@ The page edits the saved camera document: device, resolution, frame rate,
 travel direction, sensitivity and detection zones. Block size stays at the
 stored value; it is not a control on this page. The picture is a configuration
 preview. The page does not start a race and does not publish sensor events.
-Erkennungsdiagnose, opened from this page, reads the same preview frames and
-runs the race detector on them. It does not open a second camera. Leaving the
-page stops the preview and the diagnosis.
+Erkennungsdiagnose, opened from this page, reads the shared capture and runs
+the race detector on its own session. It does not open a second camera.
+Leaving the page detaches the preview and stops the diagnosis. It does not
+close the physical camera.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -37,7 +39,7 @@ from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MI
 from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
-from slot_racing.modules.timing_camera.capture import CameraOpenError
+from slot_racing.modules.timing_camera.capture import CameraOpenError, LatestFrameBuffer
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
     NormalizedRoi,
@@ -47,7 +49,7 @@ from slot_racing.modules.timing_camera.configuration import (
 )
 from slot_racing.modules.timing_camera.detection import TravelDirection
 from slot_racing.modules.timing_camera.diagnostic import CaptureCounters, DiagnosticListener
-from slot_racing.modules.timing_camera.frame_source import FrameSource
+from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.lease import CameraBusyError
 from slot_racing.modules.timing_camera.store import CameraConfigurationError
@@ -115,6 +117,10 @@ class CameraSetupPage(QWidget):
         self._source: FrameSource | None = None
         self._diagnostic_listener: DiagnosticListener | None = None
         self._diagnostic_dialog: QWidget | None = None
+        self._feed_stop: threading.Event | None = None
+        self._feed_thread: threading.Thread | None = None
+        self._feed_slot: LatestFrameBuffer | None = None
+        self._preview_frames = 0
         self._loading = False
         self._drawing = False
         self._corrupt = False
@@ -245,12 +251,14 @@ class CameraSetupPage(QWidget):
         return self._document()
 
     def attach_diagnostic(self, listener: DiagnosticListener) -> None:
-        """Hand each preview frame to ``listener``. Does not open a camera."""
+        """Hand each captured frame to ``listener``. Does not open a camera."""
         self._diagnostic_listener = listener
+        self._start_diagnostic_feed()
 
     def detach_diagnostic(self, listener: DiagnosticListener) -> None:
         if self._diagnostic_listener is listener:
             self._diagnostic_listener = None
+            self._stop_diagnostic_feed()
 
     def _tr(self, key: str) -> str:
         return self._translator.translate(key)
@@ -565,7 +573,7 @@ class CameraSetupPage(QWidget):
     def _on_refresh(self) -> None:
         selected = self._device_index()
         self._loading = True
-        self._fill_devices(self._probe(), selected)
+        self._fill_devices(self._listed_indices(), selected)
         self._loading = False
         if self.isVisible():
             self._start_preview()
@@ -679,6 +687,8 @@ class CameraSetupPage(QWidget):
         self._camera_state = "live"
         self._pull_frame()
         self._timer.start()
+        if self._diagnostic_listener is not None:
+            self._start_diagnostic_feed()
         self._refresh_status()
 
     def _pull_frame(self) -> None:
@@ -695,9 +705,13 @@ class CameraSetupPage(QWidget):
             self._refresh_status()
             return
         if delivered is not None:
+            self._preview_frames += 1
             self.stage.set_frame(delivered.frame)
+            # A live feed already delivers every captured frame. The preview
+            # timer only paints the picture, so a 50 ms repaint cannot drop
+            # frames the detector should see.
             listener = self._diagnostic_listener
-            if listener is not None:
+            if listener is not None and self._feed_thread is None:
                 try:
                     listener(delivered, _capture_counters(source))
                 except Exception:
@@ -728,6 +742,7 @@ class CameraSetupPage(QWidget):
             dialog.close()
 
     def _stop_preview(self, *_args: object) -> None:
+        self._stop_diagnostic_feed()
         timer = getattr(self, "_timer", None)
         if timer is not None:
             with suppress(RuntimeError):
@@ -740,6 +755,117 @@ class CameraSetupPage(QWidget):
             source.stop()
         except Exception:
             logger.exception("Camera preview did not stop")
+
+    def _listed_indices(self) -> tuple[int, ...]:
+        listed = getattr(self._preview, "probe_indices", None)
+        if not callable(listed):
+            return self._probe()
+        try:
+            found = listed()
+        except Exception:
+            logger.exception("Could not list cameras")
+            return ()
+        return self._clean_indices(found)
+
+    def _clean_indices(self, found: object) -> tuple[int, ...]:
+        if isinstance(found, bool) or not isinstance(found, tuple):
+            return ()
+        indices: list[int] = []
+        for item in found:
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                continue
+            indices.append(item)
+        return tuple(dict.fromkeys(indices))
+
+    def _start_diagnostic_feed(self) -> None:
+        if self._feed_thread is not None:
+            return
+        attach = getattr(self._preview, "attach_consumer", None)
+        if not callable(attach):
+            return
+        try:
+            slot = attach("diagnostic", reason="diagnostic_started")
+        except Exception:
+            logger.debug("Camera diagnostic stayed on the preview timer", exc_info=True)
+            return
+        if not isinstance(slot, LatestFrameBuffer):
+            return
+        self._feed_slot = slot
+        stop = threading.Event()
+        self._feed_stop = stop
+        thread = threading.Thread(
+            target=self._feed_loop, name="slot-racing-diagnostic-feed", daemon=True
+        )
+        self._feed_thread = thread
+        thread.start()
+
+    def _stop_diagnostic_feed(self) -> None:
+        stop = self._feed_stop
+        if stop is not None:
+            stop.set()
+        detach = getattr(self._preview, "detach_consumer", None)
+        if callable(detach):
+            try:
+                detach("diagnostic", reason="diagnostic_stopped")
+            except Exception:
+                logger.exception("Camera diagnostic feed did not detach")
+        thread = self._feed_thread
+        self._feed_thread = None
+        self._feed_slot = None
+        self._feed_stop = None
+        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=2)
+
+    def _feed_loop(self) -> None:
+        stop = self._feed_stop
+        slot = self._feed_slot
+        if stop is None or slot is None:
+            return
+        while not stop.is_set():
+            frame = slot.wait(stop)
+            if frame is None:
+                return
+            listener = self._diagnostic_listener
+            if listener is None:
+                continue
+            try:
+                listener(frame, self._feed_counters(frame, slot))
+            except Exception:
+                logger.exception("Camera diagnostic rejected a frame")
+
+    def _feed_counters(self, frame: TimedFrame, slot: LatestFrameBuffer) -> CaptureCounters:
+        pipeline = getattr(self._preview, "pipeline", None)
+        snapshot = pipeline() if callable(pipeline) else None
+        preview = self._source
+        preview_frames = self._preview_frames
+        preview_replaced = getattr(preview, "replaced", None)
+        if snapshot is None:
+            return CaptureCounters(
+                sequence=frame.sequence,
+                source_overwrites=slot.dropped,
+                dropped=slot.dropped,
+                preview_frames=preview_frames,
+                preview_replaced=(
+                    preview_replaced
+                    if isinstance(preview_replaced, int) and not isinstance(preview_replaced, bool)
+                    else None
+                ),
+            )
+        return CaptureCounters(
+            captured=snapshot.capture_frames,
+            dropped=slot.dropped,
+            read_attempts=snapshot.read_attempts,
+            read_failures=snapshot.read_failures,
+            source_overwrites=slot.dropped,
+            sequence=frame.sequence,
+            capture_dt_ns=snapshot.last_capture_dt_ns,
+            preview_frames=preview_frames,
+            preview_replaced=(
+                preview_replaced
+                if isinstance(preview_replaced, int) and not isinstance(preview_replaced, bool)
+                else None
+            ),
+        )
 
     def _refresh_status(self) -> None:
         if self._camera_state == "live":

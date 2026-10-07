@@ -1,8 +1,8 @@
-"""One camera open at a time.
+"""One physical camera open at a time.
 
-A race and the setup preview both need the device. Opening it twice would
-fight over the same USB camera, so they share a lease. The second request is
-refused and the device stays with whoever already holds it.
+The capture session holds the device. Preview, diagnosis and a race subscribe
+to that capture; they do not open a second device. A direct ``CameraFrameSource``
+still takes the lease itself, so two of those cannot open the same camera.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ class CameraLease:
 
     RACE = "race"
     PREVIEW = "preview"
+    CAPTURE = "capture"
 
     def __init__(self) -> None:
         self._lock = threading.Lock()

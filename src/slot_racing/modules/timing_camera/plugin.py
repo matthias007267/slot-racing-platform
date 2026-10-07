@@ -8,6 +8,7 @@ from slot_racing.core.storage import Database
 from slot_racing.modules.timing_camera.lease import CameraLease
 from slot_racing.modules.timing_camera.preview import CameraPreview
 from slot_racing.modules.timing_camera.provider import CameraTimingFactory
+from slot_racing.modules.timing_camera.session import CameraSession
 from slot_racing.modules.timing_camera.store import CameraConfigurationStore
 
 
@@ -111,9 +112,13 @@ class CameraTimingPlugin(Plugin):
     def activate(self, context: PluginContext) -> None:
         store = CameraConfigurationStore(context.get_service(Database))
         lease = CameraLease()
-        preview = CameraPreview(lease)
+        session = CameraSession(lease)
+        self._session: CameraSession | None = session
+        preview = CameraPreview(lease, session=session)
         translator = context.translator
-        context.register_timing_provider(CameraTimingFactory(configurations=store, lease=lease))
+        context.register_timing_provider(
+            CameraTimingFactory(configurations=store, lease=lease, session=session)
+        )
 
         def camera_page() -> object:
             from slot_racing.modules.timing_camera.ui.page import CameraSetupPage, zone_limit
@@ -137,3 +142,9 @@ class CameraTimingPlugin(Plugin):
                 page_factory=camera_page,
             )
         )
+
+    def deactivate(self) -> None:
+        session = getattr(self, "_session", None)
+        self._session = None
+        if session is not None:
+            session.close(reason="shutdown")
