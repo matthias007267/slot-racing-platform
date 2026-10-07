@@ -8,7 +8,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -130,6 +130,43 @@ def test_secrets_and_home_paths_are_removed() -> None:
     posix = sanitize_text("/home/name/tracks", homes=[Path("/home/name")])
     assert posix == "<USER_HOME>/tracks"
     assert "secret-value" not in sanitize_text("password=secret-value")
+
+
+@pytest.mark.parametrize(
+    ("text", "homes", "expected"),
+    [
+        (r"C:\Users\Name\tracks", [Path(r"C:\Users\Name")], r"<USER_HOME>\tracks"),
+        ("/home/name/tracks", [Path("/home/name")], "<USER_HOME>/tracks"),
+        (r"c:\users\name\TRACKS", [Path(r"C:\Users\Name")], r"<USER_HOME>\TRACKS"),
+        ("/Home/Name/tracks", [Path("/home/name")], "/Home/Name/tracks"),
+        ("/home/name", [Path("/home/name")], "<USER_HOME>"),
+        (r"C:\Users\Name", [Path(r"C:\Users\Name")], "<USER_HOME>"),
+        ("/home/name/tracks/layout", [Path("/home/name")], "<USER_HOME>/tracks/layout"),
+        (r"C:\Users\Name\tracks\layout", [Path(r"C:\Users\Name")], r"<USER_HOME>\tracks\layout"),
+        ("/home/name2/tracks", [Path("/home/name")], "/home/name2/tracks"),
+        (r"C:\Users\Name2\tracks", [Path(r"C:\Users\Name")], r"C:\Users\Name2\tracks"),
+        (r"c:\users\name2\tracks", [Path(r"C:\Users\Name")], r"c:\users\name2\tracks"),
+        (
+            r"/home/name/tracks plus C:\Users\Name\data",
+            [Path("/home/name"), Path(r"C:\Users\Name")],
+            r"<USER_HOME>/tracks plus <USER_HOME>\data",
+        ),
+        ("c:/users/name/tracks", [Path(r"C:\Users\Name")], "<USER_HOME>/tracks"),
+        ("/home/name/tracks", [Path(str(PureWindowsPath("/home/name")))], "<USER_HOME>/tracks"),
+        ("/home/name/tracks", [Path("")], "/home/name/tracks"),
+        ("a/b\\c.d", [Path("/")], "a/b\\c.d"),
+        ("a/b\\c.d", [Path("\\")], "a/b\\c.d"),
+        ("a/b\\c.d", [Path(".")], "a/b\\c.d"),
+        ("a/b\\c.d", [Path("")], "a/b\\c.d"),
+        (r"C:\Users\Name\tracks", [Path("C:/")], r"C:\Users\Name\tracks"),
+        (r"C:\Users\Name\tracks", [Path("C:\\")], r"C:\Users\Name\tracks"),
+    ],
+)
+def test_home_paths_follow_the_text_not_the_host_platform(
+    text: str, homes: list[Path], expected: str
+) -> None:
+    assert str(PureWindowsPath("/home/name")) == "\\home\\name"
+    assert sanitize_text(text, homes=homes) == expected
 
 
 def test_uncaught_exceptions_in_the_main_thread_and_a_worker_are_logged(tmp_path: Path) -> None:

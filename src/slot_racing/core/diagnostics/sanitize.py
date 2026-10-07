@@ -43,23 +43,35 @@ def is_secret_key(key: str) -> bool:
 
 
 def home_prefixes(extra: Sequence[Path] = ()) -> tuple[str, ...]:
-    """Directories that identify the current user, longest first."""
+    """Home directories that identify the current user, longest first.
+
+    Each path contributes a Windows spelling and a POSIX spelling. ``pathlib``
+    on Windows rewrites ``/home/name`` to ``\\home\\name``, so the original
+    separator is not recoverable from ``str(path)`` alone.
+    """
     found: list[str] = []
+    seen: set[str] = set()
     for candidate in (
         *extra,
         Path.home(),
         Path(os.environ.get("USERPROFILE", "")),
         Path(os.environ.get("HOME", "")),
     ):
-        text = str(candidate)
-        if text and text not in (".", "") and text not in found:
-            found.append(text)
+        for spelling in _spellings(str(candidate)):
+            if spelling in seen or _trivial_prefix(spelling):
+                continue
+            seen.add(spelling)
+            found.append(spelling)
     found.sort(key=len, reverse=True)
     return tuple(found)
 
 
 def sanitize_text(text: str, *, homes: Sequence[Path] = ()) -> str:
-    """Replace home prefixes and inline secrets. Other text stays readable."""
+    """Replace home prefixes and inline secrets. Other text stays readable.
+
+    A Windows log can contain a POSIX path and the other way around, so both
+    separator styles are matched. The separator that followed the home stays.
+    """
     cleaned = text
     for prefix in home_prefixes(homes):
         cleaned = _replace_prefix(cleaned, prefix)
@@ -83,24 +95,57 @@ def redact(value: object, *, homes: Sequence[Path] = ()) -> object:
     return value
 
 
+def _spellings(text: str) -> tuple[str, ...]:
+    """Return ``text`` with trailing separators removed, in both separator styles."""
+    bare = text.rstrip("/\\")
+    base = bare if bare else text
+    variants = [base]
+    if "\\" in base:
+        variants.append(base.replace("\\", "/"))
+    if "/" in base:
+        variants.append(base.replace("/", "\\"))
+    unique: list[str] = []
+    for variant in variants:
+        if variant not in unique:
+            unique.append(variant)
+    return tuple(unique)
+
+
+def _trivial_prefix(prefix: str) -> bool:
+    """True for values that would erase unrelated text, such as ``/`` or ``.``."""
+    if not prefix or prefix in {".", ".."}:
+        return True
+    if all(character in "/\\" for character in prefix):
+        return True
+    bare = prefix.rstrip("/\\")
+    if not bare or bare in {".", ".."}:
+        return True
+    return len(bare) == 2 and bare[1] == ":" and bare[0].isalpha()
+
+
+def _windows_spelling(prefix: str) -> bool:
+    """Drive paths and backslash paths compare case-insensitively. POSIX does not."""
+    if "\\" in prefix or prefix.startswith("//"):
+        return True
+    return len(prefix) >= 2 and prefix[0].isalpha() and prefix[1] == ":"
+
+
 def _replace_prefix(text: str, prefix: str) -> str:
-    """Replace every occurrence of ``prefix``. A log line rarely starts with it."""
-    if not prefix or prefix in (os.sep, "/"):
+    """Replace ``prefix`` only when it ends on a path boundary."""
+    if _trivial_prefix(prefix):
         return text
-    windows = "\\" in prefix or (len(prefix) > 1 and prefix[1] == ":")
-    if not windows:
-        return text.replace(prefix, _HOME)
-    folded = text.casefold()
-    needle = prefix.casefold()
-    if needle not in folded:
-        return text
+    pattern = re.compile(
+        re.escape(prefix),
+        re.IGNORECASE if _windows_spelling(prefix) else 0,
+    )
     parts: list[str] = []
     start = 0
-    while True:
-        index = folded.find(needle, start)
-        if index < 0:
-            parts.append(text[start:])
-            return "".join(parts)
-        parts.append(text[start:index])
+    for match in pattern.finditer(text):
+        end = match.end()
+        if end < len(text) and text[end] not in "/\\":
+            continue
+        parts.append(text[start : match.start()])
         parts.append(_HOME)
-        start = index + len(prefix)
+        start = end
+    parts.append(text[start:])
+    return "".join(parts)
