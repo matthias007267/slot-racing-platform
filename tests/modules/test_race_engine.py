@@ -476,8 +476,12 @@ def test_a_repeat_inside_the_debounce_window_is_not_a_new_lap() -> None:
     engine.start()
     _hit(bus, S, "sf")
     _hit(bus, S + SAME_POSITION_DEBOUNCE_NS - 1, "sf")
-    assert len([e for e in events if isinstance(e, LapCompleted)]) == 1
+    assert len([e for e in events if isinstance(e, LapCompleted)]) == 0
     _hit(bus, S + SAME_POSITION_DEBOUNCE_NS, "sf")
+    assert len([e for e in events if isinstance(e, LapCompleted)]) == 1
+    _hit(bus, S + 2 * SAME_POSITION_DEBOUNCE_NS - 1, "sf")
+    assert len([e for e in events if isinstance(e, LapCompleted)]) == 1
+    _hit(bus, S + 2 * SAME_POSITION_DEBOUNCE_NS, "sf")
     assert len([e for e in events if isinstance(e, LapCompleted)]) == 2
 
 
@@ -499,6 +503,9 @@ def test_debounce_is_isolated_per_lane() -> None:
     engine.start()
     _hit(bus, S, "sf", lane=1)
     _hit(bus, S + 10_000_000, "sf", lane=2)
+    assert {e.lane for e in events if isinstance(e, LapStarted)} == {1, 2}
+    _hit(bus, S + SAME_POSITION_DEBOUNCE_NS, "sf", lane=1)
+    _hit(bus, S + SAME_POSITION_DEBOUNCE_NS + 10_000_000, "sf", lane=2)
     assert {e.lane for e in events if isinstance(e, LapCompleted)} == {1, 2}
 
 
@@ -584,6 +591,7 @@ def test_a_single_participant_finishes_and_is_the_winner() -> None:
     engine.start()
     _hit(bus, 2 * S, "sf")
     _hit(bus, 5 * S, "sf")
+    _hit(bus, 7 * S, "sf")
     assert engine.status is RaceStatus.FINISHED
     final = _finished(events)
     assert not final.aborted
@@ -604,6 +612,7 @@ def test_finishers_rank_by_crossing_order_ahead_of_cars_still_running() -> None:
         participants=(Participant(ALICE, 1), Participant(BOB, 2)),
     )
     engine.start()
+    _hit(bus, S, "sf", lane=2)
     _hit(bus, 4 * S, "sf", lane=2)
     engine.stop()
     final = _finished(events)
@@ -620,8 +629,10 @@ def test_more_laps_outrank_a_faster_last_lap() -> None:
         participants=(Participant(ALICE, 1), Participant(BOB, 2)),
     )
     engine.start()
-    _hit(bus, 3 * S, "sf", lane=1)
-    _hit(bus, 4 * S, "sf", lane=2)
+    _hit(bus, S, "sf", lane=1)
+    _hit(bus, 2 * S, "sf", lane=2)
+    _hit(bus, 4 * S, "sf", lane=1)
+    _hit(bus, 5 * S, "sf", lane=2)
     _hit(bus, 8 * S, "sf", lane=2)
     engine.stop()
     final = _finished(events)
@@ -635,6 +646,8 @@ def test_equal_lap_times_are_ordered_by_lane_not_shared() -> None:
         participants=(Participant(ALICE, 1), Participant(BOB, 2)),
     )
     engine.start()
+    _hit(bus, 0, "sf", lane=2)
+    _hit(bus, 0, "sf", lane=1)
     _hit(bus, 5 * S, "sf", lane=2)
     _hit(bus, 5 * S, "sf", lane=1)
     engine.stop()

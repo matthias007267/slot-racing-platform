@@ -383,7 +383,7 @@ layout)`.
   race continues.
 - It imports no UI, camera or GPIO code (enforced by import-linter).
 
-Standing start: lap 1 begins at `RaceStarted`.
+Standing start: with sector positions, lap 1 begins at `RaceStarted`. A layout that only times start/finish starts that lane's lap clock on the first crossing after GO and completes lap 1 on the next crossing (`t2 - t1`). The race clock still starts at GO.
 
 ## Database
 

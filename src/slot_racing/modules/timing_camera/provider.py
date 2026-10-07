@@ -10,11 +10,13 @@ still detects. The sensor id is taken from the session setup.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 
+from slot_racing.core.diagnostics import record
 from slot_racing.core.errors import ProviderConfigurationError, ProviderUnavailable
 from slot_racing.core.events import SensorTriggered
 from slot_racing.core.timing import (
@@ -56,6 +58,8 @@ from slot_racing.modules.timing_camera.store import (
 )
 
 DeviceFactory = Callable[[CameraConfig], CaptureDevice]
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "camera"
 _SOURCE_ID = "camera"
@@ -114,6 +118,7 @@ class CameraTimingProvider(TimingSource):
         self._resume_gate.set()
         self._halted = False
         self._failure: BaseException | None = None
+        self._noted_first_frame = False
         self.frames_observed = 0
         self.detection_ns_total = 0
         self.detection_ns_max = 0
@@ -124,6 +129,12 @@ class CameraTimingProvider(TimingSource):
     @property
     def source_id(self) -> str:
         return self._source_id
+
+    def reported_positions(self) -> frozenset[str] | None:
+        settings = self._settings
+        if settings is None or not settings.zones:
+            return None
+        return frozenset(zone.position_id for zone in settings.zones)
 
     @property
     def is_running(self) -> bool:
@@ -138,6 +149,7 @@ class CameraTimingProvider(TimingSource):
         self._regions_armed = False
         self._failure = None
         self._halted = False
+        self._noted_first_frame = False
         self.frames_observed = 0
         self.detection_ns_total = 0
         self.detection_ns_max = 0
@@ -158,6 +170,7 @@ class CameraTimingProvider(TimingSource):
             self._frames.stop()
             raise
         self._sink = sink
+        self._note_detector("created")
         self._worker_stop.clear()
         self._resume_gate.set()
         if self._has_capture_thread():
@@ -237,6 +250,7 @@ class CameraTimingProvider(TimingSource):
             if delivered is None:
                 return
             processed += 1
+            self._note_first_frame(delivered)
             for crossing in self._crossings(delivered):
                 sink = self._sink
                 if sink is None:
@@ -279,7 +293,8 @@ class CameraTimingProvider(TimingSource):
                 continue
             try:
                 self._frames.check()
-            except CameraReadError:
+            except CameraReadError as error:
+                self._note_worker_failure(error)
                 return
             frame = self._take_frame()
             if frame is None:
@@ -292,8 +307,10 @@ class CameraTimingProvider(TimingSource):
                 crossings = self._crossings(frame)
             except Exception as error:
                 self._failure = error
+                self._note_worker_failure(error)
                 self._release_frame()
                 return
+            self._note_first_frame(frame)
             elapsed = time.perf_counter_ns() - started
             latency = max(0, started - frame.timestamp_ns)
             self.frames_observed += 1
@@ -331,8 +348,53 @@ class CameraTimingProvider(TimingSource):
         """Keep every crossing. Frames may be skipped; these events may not."""
         if not crossings:
             return
+        for crossing in crossings:
+            record(
+                "CAMERA_RACE_DETECTION",
+                module="timing_camera",
+                page="camera",
+                result="accepted",
+                source=self._source_id,
+                lane=crossing.lane,
+                position=crossing.position_id,
+            )
         with self._pending_lock:
             self._pending.extend(self._event(crossing) for crossing in crossings)
+
+    def _note_first_frame(self, frame: TimedFrame) -> None:
+        if self._noted_first_frame:
+            return
+        self._noted_first_frame = True
+        record(
+            "CAMERA_RACE_FRAME_FIRST",
+            module="timing_camera",
+            page="camera",
+            result="observed",
+            source=self._source_id,
+            capture_seq=frame.sequence,
+        )
+
+    def _note_detector(self, result: str) -> None:
+        settings = self._settings
+        record(
+            "CAMERA_RACE_DETECTOR_CREATED",
+            module="timing_camera",
+            page="camera",
+            result=result,
+            source=self._source_id,
+            zones=0 if settings is None else len(settings.zones),
+            detector=0 if self._detector is None else id(self._detector),
+        )
+
+    def _note_worker_failure(self, error: BaseException) -> None:
+        logger.exception("Camera detection worker failed")
+        record(
+            "CAMERA_RACE_WORKER_FAILED",
+            module="timing_camera",
+            page="camera",
+            result=type(error).__name__,
+            source=self._source_id,
+        )
 
     def _drain_events(self) -> None:
         while True:
@@ -367,6 +429,7 @@ class CameraTimingProvider(TimingSource):
         self._zone_frame = (frame.width, frame.height)
         self._background = background
         self._detector = create_lane_detector(scaled, background=background)
+        self._note_detector("rescaled")
         # The next picture may have a different grid, so the crops are prepared again.
         self._regions_armed = False
 

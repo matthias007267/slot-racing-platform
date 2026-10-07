@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from slot_racing.core.clock import Clock
 from slot_racing.core.diagnostics import record
@@ -18,6 +18,8 @@ from slot_racing.core.domain import (
     RaceId,
     RaceMode,
     RaceStatus,
+    TimingLayout,
+    TimingPosition,
     TimingSetup,
     TrackId,
     default_timing_setup,
@@ -279,11 +281,12 @@ class RaceController:
             track_id=race.track_id,
         )
         source = self._providers.create_source(race.timing_provider, spec)
+        layout = layout_for_reported_positions(setup.layout, source.reported_positions())
         config = RaceConfig(
             race_id=race.id,
             laps=race.laps,
             participants=tuple(domain_participants),
-            layout=setup.layout,
+            layout=layout,
             mode=race.mode,
         )
         engine = RaceEngine(config, self._bus, self._clock, [source])
@@ -343,3 +346,46 @@ class RaceController:
         service = self._setups()
         stored = None if service is None or track_id is None else service.get_setup(track_id)
         return stored if stored is not None else default_timing_setup()
+
+
+def layout_for_reported_positions(
+    layout: TimingLayout, reported: frozenset[str] | None
+) -> TimingLayout:
+    """Keep the positions a timing source can actually report.
+
+    A camera that only watches start/finish must not wait for sector points it will
+    never emit. The order of the remaining positions stays the stored driving order,
+    and start/finish stays first. When the source does not say which positions it
+    covers, or it cannot see start/finish, the stored layout is unchanged.
+    """
+    if not reported or layout.positions[0].id not in reported:
+        if reported and layout.positions[0].id not in reported:
+            record(
+                "TIMING_LAYOUT_NARROWED",
+                module="races",
+                page="races",
+                result="start_finish_unobserved",
+                positions=",".join(sorted(reported)),
+            )
+        return layout
+    kept = tuple(position for position in layout.positions if position.id in reported)
+    if len(kept) == len(layout.positions):
+        return layout
+    narrowed = TimingLayout(
+        tuple(_reordered(position, index) for index, position in enumerate(kept, start=1))
+    )
+    record(
+        "TIMING_LAYOUT_NARROWED",
+        module="races",
+        page="races",
+        result="observed_positions",
+        positions=",".join(position.id for position in narrowed.positions),
+        dropped=",".join(
+            position.id for position in layout.positions if position.id not in reported
+        ),
+    )
+    return narrowed
+
+
+def _reordered(position: TimingPosition, order: int) -> TimingPosition:
+    return replace(position, order=order)

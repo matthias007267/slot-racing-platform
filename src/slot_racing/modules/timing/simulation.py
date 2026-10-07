@@ -193,6 +193,11 @@ class SimulationTimingProvider(TimingSource, ManuallyTriggerable):
         events: list[tuple[int, int, int, SensorTriggered]] = []
         for lane in self._lanes:
             lap_start = origin_ns + lane.start_delay_ns
+            if len(sequence) == 1:
+                # The car leaves from the only timed line. That crossing starts the lap
+                # clock; the configured lap times are the gaps until the next crossings.
+                opening = self._event(lap_start, sequence[0].id, lane.lane)
+                events.append((lap_start, lane.lane, -1, opening))
             for lap_number in range(1, self._laps + 1):
                 lap_time = lane.lap_time_ns(lap_number)
                 for position, point in enumerate(sequence):
