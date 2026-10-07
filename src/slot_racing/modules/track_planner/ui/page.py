@@ -92,6 +92,7 @@ from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
 from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
+from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog, dialog_is_alive
 from slot_racing.modules.track_planner.ui.flow_layout import FlowLayout, retain_content_width
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
@@ -280,6 +281,7 @@ class PlannerPage(QWidget):
         self.announce_stock_problem: Callable[[], None] = self._announce_stock_problem
         self.confirm_delete: Callable[[str], bool] = self._confirm_delete
         self.stock_dialog_runner: Callable[[CollectionDialog], int] = lambda dialog: dialog.exec()
+        self._collection_dialog: CollectionDialog | None = None
         warning_text = QLabel(translate("planner.stock.warning"))
         warning_text.setObjectName("planner-stock-warning-text")
         set_tone(warning_text, "error")
@@ -1167,17 +1169,28 @@ class PlannerPage(QWidget):
         self._commit(updated, created)
 
     def _add_part(self) -> None:
-        dialog = PartDialog(self._translator, self._planner)
-        if dialog.exec():
+        dialog = PartDialog(self._translator, self._planner, parent=self)
+        try:
+            accepted = bool(dialog.exec())
+        finally:
+            destroy_dialog(dialog)
+        if accepted:
             self._load_parts()
             self._draw(self.canvas.selected_id())
 
     def _manage_library(self) -> None:
         used = {instance.part_id for instance in self._plan.instances}
         dialog = LibraryManager(
-            self._translator, self._planner, used, color_coding=self.color_coding.isChecked()
+            self._translator,
+            self._planner,
+            used,
+            color_coding=self.color_coding.isChecked(),
+            parent=self,
         )
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            destroy_dialog(dialog)
         self._load_parts()
         self._draw(self.canvas.selected_ids())
 
@@ -1428,11 +1441,31 @@ class PlannerPage(QWidget):
         box.exec()
 
     def _manage_stock(self) -> None:
+        self._destroy_collection_dialog()
+        trace("COLLECTION_DIALOG_CREATE", result="started")
         dialog = CollectionDialog(self._translator, self._planner, self)
-        self.stock_dialog_runner(dialog)
-        dialog.close()
-        self._stock = self._planner.stock_quantities()
-        self._draw()
+        self._collection_dialog = dialog
+        dialog.destroyed.connect(self._release_collection_dialog)
+        try:
+            self.stock_dialog_runner(dialog)
+            self._stock = self._planner.stock_quantities()
+            self._draw()
+        finally:
+            trace("COLLECTION_DIALOG_RETURN", result="closed")
+            self._destroy_collection_dialog()
+
+    def _destroy_collection_dialog(self) -> None:
+        dialog = self._collection_dialog
+        if not dialog_is_alive(dialog):
+            self._collection_dialog = None
+            return
+        trace("COLLECTION_DIALOG_DESTROY", result="destroyed")
+        destroy_dialog(dialog)
+        if self._collection_dialog is dialog:
+            self._collection_dialog = None
+
+    def _release_collection_dialog(self) -> None:
+        self._collection_dialog = None
 
     def _mode_toggled(self, checked: bool) -> None:
         if self._filling or not checked:

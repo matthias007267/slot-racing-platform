@@ -21,6 +21,7 @@ from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.parts import PartRecord
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
+from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog, destroy_widget
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_view import PartPreview
 from slot_racing.uikit.errors import describe_error
@@ -38,8 +39,9 @@ class LibraryManager(QDialog):
         used_part_ids: Collection[int] = (),
         *,
         color_coding: bool = False,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         trace("LIBRARY_MANAGER_OPEN", result="opened")
         self.setObjectName("library-manager")
         self.setWindowTitle(translator.translate("planner.library.manage"))
@@ -95,13 +97,13 @@ class LibraryManager(QDialog):
             item = self._rows_layout.takeAt(0)
             widget = None if item is None else item.widget()
             if widget is not None:
-                widget.deleteLater()
+                destroy_widget(widget)
         self._rows = []
         known = {record.id for record in records}
         if self._selected not in known:
             self._selected = None
         for record in records:
-            row = _PartRow(record, self)
+            row = _PartRow(record, self, self._list)
             self._rows.append(row)
             self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
             row.set_current(row.part_id == self._selected)
@@ -120,8 +122,12 @@ class LibraryManager(QDialog):
         record = self._current()
         if record is None:
             return
-        dialog = PartDialog(self._translator, self._planner, record)
-        if dialog.exec():
+        dialog = PartDialog(self._translator, self._planner, record, parent=self)
+        try:
+            accepted = bool(dialog.exec())
+        finally:
+            destroy_dialog(dialog)
+        if accepted:
             self.reload()
             self.status.show_info(self._translator.translate("planner.library.updated"))
 
@@ -160,8 +166,13 @@ class LibraryManager(QDialog):
 class _PartRow(QWidget):
     """Preview on the left, name and scale on the right. Nothing else shares that row."""
 
-    def __init__(self, record: PartRecord, owner: LibraryManager) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        record: PartRecord,
+        owner: LibraryManager,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("library-manager-row")
         self.part_id = record.id
         spec = record.spec

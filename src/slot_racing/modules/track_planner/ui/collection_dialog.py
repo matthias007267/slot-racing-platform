@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QRegularExpression, Qt
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtGui import QRegularExpressionValidator, QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.parts import PartRecord
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.trace import trace
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import set_role
 from slot_racing.uikit.widgets import StatusLabel
@@ -41,25 +42,27 @@ class CollectionDialog(QDialog):
         self._translator = translator
         self._planner = planner
         self._rows: list[_StockRow] = []
+        self._opened = False
         self.status = StatusLabel("collection-message")
+        self.status.setParent(self)
         stock = planner.stock_quantities()
         records = tuple(
             sorted(planner.list_parts(), key=lambda record: record.spec.name.casefold())
         )
-        self._list = QWidget()
+        self._list = QWidget(self)
         self._list.setObjectName("collection-list")
         rows = QVBoxLayout(self._list)
         rows.setContentsMargins(0, 0, 0, 0)
         for record in records:
-            row = _StockRow(translator, record, stock.get(record.id, 0), self._store)
+            row = _StockRow(translator, record, stock.get(record.id, 0), self._store, self._list)
             self._rows.append(row)
             rows.addWidget(row)
         rows.addStretch(1)
-        scroll = QScrollArea()
+        scroll = QScrollArea(self)
         scroll.setObjectName("collection-scroll")
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._list)
-        close = QPushButton(translator.translate("planner.stock.close"))
+        close = QPushButton(translator.translate("planner.stock.close"), self)
         close.setObjectName("collection-close")
         close.clicked.connect(self.accept)
         actions = QHBoxLayout()
@@ -69,6 +72,12 @@ class CollectionDialog(QDialog):
         layout.addWidget(scroll, 1)
         layout.addWidget(self.status)
         layout.addLayout(actions)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        if not self._opened:
+            self._opened = True
+            trace("COLLECTION_DIALOG_OPEN", result="opened")
+        super().showEvent(event)
 
     def quantity(self, part_id: int) -> int:
         for row in self._rows:
@@ -93,28 +102,29 @@ class _StockRow(QWidget):
         record: PartRecord,
         quantity: int,
         store: Callable[[int, int], bool],
+        parent: QWidget,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self.part_id = record.id
         self._store = store
         self._quantity = quantity
         self._filling = False
         self.setObjectName(f"collection-row-{record.id}")
-        name = QLabel(record.spec.name)
+        name = QLabel(record.spec.name, self)
         name.setObjectName("collection-name")
-        article = QLabel(record.spec.article_number)
+        article = QLabel(record.spec.article_number, self)
         article.setObjectName("collection-article")
-        self.minus = QPushButton("-")
+        self.minus = QPushButton("-", self)
         self.minus.setObjectName(f"collection-minus-{record.id}")
         set_role(self.minus, "ghost")
         self.minus.clicked.connect(self._decrease)
-        self.field = QLineEdit(str(quantity))
+        self.field = QLineEdit(str(quantity), self)
         self.field.setObjectName(f"collection-quantity-{record.id}")
         self.field.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9]*")))
         self.field.setFixedWidth(96)
         self.field.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.field.editingFinished.connect(self._edited)
-        self.plus = QPushButton("+")
+        self.plus = QPushButton("+", self)
         self.plus.setObjectName(f"collection-plus-{record.id}")
         set_role(self.plus, "ghost")
         self.plus.clicked.connect(self._increase)
