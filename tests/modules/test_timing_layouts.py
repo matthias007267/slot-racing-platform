@@ -73,7 +73,10 @@ def test_simulation_spreads_one_lap_over_all_positions() -> None:
 
 def test_a_layout_without_sectors_only_reports_start_finish() -> None:
     events = run(setup_with_sensors(["start_finish"]), laps=3)
-    assert [e.position_id for e in events] == ["start_finish"] * 3
+    # The car is on the line at the start. That crossing opens the lap clock,
+    # then each configured lap reports start/finish again.
+    assert [e.position_id for e in events] == ["start_finish"] * 4
+    assert [e.timestamp_ns for e in events] == [0, 10 * S, 20 * S, 30 * S]
 
 
 def test_simulation_has_no_built_in_layout() -> None:

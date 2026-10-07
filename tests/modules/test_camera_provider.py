@@ -372,6 +372,10 @@ def test_a_frame_submitted_before_start_is_ignored() -> None:
     assert received == []
 
 
+def _engine_status(engine: RaceEngine) -> RaceStatus:
+    return engine.status
+
+
 def test_a_synthetic_crossing_completes_a_lap_in_the_race_engine() -> None:
     setup = TimingSetup(
         TimingLayout.from_position_ids(["start_finish"]),
@@ -407,10 +411,20 @@ def test_a_synthetic_crossing_completes_a_lap_in_the_race_engine() -> None:
             lane=1,
         )
     ]
+    assert not any(isinstance(event, LapCompleted) for event in events)
+    assert engine.results()[0].laps_completed == 0
+    assert engine.status is RaceStatus.RUNNING
+
+    frames.submit(blank(), 1_300_000_000)
+    engine.poll_sources()
+    frames.submit(column(1, 30), 1_400_000_000)
+    frames.submit(column(1, 32), 1_500_000_000)
+    engine.poll_sources()
+
     laps = [event for event in events if isinstance(event, LapCompleted)]
     assert len(laps) == 1
     lap = laps[0]
     assert isinstance(lap, LapCompleted)
-    assert (lap.lane, lap.lap_number, lap.lap_time_ns) == (1, 1, 1_000_000_000)
-    assert engine.status is RaceStatus.FINISHED
+    assert (lap.lane, lap.lap_number, lap.lap_time_ns) == (1, 1, 500_000_000)
+    assert _engine_status(engine) is RaceStatus.FINISHED
     assert not source.is_running

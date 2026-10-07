@@ -5,8 +5,14 @@ only knows the abstract :class:`TimingSource` and never a camera, GPIO or any ot
 
 Race rules implemented here:
 
-* Standing start: lap 1 begins at ``RaceStarted``; a lap ends when the car passes the
-  start/finish line after having passed all sector positions in order.
+* Standing start when the lap has sector positions: lap 1 begins at ``RaceStarted``; a lap
+  ends when the car passes the start/finish line after having passed all sector positions
+  in order.
+* A layout whose only position is start/finish cannot close a lap that began at the lights,
+  because the line has been seen only once. The first start/finish crossing after GO starts
+  that lane's lap clock and stores no lap. Every later crossing of the same line completes
+  exactly one lap (the time since the previous crossing) and starts the next lap at once.
+  The race clock still starts at GO. This rule is the layout's, not a camera special case.
 * Sensor events that do not match the position a car is expected to pass next are ignored.
   The engine looks at the logical position of an event, never at the sensor or hardware.
 * Lap races: a participant finishes after completing ``laps`` laps. The first one to finish is the
@@ -104,6 +110,8 @@ class _ParticipantState:
     lap_number: int = 1
     next_point: int = 0
     lap_start_ns: int = 0
+    # A one-position layout starts the lap clock on the first start/finish, not at GO.
+    clock_started: bool = False
     sector_start_ns: int = 0
     lap_times_ns: list[int] = field(default_factory=list)
     last_lap_end_ns: int | None = None
@@ -128,6 +136,7 @@ class RaceEngine:
         self._clock = clock
         self._sources = tuple(timing_sources)
         self._sequence = config.layout.lap_sequence
+        self._single_point = len(self._sequence) == 1
         self._states = {p.lane: _ParticipantState(p) for p in config.participants}
         self._status = RaceStatus.CREATED
         self._subscription: Subscription | None = None
@@ -162,8 +171,10 @@ class RaceEngine:
         self._bus.publish(
             RaceStarted(timestamp_ns=now, race_id=race_id, participants=self._config.participants)
         )
-        for state in self._states.values():
-            self._publish_lap_started(state, now, 0)
+        if not self._single_point:
+            for state in self._states.values():
+                state.clock_started = True
+                self._publish_lap_started(state, now, 0)
         self._start_sources()
 
     def pause(self) -> None:
@@ -224,6 +235,14 @@ class RaceEngine:
             except Exception as error:
                 logger.exception("Timing source %s failed to %s", source.source_id, action)
                 self.source_errors[source.source_id] = f"{type(error).__name__}: {error}"
+                record(
+                    "TIMING_SOURCE_FAILED",
+                    module="races",
+                    page="races",
+                    result=action,
+                    source=source.source_id,
+                    error=type(error).__name__,
+                )
 
     def _race_time(self, timestamp_ns: int) -> int:
         return timestamp_ns - self._started_at_ns - self._paused_total_ns
@@ -241,24 +260,84 @@ class RaceEngine:
         return last is not None and timestamp_ns - last < SAME_POSITION_DEBOUNCE_NS
 
     def _on_sensor(self, event: SensorTriggered) -> None:
-        if self._status is not RaceStatus.RUNNING or event.timestamp_ns < self._started_at_ns:
+        self._note_timing(
+            "TIMING_EVENT_RECEIVED",
+            "received",
+            lane=event.lane,
+            position=event.position_id,
+            source=event.source_id,
+        )
+        if self._status is not RaceStatus.RUNNING:
+            self._note_timing("TIMING_EVENT_IGNORED", "race_not_running", lane=event.lane)
+            return
+        if event.timestamp_ns < self._started_at_ns:
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "invalid_timestamp",
+                lane=event.lane,
+                position=event.position_id,
+            )
             return
         if self._timestamp_in_pause(event.timestamp_ns):
+            self._note_timing(
+                "TIMING_EVENT_IGNORED", "paused", lane=event.lane, position=event.position_id
+            )
             return
         state = self._states.get(event.lane)
-        if state is None or state.finished:
+        if state is None:
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "unknown_lane",
+                lane=event.lane,
+                position=event.position_id,
+            )
+            return
+        if state.finished:
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "no_participant",
+                lane=event.lane,
+                position=event.position_id,
+            )
             return
         point = self._sequence[state.next_point]
         if event.position_id != point.id:
             logger.debug(
                 "Ignoring unexpected position %s on lane %s", event.position_id, event.lane
             )
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "wrong_position",
+                lane=event.lane,
+                position=event.position_id,
+                expected=point.id,
+            )
             return
         if self._repeats_same_pass(event.lane, event.position_id, event.timestamp_ns):
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "duplicate",
+                lane=event.lane,
+                position=event.position_id,
+            )
             return
         self._last_accepted_ns[(event.lane, event.position_id)] = event.timestamp_ns
 
         race_time = self._race_time(event.timestamp_ns)
+        if self._single_point and not state.clock_started:
+            state.clock_started = True
+            state.lap_start_ns = race_time
+            state.sector_start_ns = race_time
+            self._note_timing(
+                "LAP_TIMING_STARTED",
+                "started",
+                lane=event.lane,
+                position=event.position_id,
+                lap=state.lap_number,
+            )
+            self._publish_lap_started(state, event.timestamp_ns, race_time)
+            return
+
         participant = state.participant
         race_id = self._config.race_id
         self._bus.publish(
@@ -279,10 +358,20 @@ class RaceEngine:
             return
         self._complete_lap(state, event.timestamp_ns, race_time)
 
+    def _note_timing(self, event: str, result: str, **fields: object) -> None:
+        record(event, module="races", page="races", result=result, **fields)
+
     def _complete_lap(self, state: _ParticipantState, timestamp_ns: int, race_time: int) -> None:
         participant = state.participant
         lap_time = race_time - state.lap_start_ns
         state.lap_times_ns.append(lap_time)
+        self._note_timing(
+            "LAP_COMPLETED",
+            "completed",
+            lane=participant.lane,
+            lap=state.lap_number,
+            lap_time_ns=lap_time,
+        )
         state.last_lap_end_ns = race_time
         self._bus.publish(
             LapCompleted(

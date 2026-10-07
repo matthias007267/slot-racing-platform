@@ -36,6 +36,7 @@ from slot_racing.core.events import (
 from slot_racing.core.storage import Setting
 from slot_racing.core.timing import TimingSetupService, TimingSourceFactory
 from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.engine import SAME_POSITION_DEBOUNCE_NS
 from slot_racing.modules.races.runner import RaceRunner
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -196,6 +197,29 @@ def cross(
         rights.append(DetectionRoi(roi.x + block, roi.y, span_w, span_h))
     consume(device, painted(tuple(lefts), width, height))
     consume(device, painted(tuple(rights), width, height))
+
+
+def pass_again(
+    device: SyncCapture,
+    runner: RaceRunner,
+    events: list[Event],
+    *rois: DetectionRoi,
+    width: int = WIDTH,
+    height: int = HEIGHT,
+) -> None:
+    """Clear the line and cross it once more, after the same-position debounce.
+
+    The first start/finish crossing starts the lap clock. This one stores the lap.
+    """
+    last = [event.timestamp_ns for event in events if isinstance(event, SensorTriggered)]
+    if last:
+        remain = SAME_POSITION_DEBOUNCE_NS - (time.perf_counter_ns() - last[-1])
+        if remain > 0:
+            time.sleep(remain / 1_000_000_000 + 0.02)
+    consume(device, blank(width, height))
+    drive(runner)
+    cross(device, *rois, width=width, height=height)
+    drive(runner)
 
 
 def camera_threads() -> list[threading.Thread]:
@@ -375,11 +399,14 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
         ]
         # The stamp is taken in the capture thread, before this tick runs poll.
         assert before <= triggered[0].timestamp_ns <= after_capture
+        assert of_type(events, LapCompleted) == []
+        pass_again(device, runner, events, zone_rect(ZONE_X))
+        crossings = of_type(events, SensorTriggered)
         laps = of_type(events, LapCompleted)
         assert len(laps) == 1
         assert laps[0].lap_number == 1
         assert laps[0].lane == 1
-        assert laps[0].lap_time_ns == triggered[0].timestamp_ns
+        assert laps[0].lap_time_ns == crossings[-1].timestamp_ns - crossings[0].timestamp_ns
         finished = of_type(events, RaceFinished)
         assert len(finished) == 1
         assert finished[0].aborted is False
@@ -421,6 +448,7 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert [event.position_id for event in triggered] == ["start_finish"]
+        pass_again(device, runner, events, zone_rect(ZONE_X))
         assert runner.status is RaceStatus.FINISHED
     finally:
         runner.close()
@@ -439,6 +467,7 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
         drive(first)
         cross(device, zone_rect(ZONE_X))
         drive(first)
+        pass_again(device, first, first_events, zone_rect(ZONE_X))
         assert len(of_type(first_events, LapCompleted)) == 1
     finally:
         first.close()
@@ -470,6 +499,7 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
         assert [(event.position_id, event.lane, event.sensor_id) for event in triggered] == [
             ("start_finish", 1, "sensor-start_finish")
         ]
+        pass_again(device, second, second_events, zone_rect(0.0))
         assert second.status is RaceStatus.FINISHED
     finally:
         second.close()
@@ -508,6 +538,7 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
         ]
         assert triggered[0].timestamp_ns == triggered[1].timestamp_ns
         assert before <= triggered[0].timestamp_ns <= after_capture
+        pass_again(device, runner, events, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50))
         assert [(event.lane, event.lap_number) for event in of_type(events, LapCompleted)] == [
             (1, 1),
             (2, 1),
@@ -621,6 +652,7 @@ def test_pause_drops_frames_and_resume_does_not_count_a_car_already_in_the_zone(
         assert len(triggered) == 1
         assert before <= triggered[0].timestamp_ns <= after_capture
         assert triggered[0].position_id == "start_finish"
+        pass_again(device, runner, events, zone_rect(ZONE_X))
         assert runner.snapshot().status is RaceStatus.FINISHED
     finally:
         runner.close()
@@ -843,6 +875,7 @@ def test_saved_zones_scale_to_the_stored_resolution(
         triggered = of_type(events, SensorTriggered)
         assert len(triggered) == 1
         assert triggered[0].position_id == "start_finish"
+        pass_again(device, runner, events, expected, width=width, height=height)
         assert runner.status is RaceStatus.FINISHED
     finally:
         runner.close()
@@ -977,6 +1010,7 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
         assert snapshot.source_errors == ()
         triggered = of_type(events, SensorTriggered)
         assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)]
+        pass_again(device, runner, events, actual, width=frame_width, height=frame_height)
         assert of_type(events, LapCompleted)
         assert runner.status is RaceStatus.FINISHED
     finally:
@@ -1031,6 +1065,7 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
         cross(device, zone_rect(ZONE_X))
         drive(runner)
         assert runner.snapshot().source_errors == ()
+        pass_again(device, runner, events, zone_rect(ZONE_X))
         assert of_type(events, LapCompleted)
         assert live.findChildren(CameraStage) == []
         live.advance_start_cue()
@@ -1103,6 +1138,15 @@ def test_three_and_four_lanes_each_report_a_crossing(env: Env) -> None:
             triggered = of_type(events, SensorTriggered)
             assert [event.lane for event in triggered] == list(range(1, lane_count + 1))
             assert len({event.timestamp_ns for event in triggered}) == 1
+            pass_again(
+                device,
+                runner,
+                events,
+                *(
+                    zone_rect(ZONE_X, y=(lane - 1) * 0.25, height=height)
+                    for lane in range(1, lane_count + 1)
+                ),
+            )
             assert runner.status is RaceStatus.FINISHED
         finally:
             runner.close()
@@ -1126,6 +1170,7 @@ def test_a_camera_time_trial_keeps_running_after_a_lap_until_it_is_stopped(env: 
         drive(runner)
         cross(device, zone_rect(ZONE_X))
         drive(runner)
+        pass_again(device, runner, events, zone_rect(ZONE_X))
         assert len(of_type(events, LapCompleted)) == 1
         assert engine_status(runner) is RaceStatus.RUNNING
         assert env.races.require_race(race.id).status is RaceStatus.RUNNING
@@ -1165,6 +1210,7 @@ def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) 
         drive(again)
         cross(device, zone_rect(ZONE_X))
         drive(again)
+        pass_again(device, again, events, zone_rect(ZONE_X))
         assert len(of_type(events, LapCompleted)) == 1
         assert again.status is RaceStatus.FINISHED
         assert env.races.require_race(restarted.id).status is RaceStatus.FINISHED

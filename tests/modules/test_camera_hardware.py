@@ -14,7 +14,7 @@ import pytest
 
 from slot_racing.core.domain import RaceStatus, TimingLayout, TimingSensor, TimingSetup
 from slot_racing.core.errors import ProviderUnavailable
-from slot_racing.core.events import Event, LapCompleted, RaceFinished, SensorTriggered
+from slot_racing.core.events import Event, LapCompleted, SensorTriggered
 from slot_racing.core.timing import TimingSetupService, TimingSourceFactory
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, CameraReadError
@@ -138,7 +138,8 @@ def test_a_connected_camera_completes_a_lap(env: Env) -> None:
         assert devices.configs
         assert set(devices.configs) == {expected}
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not runner.is_finished:
+        triggered: list[SensorTriggered] = []
+        while time.monotonic() < deadline and not triggered:
             runner.tick()
             errors = runner.snapshot().source_errors
             if errors:
@@ -146,10 +147,9 @@ def test_a_connected_camera_completes_a_lap(env: Env) -> None:
                 if "frame size" in detail or "extends outside" in detail:
                     pytest.skip(f"camera frame does not match the opened picture: {detail}")
                 raise AssertionError(detail)
+            triggered = [event for event in events if isinstance(event, SensorTriggered)]
             time.sleep(0.02)
-        triggered = [event for event in events if isinstance(event, SensorTriggered)]
         assert triggered, "camera saw no lit scene inside the detection zone"
-        assert runner.is_finished
         event = triggered[0]
         assert event.source_id == "camera"
         assert event.sensor_id == "sensor-start_finish"
@@ -162,13 +162,14 @@ def test_a_connected_camera_completes_a_lap(env: Env) -> None:
         assert any(0 <= event.timestamp_ns - stamp <= 100_000_000 for stamp in stamps)
         assert sum(device.frames for device in devices.created) >= 1
         laps = [item for item in events if isinstance(item, LapCompleted)]
-        assert len(laps) == 1 and laps[0].lane == 1 and laps[0].lap_number == 1
-        assert laps[0].lap_time_ns == event.timestamp_ns
-        finished = [item for item in events if isinstance(item, RaceFinished)]
-        assert len(finished) == 1 and finished[0].aborted is False
-        assert finished[0].results[0].laps_completed == 1
-        assert runner.status is RaceStatus.FINISHED
-        assert lease.holder() is None
+        # One start/finish crossing starts the lap clock. It does not store a lap.
+        if len(triggered) == 1:
+            assert laps == []
+            assert runner.status is RaceStatus.RUNNING
+            assert runner.snapshot().rows[0].laps_completed == 0
+        else:
+            assert laps
+            assert laps[0].lap_time_ns == triggered[1].timestamp_ns - triggered[0].timestamp_ns
     finally:
         if env.controller.active is not None:
             env.controller.active.close()

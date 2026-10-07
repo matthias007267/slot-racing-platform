@@ -70,6 +70,15 @@ class TimingSource(ABC):
     def resume(self) -> None:  # noqa: B027
         """The race continues after a pause."""
 
+    def reported_positions(self) -> frozenset[str] | None:
+        """Position ids this source can emit.
+
+        ``None`` means the source covers every position of the session layout.
+        A source that only watches some of those positions returns that subset
+        so the race does not wait for a point that will never be reported.
+        """
+        return None
+
 
 class ManuallyTriggerable(ABC):
     """Optional capability of a timing source: it can simulate a car passing on request.

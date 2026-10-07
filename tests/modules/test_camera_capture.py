@@ -158,6 +158,10 @@ def started(
     return source, frames, received
 
 
+def _status(engine: RaceEngine) -> RaceStatus:
+    return engine.status
+
+
 def wait_for(predicate: Callable[[], bool]) -> None:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
@@ -430,6 +434,27 @@ def test_capture_frames_complete_a_lap_through_the_race_engine() -> None:
         capture.push(column(1, 32))
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline and not any(
+            isinstance(event, SensorTriggered) for event in events
+        ):
+            engine.poll_sources()
+            time.sleep(0.01)
+        triggered = [event for event in events if isinstance(event, SensorTriggered)]
+        assert len(triggered) == 1
+        assert triggered[0].sensor_id == "sensor-sf"
+        assert not any(isinstance(event, LapCompleted) for event in events)
+        assert engine.status is RaceStatus.RUNNING
+        time.sleep(0.25)
+
+        def push_and_detect(frame: GrayFrame) -> None:
+            seen = source.frames_observed
+            capture.push(frame)
+            wait_for(lambda: source.frames_observed > seen and source.caught_up())
+
+        push_and_detect(blank())
+        push_and_detect(column(1, 30))
+        push_and_detect(column(1, 32))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not any(
             isinstance(event, LapCompleted) for event in events
         ):
             engine.poll_sources()
@@ -437,10 +462,9 @@ def test_capture_frames_complete_a_lap_through_the_race_engine() -> None:
         laps = [event for event in events if isinstance(event, LapCompleted)]
         triggered = [event for event in events if isinstance(event, SensorTriggered)]
         assert len(laps) == 1
-        assert len(triggered) == 1
-        assert triggered[0].sensor_id == "sensor-sf"
-        assert triggered[0].timestamp_ns == laps[0].timestamp_ns
-        assert engine.status is RaceStatus.FINISHED
+        assert len(triggered) == 2
+        assert laps[0].lap_time_ns == triggered[1].timestamp_ns - triggered[0].timestamp_ns
+        assert _status(engine) is RaceStatus.FINISHED
     finally:
         engine.close()
 

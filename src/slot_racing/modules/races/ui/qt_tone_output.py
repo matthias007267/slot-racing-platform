@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import array
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Slot
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QtAudio
 
 from slot_racing.modules.races.ui.race_audio import (
@@ -25,10 +25,17 @@ from slot_racing.modules.races.ui.race_audio import (
 _FULL_VOLUME = 0.8
 
 
-class QtToneOutput:
-    """Plays a tone through ``QAudioSink`` without waiting for the buffer to drain."""
+class QtToneOutput(QObject):
+    """Plays a tone through ``QAudioSink`` without waiting for the buffer to drain.
+
+    ``stateChanged`` is still declared as ``QAudio::State`` while the Python enum
+    lives on ``QtAudio.State``. A slot typed as that signal argument raises
+    ``TypeError`` on PySide 6.11 when the device emits the state. The slot
+    therefore takes no argument and reads ``sink.state()`` itself.
+    """
 
     def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
         self._parent = parent
         self._format = QAudioFormat()
         self._format.setSampleRate(SAMPLE_RATE_HZ)
@@ -50,8 +57,18 @@ class QtToneOutput:
             return
         sink = QAudioSink(device, self._format, self._parent)
         self._live.append((sink, buffer))
-        sink.stateChanged.connect(lambda _state, item=(sink, buffer): self._release(item))
+        sink.stateChanged.connect(self._on_sink_state)
         sink.start(buffer)
+
+    @Slot()
+    def _on_sink_state(self) -> None:
+        sender = self.sender()
+        if not isinstance(sender, QAudioSink):
+            return
+        for item in tuple(self._live):
+            if item[0] is sender:
+                self._release(item)
+                return
 
     def _release(self, item: tuple[QAudioSink, QBuffer]) -> None:
         state = item[0].state()

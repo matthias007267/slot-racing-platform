@@ -121,6 +121,49 @@ def test_stopping_the_cue_does_not_play_go_later(qtbot: QtBot) -> None:
     assert output.calls == [(LAMP_TONE, AUDIO_VOLUME_DEFAULT), (LAMP_TONE, AUDIO_VOLUME_DEFAULT)]
 
 
+def test_sink_state_reaches_the_tone_slot_without_a_qaudio_conversion_error(qtbot: QtBot) -> None:
+    """The start tone listens to ``stateChanged`` without a ``QAudio::State`` slot.
+
+    PySide 6.11 still advertises that signal as ``QAudio::State`` while the
+    Python enum is ``QtAudio.State``. A typed slot cannot convert the argument
+    and raises ``TypeError`` when a device emits it. The slot takes no
+    argument and reads ``QAudioSink.state()``, which is ``QtAudio.State``.
+    """
+    pytest.importorskip("PySide6.QtMultimedia")
+    from PySide6.QtCore import QBuffer, QIODevice, Qt
+    from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QtAudio
+    from PySide6.QtWidgets import QApplication
+
+    from slot_racing.modules.races.ui.qt_tone_output import QtToneOutput
+
+    host = QWidget()
+    qtbot.addWidget(host)
+    output = QtToneOutput(host)
+    signatures = [
+        output.metaObject().method(index).methodSignature().toStdString()
+        for index in range(output.metaObject().methodOffset(), output.metaObject().methodCount())
+    ]
+    assert "_on_sink_state()" in signatures
+    assert not any("QAudio" in signature for signature in signatures)
+
+    audio_format = QAudioFormat()
+    audio_format.setSampleRate(22050)
+    audio_format.setChannelCount(1)
+    audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    sink = QAudioSink(audio_format, host)
+    buffer = QBuffer(host)
+    buffer.setData(b"\x00\x00" * 32)
+    assert buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+    sink.stateChanged.connect(output._on_sink_state, Qt.ConnectionType.QueuedConnection)
+    application = QApplication.instance()
+    assert application is not None
+    for state in (QtAudio.State.IdleState, QAudio.State.StoppedState):
+        output._live.append((sink, buffer))
+        sink.stateChanged.emit(state)
+        application.processEvents()
+        assert (sink, buffer) not in output._live
+
+
 def test_playback_returns_immediately_with_or_without_qt(qtbot: QtBot) -> None:
     host = QWidget()
     qtbot.addWidget(host)
