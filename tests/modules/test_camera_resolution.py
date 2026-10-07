@@ -146,6 +146,14 @@ def test_the_same_pixel_motion_crosses_at_20_10_and_5() -> None:
         assert crossings[0].position_id == POSITION
 
 
+def test_medium_sensitivity_still_crosses_a_clear_step_at_10_px() -> None:
+    found = _detector(10, sensitivity=50)
+    assert found.observe(_car(0), 0) == ()
+    crossings = found.observe(_car(40), 40_000_000)
+    assert len(crossings) == 1
+    assert crossings[0].position_id == POSITION
+
+
 def test_a_short_pixel_step_does_not_become_easier_at_a_finer_grid() -> None:
     """Eight pixels is below the 15 px shift. Finer tiles must not invent it."""
     for block in (20, 10, 5):
