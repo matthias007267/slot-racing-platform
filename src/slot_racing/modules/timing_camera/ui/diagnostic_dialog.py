@@ -29,11 +29,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +44,11 @@ from slot_racing.core.i18n import Translator
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
     to_detector_settings,
+)
+from slot_racing.modules.timing_camera.detection import (
+    ZoneInspection,
+    evaluate_detection_zone,
+    resolution_preset_name,
 )
 from slot_racing.modules.timing_camera.diagnostic import (
     MAX_LOG_LINES,
@@ -54,7 +61,7 @@ from slot_racing.modules.timing_camera.diagnostic import (
     DiagnosticView,
     diagnostic_config,
     format_live,
-    render_picture,
+    render_zone,
 )
 from slot_racing.modules.timing_camera.frame_source import TimedFrame
 from slot_racing.uikit.theme import COLORS, configure_page, set_role, set_tone
@@ -86,7 +93,8 @@ class DetectionDiagnosticDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("camera-diagnostic-dialog")
         self.setWindowTitle(translator.translate("camera.diagnostic.title"))
-        self.resize(980, 720)
+        self.resize(1180, 760)
+        self._cards: list[_ZoneCard] = []
         self._translator = translator
         self._host = host
         self._session: DiagnosticSession | None = None
@@ -105,11 +113,18 @@ class DetectionDiagnosticDialog(QDialog):
         self.view.setObjectName("camera-diagnostic-view")
         for item in DiagnosticView:
             self.view.addItem(self._tr(f"camera.diagnostic.view.{item.value}"), item.value)
-        self.preview = QLabel(self._tr("camera.diagnostic.preview"))
+        self._zone_host = QWidget()
+        self._zone_host.setObjectName("camera-diagnostic-zones")
+        self._zone_grid = QGridLayout(self._zone_host)
+        self._zone_grid.setContentsMargins(0, 0, 0, 0)
+        self._zone_grid.setSpacing(12)
+        self.preview = QScrollArea()
         self.preview.setObjectName("camera-diagnostic-preview")
-        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumSize(320, 180)
-        self.preview.setStyleSheet(f"background: {COLORS.background}; color: {COLORS.text_muted};")
+        self.preview.setWidgetResizable(True)
+        self.preview.setFrameShape(QFrame.Shape.NoFrame)
+        self.preview.setWidget(self._zone_host)
+        self.preview.setMinimumSize(520, 220)
+        self.preview.setStyleSheet(f"background: {COLORS.background};")
         self.metrics = QLabel(self._tr("camera.diagnostic.idle"))
         self.metrics.setObjectName("camera-diagnostic-metrics")
         self.metrics.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -301,30 +316,94 @@ class DetectionDiagnosticDialog(QDialog):
         config = self._config
         if config is None:
             return format_live(snapshot)
+        preset = resolution_preset_name(config.block_size)
+        name = preset if preset == "custom" else self._tr(f"camera.resolution.{preset}")
         return "\n".join(
             [
                 f"Kamera: {config.device_index}",
                 f"Angefordert: {config.requested_width} x {config.requested_height}",
                 f"Angefordert FPS: {config.requested_fps}",
-                f"Block: {config.block_size}",
+                self._translator.format("camera.diagnostic.resolution", name=name),
+                self._translator.format("camera.diagnostic.block", size=config.block_size),
                 f"Zonen: {len(config.zones)}",
                 format_live(snapshot),
             ]
         )
 
+    def resizeEvent(self, event: object) -> None:  # noqa: N802
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        self._reflow_cards()
+
     def _show_picture(self, snapshot: DiagnosticSnapshot) -> None:
         inspection = snapshot.inspection
         if inspection is None:
             return
-        picture = render_picture(inspection, self._view, scale=1)
-        image = _display_image(
-            picture,
-            self.preview.size(),
-            self._flash_zones,
-            time_now() < self._flash_until,
+        flashing = time_now() < self._flash_until
+        self._ensure_cards(len(inspection.zones))
+        fitted: list[tuple[str, QImage]] = []
+        for index, zone in enumerate(inspection.zones):
+            card = self._cards[index]
+            card.setVisible(True)
+            caption = self._translator.format(
+                "camera.diagnostic.zone_caption",
+                number=index + 1,
+                lane=zone.lane,
+                position=zone.position_id,
+            )
+            card.caption.setText(caption)
+            picture = render_zone(zone, self._view, scale=max(1, _zone_scale(zone)))
+            active = flashing and (index + 1 in self._flash_zones or zone.accepted)
+            image = _fit_zone(picture, card.image.size(), active=active)
+            card.image.setPixmap(QPixmap.fromImage(image))
+            card.meta.setText(self._zone_meta(zone))
+            fitted.append((caption, image))
+        for card in self._cards[len(inspection.zones) :]:
+            card.setVisible(False)
+        self._reflow_cards()
+        self._image = _compose_zones(fitted)
+
+    def _ensure_cards(self, count: int) -> None:
+        while len(self._cards) < count:
+            card = _ZoneCard()
+            self._cards.append(card)
+            self._zone_grid.addWidget(card, 0, len(self._cards) - 1)
+
+    def _reflow_cards(self) -> None:
+        visible = [card for card in self._cards if card.isVisible()]
+        if not visible:
+            return
+        width = max(self.preview.viewport().width(), 1)
+        columns = 1 if len(visible) == 1 else max(1, min(len(visible), width // 280))
+        for card in visible:
+            self._zone_grid.removeWidget(card)
+        for index, card in enumerate(visible):
+            self._zone_grid.addWidget(card, index // columns, index % columns)
+
+    def _zone_meta(self, zone: ZoneInspection) -> str:
+        rows = len(zone.analysis)
+        cols = len(zone.analysis[0]) if rows else 0
+        if rows < 1 or cols < 1:
+            return ""
+        assessed = evaluate_detection_zone(
+            cols * zone.block_size,
+            rows * zone.block_size,
+            zone.block_size,
+            zone.direction,
         )
-        self._image = image
-        self.preview.setPixmap(QPixmap.fromImage(image))
+        rating = self._tr(f"camera.diagnostic.quality.{assessed.rating.value}")
+        lines = [
+            self._translator.format("camera.diagnostic.grid", cols=cols, rows=rows),
+            self._translator.format("camera.diagnostic.quality", rating=rating),
+        ]
+        if zone.reason == "too_short":
+            samples = max(zone.sample_count, 1)
+            key = (
+                "camera.diagnostic.too_few_samples"
+                if samples == 1
+                else "camera.diagnostic.too_few_samples_many"
+            )
+            lines.append(self._translator.format(key, samples=samples))
+        return "\n".join(lines)
 
     def _show_log(self, text: str) -> None:
         lines = text.splitlines()
@@ -375,52 +454,101 @@ def _export_name(suffix: str) -> str:
     return f"camera-diagnostic-{stamp}.{suffix}"
 
 
-def _display_image(
-    picture: DiagnosticPicture,
-    target: QSize,
-    flash_zones: tuple[int, ...],
-    flashing: bool,
-) -> QImage:
-    """Enlarge blocks with hard edges, then draw overlays in display pixels.
+class _ZoneCard(QWidget):
+    """Caption above one zone preview. The caption is not painted into the pixels."""
 
-    The overlay is painted after scaling, so it is not a block value and it is
-    not fed back into detection.
-    """
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.caption = QLabel()
+        self.caption.setObjectName("camera-diagnostic-zone-caption")
+        self.caption.setWordWrap(True)
+        self.caption.setMinimumWidth(260)
+        self.image = QLabel()
+        self.image.setObjectName("camera-diagnostic-zone-image")
+        self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image.setFixedSize(300, 170)
+        self.image.setStyleSheet(f"background: {COLORS.background};")
+        self.meta = QLabel()
+        self.meta.setObjectName("camera-diagnostic-zone-meta")
+        self.meta.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.caption)
+        layout.addWidget(self.image)
+        layout.addWidget(self.meta)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+
+
+def _zone_scale(zone: ZoneInspection) -> int:
+    rows = len(zone.analysis)
+    cols = len(zone.analysis[0]) if rows else 1
+    longest = max(rows, cols, 1)
+    return max(1, min(12, 160 // longest))
+
+
+def _fit_zone(picture: DiagnosticPicture, target: QSize, *, active: bool) -> QImage:
+    """Scale one zone into ``target`` without cropping or stretching it."""
     source = QImage(
         picture.pixels,
         picture.width,
         picture.height,
         picture.width,
         QImage.Format.Format_Grayscale8,
+    ).copy()
+    color = source.convertToFormat(QImage.Format.Format_RGB32)
+    canvas = QImage(target, QImage.Format.Format_RGB32)
+    canvas.fill(QColor(COLORS.background))
+    fitted = color.scaled(
+        target,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.FastTransformation,
     )
-    color = source.copy().convertToFormat(QImage.Format.Format_RGB32)
-    fitted = color
-    if target.width() > picture.width and target.height() > picture.height:
-        fitted = color.scaled(
-            target,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-    scale_x = fitted.width() / picture.width
-    scale_y = fitted.height() / picture.height
-    painter = QPainter(fitted)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-    font = QFont()
-    font.setPixelSize(16)
-    painter.setFont(font)
-    for zone in picture.zones:
-        active = flashing and (zone.number in flash_zones or zone.accepted)
-        left = round(zone.x * scale_x)
-        top = round(zone.y * scale_y)
-        width = max(1, round(zone.width * scale_x) - 1)
-        height = max(1, round(zone.height * scale_y) - 1)
-        tone = QColor(COLORS.accent if active else COLORS.info)
-        painter.setPen(QPen(tone, 3 if active else 2))
-        painter.drawRect(left, top, width, height)
-        painter.setPen(QColor(COLORS.text))
-        painter.drawText(left + 8, top + 22, f"Z{zone.number} L{zone.lane} {zone.direction}")
-        if active:
-            painter.setPen(QColor(COLORS.accent))
-            painter.drawText(left + 8, top + 44, f"ZONE {zone.number} - DETECTION")
+    painter = QPainter(canvas)
+    left = (target.width() - fitted.width()) // 2
+    top = (target.height() - fitted.height()) // 2
+    painter.drawImage(left, top, fitted)
+    tone = QColor(COLORS.accent if active else COLORS.info)
+    painter.setPen(QPen(tone, 3 if active else 2))
+    painter.drawRect(left, top, max(1, fitted.width() - 1), max(1, fitted.height() - 1))
     painter.end()
-    return fitted
+    return canvas
+
+
+def _compose_zones(zones: list[tuple[str, QImage]]) -> QImage:
+    """Side-by-side snapshot. Captions sit above each preview and can wrap."""
+    if not zones:
+        image = QImage(1, 1, QImage.Format.Format_RGB32)
+        image.fill(QColor(COLORS.background))
+        return image
+    columns = 1 if len(zones) == 1 else 2
+    card_width = 320
+    caption_height = 48
+    gap = 16
+    rows = (len(zones) + columns - 1) // columns
+    sample = zones[0][1]
+    row_height = caption_height + sample.height() + 8
+    width = columns * card_width + (columns + 1) * gap
+    height = rows * row_height + (rows + 1) * gap
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(QColor(COLORS.background))
+    painter = QPainter(image)
+    font = QFont()
+    font.setPixelSize(14)
+    painter.setFont(font)
+    painter.setPen(QColor(COLORS.text))
+    for index, (caption, preview) in enumerate(zones):
+        column = index % columns
+        row = index // columns
+        x = gap + column * (card_width + gap)
+        y = gap + row * (row_height + gap)
+        painter.drawText(
+            x,
+            y,
+            card_width,
+            caption_height,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap),
+            caption,
+        )
+        painter.drawImage(x, y + caption_height, preview)
+    painter.end()
+    return image

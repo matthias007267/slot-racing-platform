@@ -39,6 +39,14 @@ class ZoneState(StrEnum):
     OCCUPIED = "occupied"
 
 
+class ZoneRating(StrEnum):
+    """How reliable a zone's analysis grid is. Not a reason to refuse saving."""
+
+    GOOD = "good"
+    LIMITED = "limited"
+    CRITICAL = "critical"
+
+
 class TravelDirection(StrEnum):
     """The direction a car is expected to travel through the zone."""
 
@@ -105,12 +113,35 @@ class DetectorSettings:
 
 @dataclass(frozen=True, slots=True)
 class SensitivityProfile:
-    """Internal thresholds derived from one sensitivity value."""
+    """Internal thresholds derived from one sensitivity value.
+
+    ``min_blocks`` and ``min_shift`` are expressed for a 20 px tile. A finer
+    grid converts them to the same area and the same pixel travel.
+    """
 
     difference: float
     min_blocks: int
     min_shift: float
     window_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneAssessment:
+    """Analysis-grid quality of one zone after it has been scaled to the capture.
+
+    ``warnings`` are stable codes. The UI translates them. ``camera_fps`` does
+    not change the rating: speed is unknown, so the interval is only context.
+    """
+
+    usable_blocks_x: int
+    usable_blocks_y: int
+    blocks_in_travel_direction: int
+    blocks_cross_direction: int
+    block_size: int
+    rating: ZoneRating
+    warnings: tuple[str, ...]
+    camera_fps: int | None
+    frame_interval_ms: int | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -208,9 +239,30 @@ _RELEASE_RATIO = 0.5
 # At about 25 fps that is a few frames. It is not a cooldown between cars.
 _RELEASE_STABLE_NS = 100_000_000
 
-# Motion below this many blocks is not travel. Every sensitivity profile asks
-# for a larger shift than this (0.75 to 1.25 blocks).
+# Motion below this many blocks of the 20 px reference tile is not travel.
+# Every sensitivity profile asks for a larger shift than this (0.75 to 1.25
+# reference blocks, 15 to 25 pixels). A finer grid uses the same pixel distance.
 _STABLE_SHIFT = 0.5
+
+# The sensitivity numbers were chosen for 20 px tiles. Finer tiles keep that
+# area and that pixel shift instead of treating one small tile as one old tile.
+REFERENCE_BLOCK_PX = 20
+
+# Named steps of the detection-resolution control. Stored documents keep the
+# pixel edge in ``block_size``; a missing value stays at the coarse step.
+RESOLUTION_PRESETS: tuple[tuple[str, int], ...] = (
+    ("coarse", 20),
+    ("medium", 15),
+    ("fine", 10),
+    ("very_fine", 5),
+)
+
+# Usable analysis tiles, after the zone is scaled to the captured picture.
+# Travel is the axis the car crosses. Cross is the other axis.
+TRAVEL_CRITICAL_BELOW = 6
+TRAVEL_VERY_SMALL_BELOW = 8
+TRAVEL_LIMITED_BELOW = 10
+CROSS_MINIMUM_BLOCKS = 6
 
 # Ignore blends smaller than this gray level so an unchanged frame is not
 # reported as a reference update.
@@ -425,7 +477,8 @@ class LaneCrossingDetector:
         difference = np.abs(current - reference)
         mask = difference >= profile.difference
         block = self._blocks[index]
-        required = _required_blocks(profile.min_blocks, int(mask.shape[0]), int(mask.shape[1]))
+        scaled_blocks = required_blocks_for_area(profile.min_blocks, block)
+        required = _required_blocks(scaled_blocks, int(mask.shape[0]), int(mask.shape[1]))
         component = _largest_component(mask, required)
         key = (zone.position_id, zone.lane)
         samples = self._samples[index]
@@ -448,7 +501,7 @@ class LaneCrossingDetector:
             )
 
         assert timestamp_ns is not None
-        self._follow_component(memory, timestamp_ns, strength, count, centroid)
+        self._follow_component(memory, timestamp_ns, strength, count, centroid, block)
         crossing, shift, expired, accepted, reason, sample_count = self._classify(
             zone,
             key,
@@ -459,6 +512,7 @@ class LaneCrossingDetector:
             timestamp_ns,
             memory,
             mask,
+            block,
         )
         if reason in {"clear", "insufficient_motion", "below_size"} and _absorbing(
             memory, mask, self._states[key], component is not None
@@ -496,6 +550,7 @@ class LaneCrossingDetector:
         timestamp_ns: int,
         memory: _ZoneMemory,
         mask: np.ndarray,
+        block: int,
     ) -> tuple[LaneCrossing | None, float | None, int, bool, str, int]:
         """Direction decision. The reference is still the one this frame compared."""
         profile = self._profile
@@ -538,7 +593,8 @@ class LaneCrossingDetector:
         shift = _travel_shift(
             self._settings.direction, oldest[1], oldest[2], centroid_x, centroid_y
         )
-        if shift >= profile.min_shift:
+        limit = shift_threshold_blocks(profile.min_shift, block, self._settings.block_size)
+        if shift >= limit:
             self._states[key] = ZoneState.OCCUPIED
             samples.clear()
             crossing = LaneCrossing(
@@ -548,7 +604,7 @@ class LaneCrossingDetector:
                 foreground_pixels=count,
             )
             return crossing, shift, expired, True, "accepted", used
-        if shift <= -profile.min_shift:
+        if shift <= -limit:
             samples.clear()
             samples.append((timestamp_ns, centroid_x, centroid_y))
             return None, shift, expired, False, "wrong_direction", 1
@@ -561,6 +617,7 @@ class LaneCrossingDetector:
         strength: float,
         count: int,
         centroid: tuple[float, float] | None,
+        block: int,
     ) -> None:
         """Track the vehicle peak and whether the current group has stopped moving."""
         memory.release_candidate = False
@@ -582,7 +639,10 @@ class LaneCrossingDetector:
         else:
             distance = math.hypot(centroid[0] - anchor[0], centroid[1] - anchor[1])
             size_delta = abs(count - memory.stable_blocks)
-            moved = distance >= _STABLE_SHIFT or size_delta > max(1, memory.stable_blocks // 4)
+            stable_limit = stable_shift_blocks(block, self._settings.block_size)
+            moved = distance >= stable_limit or size_delta > max(
+                _size_floor(block, self._settings.block_size), memory.stable_blocks // 4
+            )
         if moved:
             memory.stable_since_ns = timestamp_ns
             memory.stable_centroid = centroid
@@ -741,6 +801,7 @@ class LaneCrossingDetector:
                     sample_count,
                     samples_expired,
                     block_size,
+                    self._settings.block_size,
                     state,
                     accepted,
                     reported,
@@ -787,6 +848,7 @@ class LaneCrossingDetector:
                         0,
                         0,
                         self._blocks[index],
+                        self._settings.block_size,
                         ZoneState.CLEAR,
                         False,
                         "calibrated",
@@ -874,12 +936,133 @@ def create_lane_detector(
     return LaneCrossingDetector(settings, background=background)
 
 
+def resolution_preset_name(block_size: int) -> str:
+    """Preset name for a stored tile edge, or ``custom`` when it is not a step."""
+    for name, size in RESOLUTION_PRESETS:
+        if size == block_size:
+            return name
+    return "custom"
+
+
+def minimum_component_area_px(min_blocks: int) -> int:
+    """Pixel area of ``min_blocks`` reference tiles. Sensitivity sets ``min_blocks``."""
+    return min_blocks * REFERENCE_BLOCK_PX * REFERENCE_BLOCK_PX
+
+
+def required_blocks_for_area(min_blocks: int, block_size: int) -> int:
+    """How many current tiles cover the sensitivity's reference area.
+
+    At 20 px this is ``min_blocks`` itself. A 5 px tile needs sixteen times as
+    many tiles for the same area, so a finer grid is not sixteen times easier.
+    """
+    if block_size < 1:
+        raise ValueError("block_size must be positive")
+    area = minimum_component_area_px(min_blocks)
+    return math.ceil(area / (block_size * block_size))
+
+
+def shift_threshold_blocks(min_shift: float, block_size: int, requested: int) -> float:
+    """Shift limit in tiles of the grid that is actually analyzed.
+
+    ``min_shift`` is in 20 px tiles. The same travel in pixels is
+    ``min_shift * 20``. Dividing by the current tile edge keeps that distance.
+    A zone thinner than the requested tile is already split into two steps;
+    that grid keeps the original tile-count limit, because the zone cannot
+    contain a 15 px centroid move.
+    """
+    if block_size < 1:
+        raise ValueError("block_size must be positive")
+    if block_size != requested:
+        return min_shift
+    return min_shift * REFERENCE_BLOCK_PX / block_size
+
+
+def stable_shift_blocks(block_size: int, requested: int) -> float:
+    """Centroid jitter, in current tiles, that still counts as the car moving."""
+    return shift_threshold_blocks(_STABLE_SHIFT, block_size, requested)
+
+
+def _size_floor(block_size: int, requested: int) -> int:
+    """Smallest block-count change that counts as a different object.
+
+    One reference tile of area. A shrunk thin-zone grid keeps a change of one
+    of its own tiles.
+    """
+    if block_size != requested:
+        return 1
+    return max(1, math.ceil((REFERENCE_BLOCK_PX * REFERENCE_BLOCK_PX) / (block_size * block_size)))
+
+
+def evaluate_detection_zone(
+    actual_zone_width: int,
+    actual_zone_height: int,
+    block_size: int,
+    direction: TravelDirection,
+    camera_fps: int | None = None,
+) -> ZoneAssessment:
+    """Rate the analysis grid of a zone that is already in capture pixels.
+
+    Partial edge tiles are ignored, matching :func:`block_means`. The rating
+    uses full tiles along the travel direction and across it. It does not
+    estimate how many frames a car will spend in the zone.
+    """
+    if isinstance(actual_zone_width, bool) or isinstance(actual_zone_height, bool):
+        raise TypeError("zone size must be an integer")
+    if actual_zone_width < 1 or actual_zone_height < 1:
+        raise ValueError("zone size must be positive")
+    require_range("block_size", block_size, 1, 128)
+    if not isinstance(direction, TravelDirection):
+        raise TypeError("direction must be a TravelDirection")
+    effective = effective_block_size(block_size, actual_zone_width, actual_zone_height, direction)
+    usable_x = actual_zone_width // effective
+    usable_y = actual_zone_height // effective
+    horizontal = direction in (TravelDirection.LEFT_TO_RIGHT, TravelDirection.RIGHT_TO_LEFT)
+    travel = usable_x if horizontal else usable_y
+    cross = usable_y if horizontal else usable_x
+    warnings: list[str] = []
+    if travel < TRAVEL_CRITICAL_BELOW:
+        rating = ZoneRating.CRITICAL
+        warnings.append("travel_critical")
+    elif travel < TRAVEL_LIMITED_BELOW:
+        rating = ZoneRating.LIMITED
+        if travel < TRAVEL_VERY_SMALL_BELOW:
+            warnings.append("travel_very_small")
+        else:
+            warnings.append("travel_limited")
+    else:
+        rating = ZoneRating.GOOD
+    if cross < CROSS_MINIMUM_BLOCKS:
+        warnings.append("cross_narrow")
+        if rating is ZoneRating.GOOD:
+            rating = ZoneRating.LIMITED
+    interval: int | None = None
+    fps: int | None = None
+    if isinstance(camera_fps, int) and not isinstance(camera_fps, bool) and camera_fps > 0:
+        fps = camera_fps
+        interval = round(1000 / camera_fps)
+    return ZoneAssessment(
+        usable_blocks_x=usable_x,
+        usable_blocks_y=usable_y,
+        blocks_in_travel_direction=travel,
+        blocks_cross_direction=cross,
+        block_size=effective,
+        rating=rating,
+        warnings=tuple(warnings),
+        camera_fps=fps,
+        frame_interval_ms=interval,
+    )
+
+
 def sensitivity_profile(level: int) -> SensitivityProfile:
     """Map one sensitivity slider onto the internal detection thresholds.
 
-    ``0`` is strict: a large brightness step, four connected blocks, a shift of
-    more than one block and a short window. ``100`` is lenient. ``50`` accepts
-    a one-block step of a small connected group inside about 1.4 seconds.
+    ``0`` is strict: a large brightness step, four reference tiles, a shift of
+    more than one reference tile and a short window. ``100`` is lenient.
+    ``50`` accepts a one-tile step of a small connected group inside about
+    1.4 seconds. ``difference`` is the gray level of a block mean. A uniform
+    brightness step does not change with the tile size, so it is not scaled.
+    ``min_blocks`` and ``min_shift`` are in 20 px reference tiles; the detector
+    converts them to the current grid.
     """
     require_range("sensitivity", level, 0, 100)
     unit = level / 100
@@ -942,6 +1125,7 @@ def _zone_inspection(
     sample_count: int,
     samples_expired: int,
     block_size: int,
+    requested_block: int,
     state: ZoneState,
     accepted: bool,
     reason: str,
@@ -967,6 +1151,8 @@ def _zone_inspection(
         component_blocks = int(component.shape[0])
     rows = int(mask.shape[0]) if mask.ndim == 2 else 0
     cols = int(mask.shape[1]) if mask.ndim == 2 else 0
+    scaled_blocks = required_blocks_for_area(profile.min_blocks, block_size)
+    applied_shift = shift_threshold_blocks(profile.min_shift, block_size, requested_block)
     return ZoneInspection(
         position_id=zone.position_id,
         lane=zone.lane,
@@ -990,8 +1176,8 @@ def _zone_inspection(
         component_blocks=component_blocks,
         difference_threshold=profile.difference,
         min_blocks=profile.min_blocks,
-        required_blocks=_required_blocks(profile.min_blocks, rows, cols),
-        min_shift=profile.min_shift,
+        required_blocks=_required_blocks(scaled_blocks, rows, cols),
+        min_shift=applied_shift,
         window_ns=profile.window_ns,
         direction=direction,
         reference_frozen=memory.reference_frozen,

@@ -34,12 +34,34 @@ class CameraTimingPlugin(Plugin):
             "camera.field.lane": "Lane",
             "camera.field.direction": "Fahrtrichtung",
             "camera.field.sensitivity": "Empfindlichkeit",
+            "camera.field.detection_resolution": "Erkennungsauflösung",
             "camera.direction.top_to_bottom": "↓  Oben nach unten",
             "camera.direction.bottom_to_top": "↑  Unten nach oben",
             "camera.direction.left_to_right": "→  Links nach rechts",
             "camera.direction.right_to_left": "←  Rechts nach links",
             "camera.sensitivity.less": "weniger",
             "camera.sensitivity.more": "mehr",
+            "camera.resolution.coarse": "Grob",
+            "camera.resolution.medium": "Mittel",
+            "camera.resolution.fine": "Fein",
+            "camera.resolution.very_fine": "Sehr fein",
+            "camera.resolution.value": "{name} – {size} × {size} px",  # noqa: RUF001
+            "camera.zone.quality.limited": (
+                "Die Erkennungszone ist in Fahrtrichtung relativ klein. "
+                "Schnelle Fahrzeuge werden möglicherweise nur in wenigen Kamerabildern erfasst. "
+                "Zone nach Möglichkeit vergrößern."
+            ),
+            "camera.zone.quality.critical": (
+                "Die Erkennungszone ist für eine zuverlässige Richtungserkennung sehr klein. "
+                "Vergrößere die Zone insbesondere in Fahrtrichtung."
+            ),
+            "camera.zone.quality.cross": (
+                "Quer zur Fahrtrichtung ist die Zone schmal. "
+                "Das Fahrzeug sollte vollständig in der Zone liegen."
+            ),
+            "camera.zone.quality.fps": (
+                "Eingestellte Bildrate: {fps} FPS. Zeit zwischen Bildern: ca. {interval} ms."
+            ),
             "camera.device": "Kamera {index}",
             "camera.resolution": "{width} × {height}",  # noqa: RUF001
             "camera.fps": "{fps}",
@@ -72,6 +94,20 @@ class CameraTimingPlugin(Plugin):
             "camera.diagnostic.snapshot_saved": "Snapshot gespeichert.",
             "camera.diagnostic.snapshot_missing": "Noch kein Analysebild vorhanden.",
             "camera.diagnostic.preview": "Berechnungsvorschau",
+            "camera.diagnostic.resolution": "Erkennungsauflösung: {name}",
+            "camera.diagnostic.block": "Blockgröße: {size} × {size} px",  # noqa: RUF001
+            "camera.diagnostic.grid": "Analyseraster: {cols} × {rows}",  # noqa: RUF001
+            "camera.diagnostic.quality": "Qualität: {rating}",
+            "camera.diagnostic.quality.good": "Gut",
+            "camera.diagnostic.quality.limited": "Eingeschränkt",
+            "camera.diagnostic.quality.critical": "Kritisch",
+            "camera.diagnostic.zone_caption": "Zone {number} · Spur {lane} · {position}",
+            "camera.diagnostic.too_few_samples": (
+                "Richtungsbestimmung nicht möglich: nur 1 verwertbares Bewegungssample."
+            ),
+            "camera.diagnostic.too_few_samples_many": (
+                "Richtungsbestimmung nicht möglich: nur {samples} verwertbare Bewegungssamples."
+            ),
             "camera.status.live": "Live",
             "camera.status.offline": "Kamera nicht verfügbar",
             "camera.status.offline_detail": "Kamera konnte nicht geöffnet werden.",

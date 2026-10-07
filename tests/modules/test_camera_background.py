@@ -1,6 +1,6 @@
 """Adaptive background reference and release after a car has left.
 
-The picture is 80 by 40 pixels with 4-pixel blocks, so the zone is a 20 by 10
+The picture is 400 by 200 pixels with 20-pixel blocks, so the zone is a 20 by 10
 grid. A car covers 48 of those blocks. A static leftover covers 12, which is
 still more than ``required_blocks`` and would have kept the old detector
 occupied.
@@ -23,9 +23,10 @@ from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from tests.modules.test_camera_detection import blob, square_detector
 
-WIDTH = 80
-HEIGHT = 40
-BLOCK = 4
+WIDTH = 400
+HEIGHT = 200
+BLOCK = 20
+_PX = 5
 POSITION = "start_finish"
 CAR = 220
 REST = 50
@@ -64,11 +65,14 @@ def picture(value: int = 0) -> GrayFrame:
 
 
 def car_at(x: int, *, value: int = CAR, base: int = 0) -> GrayFrame:
-    return picture(base).paint(DetectionRoi(x, 0, 32, 24), value)
+    return picture(base).paint(DetectionRoi(x * _PX, 0, 32 * _PX, 24 * _PX), value)
 
 
 def residual(base: int = 0) -> GrayFrame:
-    return picture(base).paint(DetectionRoi(4, 4, 16, 12), REST if base == 0 else base + 40)
+    return picture(base).paint(
+        DetectionRoi(4 * _PX, 4 * _PX, 16 * _PX, 12 * _PX),
+        REST if base == 0 else base + 40,
+    )
 
 
 def detector(
@@ -109,10 +113,10 @@ def test_a_normal_pass_is_still_accepted() -> None:
 
 def test_each_travel_direction_accepts_at_25_fps() -> None:
     cases = (
-        (TravelDirection.LEFT_TO_RIGHT, (0, 0), (10, 0)),
-        (TravelDirection.RIGHT_TO_LEFT, (20, 0), (10, 0)),
-        (TravelDirection.TOP_TO_BOTTOM, (0, 0), (0, 10)),
-        (TravelDirection.BOTTOM_TO_TOP, (0, 20), (0, 10)),
+        (TravelDirection.LEFT_TO_RIGHT, (0, 0), (20, 0)),
+        (TravelDirection.RIGHT_TO_LEFT, (40, 0), (20, 0)),
+        (TravelDirection.TOP_TO_BOTTOM, (0, 0), (0, 20)),
+        (TravelDirection.BOTTOM_TO_TOP, (0, 40), (0, 20)),
     )
     for direction, start, end in cases:
         found = square_detector(direction)
@@ -234,13 +238,13 @@ def test_zones_adapt_their_references_independently() -> None:
     wide = GrayFrame.blank(WIDTH * 2, HEIGHT, 0)
     found = LaneCrossingDetector(settings, background=wide)
     found.set_inspection(True)
-    entered = wide.paint(DetectionRoi(0, 0, 32, 24), CAR)
-    parked = wide.paint(DetectionRoi(32, 0, 32, 24), CAR)
+    entered = wide.paint(DetectionRoi(0, 0, 32 * _PX, 24 * _PX), CAR)
+    parked = wide.paint(DetectionRoi(32 * _PX, 0, 32 * _PX, 24 * _PX), CAR)
     assert found.observe(entered, 0) == ()
     assert len(found.observe(parked, FRAME_NS)) == 1
     for step in range(1, 40):
         brighter = GrayFrame.blank(WIDTH * 2, HEIGHT, 0)
-        brighter = brighter.paint(DetectionRoi(32, 0, 32, 24), CAR)
+        brighter = brighter.paint(DetectionRoi(32 * _PX, 0, 32 * _PX, 24 * _PX), CAR)
         brighter = brighter.paint(DetectionRoi(WIDTH, 0, WIDTH, HEIGHT), step)
         found.observe(brighter, step * 100_000_000)
     inspection = found.last_inspection()
@@ -256,18 +260,18 @@ def test_zones_adapt_their_references_independently() -> None:
 def test_low_and_high_sensitivity_still_cross() -> None:
     strict = square_detector(sensitivity=0)
     assert strict.observe(blob(0, 0), 0) == ()
-    assert strict.observe(blob(10, 0), 100_000_000) == ()
-    assert len(strict.observe(blob(20, 0), 200_000_000)) == 1
+    assert strict.observe(blob(20, 0), 100_000_000) == ()
+    assert len(strict.observe(blob(40, 0), 200_000_000)) == 1
 
     loose = square_detector(sensitivity=100)
     assert loose.observe(blob(0, 0, value=20), 0) == ()
-    assert len(loose.observe(blob(10, 0, value=20), FRAME_NS)) == 1
+    assert len(loose.observe(blob(20, 0, value=20), FRAME_NS)) == 1
 
 
 def test_block_size_and_a_small_zone_still_cross() -> None:
     small = square_detector(block_size=10)
     assert small.observe(blob(0, 0), 0) == ()
-    assert len(small.observe(blob(10, 0), FRAME_NS)) == 1
+    assert len(small.observe(blob(20, 0), FRAME_NS)) == 1
 
     coarse = detector(block_size=8)
     assert coarse.observe(car_at(0), 0) == ()
