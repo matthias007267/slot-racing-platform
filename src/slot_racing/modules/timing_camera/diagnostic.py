@@ -25,6 +25,9 @@ from slot_racing.modules.timing_camera.detection import (
     LaneCrossingDetector,
     ZoneInspection,
     create_lane_detector,
+    evaluate_detection_zone,
+    minimum_component_area_px,
+    resolution_preset_name,
     sensitivity_profile,
 )
 from slot_racing.modules.timing_camera.frame_source import TimedFrame
@@ -151,6 +154,8 @@ class ActivitySummary:
     direction_confirmed: bool
     detection_event: bool
     reason: str
+    activity_frames: int
+    direction_samples: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +212,8 @@ class _Burst:
     detection_event: bool
     reason: str
     last_reason: str
+    frames: int
+    direction_samples: int
 
 
 def diagnostic_config(
@@ -272,9 +279,13 @@ def format_header(config: DiagnosticConfig) -> str:
         "Processing: per-zone crop, then mean of each full block; partial tiles dropped",
         f"Zone count: {len(config.zones)}",
         f"Sensitivity: {config.sensitivity}",
+        f"Detection resolution: {resolution_preset_name(config.block_size)}",
+        f"Block size: {config.block_size} x {config.block_size}",
         f"Difference threshold: {config.difference_threshold:.2f}",
         f"Minimum connected blocks: {config.min_blocks}",
+        (f"Normalized minimum component area: {minimum_component_area_px(config.min_blocks)} px"),
         f"Minimum shift: {config.min_shift:.2f}",
+        f"Minimum shift px: {config.min_shift * 20:.2f}",
         f"Direction window ms: {config.window_ns / 1_000_000:.1f}",
         f"Travel direction: {config.direction}",
         "",
@@ -344,6 +355,8 @@ def format_live(snapshot: DiagnosticSnapshot) -> str:
                 f"Active ratio: {zone.active_ratio:.3f}",
                 f"Threshold: {zone.difference_threshold:.2f}",
                 f"Required blocks: {zone.required_blocks}",
+                f"Analyseraster: {cols} x {rows}",
+                f"Zone quality: {_zone_quality_name(zone)}",
                 f"Component blocks: {zone.component_blocks}",
                 f"Centroid: {centroid}",
                 f"Shift: {shift}",
@@ -362,6 +375,33 @@ def format_live(snapshot: DiagnosticSnapshot) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def render_zone(zone: ZoneInspection, view: DiagnosticView, *, scale: int = 1) -> DiagnosticPicture:
+    """One zone's analysis grid, nearest-neighbor enlarged. No caption, no crop."""
+    if not isinstance(view, DiagnosticView):
+        raise TypeError("view must be a DiagnosticView")
+    if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
+        raise ValueError("scale must be at least 1")
+    grid = _view_grid(zone, view)
+    enlarged = np.repeat(np.repeat(grid, scale, axis=0), scale, axis=1)
+    height = int(enlarged.shape[0])
+    width = int(enlarged.shape[1])
+    if height < 1 or width < 1:
+        return DiagnosticPicture(1, 1, b"\x00", (), view)
+    box = ZoneBox(
+        number=1,
+        position_id=zone.position_id,
+        lane=zone.lane,
+        x=0,
+        y=0,
+        width=width,
+        height=height,
+        accepted=zone.accepted,
+        direction=zone.direction.value,
+        reason=zone.reason,
+    )
+    return DiagnosticPicture(width, height, enlarged.tobytes(), (box,), view)
 
 
 def render_picture(
@@ -644,6 +684,8 @@ class DiagnosticSession:
             self._actual = (frame.width, frame.height)
             if not self._actual_logged:
                 self._append_locked(f"Actual resolution: {frame.width} x {frame.height}")
+                for line in _scaled_zone_lines(self._settings, self._config.requested_fps):
+                    self._append_locked(line)
                 self._actual_logged = True
             elapsed_ns = delivered.timestamp_ns - self._first_ns
             self._append_frame_locked(delivered, dt, elapsed, inspection, crossings, elapsed_ns)
@@ -784,6 +826,8 @@ class DiagnosticSession:
                     detection_event=zone.accepted,
                     reason=zone.reason,
                     last_reason=zone.reason,
+                    frames=1,
+                    direction_samples=zone.sample_count,
                 )
                 self._bursts[key] = burst
                 self._append_activity_locked(index, zone, elapsed_ns, opened=True)
@@ -793,6 +837,8 @@ class DiagnosticSession:
                 burst.peak_difference = max(burst.peak_difference, zone.max_difference)
                 burst.direction_confirmed = burst.direction_confirmed or zone.accepted
                 burst.detection_event = burst.detection_event or zone.accepted
+                burst.frames += 1
+                burst.direction_samples = max(burst.direction_samples, zone.sample_count)
                 if zone.accepted:
                     burst.reason = "accepted"
                 elif not burst.detection_event:
@@ -822,7 +868,9 @@ class DiagnosticSession:
                 peak_difference=burst.peak_difference,
                 direction_confirmed=burst.direction_confirmed,
                 detection_event=burst.detection_event,
-                reason=burst.reason,
+                reason=_activity_reason(burst.reason, detected=burst.detection_event),
+                activity_frames=burst.frames,
+                direction_samples=burst.direction_samples,
             )
             self._activities.append(summary)
             zone = _zone_by_key(inspection, key)
@@ -877,7 +925,10 @@ class DiagnosticSession:
                     f"ZONE {summary.zone_number} ACTIVITY_END",
                     f"lane={summary.lane}",
                     f"position={summary.position_id}",
+                    f"activity_frames={summary.activity_frames}",
+                    f"activity_duration_ms={summary.duration_ns / 1_000_000:.1f}",
                     f"duration_ms={summary.duration_ns / 1_000_000:.1f}",
+                    f"direction_samples={summary.direction_samples}",
                     f"peak_changed_blocks={summary.peak_changed_blocks}",
                     f"peak_changed_ratio={summary.peak_changed_ratio:.3f}",
                     f"peak_difference={summary.peak_difference:.2f}",
@@ -1066,8 +1117,63 @@ def _close_burst(
         peak_difference=burst.peak_difference,
         direction_confirmed=burst.direction_confirmed,
         detection_event=burst.detection_event,
-        reason=closed_reason,
+        reason=_activity_reason(closed_reason, detected=burst.detection_event),
+        activity_frames=burst.frames,
+        direction_samples=burst.direction_samples,
     )
+
+
+def _activity_reason(reason: str, *, detected: bool) -> str:
+    """Name the algorithm fact that stopped a burst. Not a guess about speed."""
+    if detected:
+        return "accepted"
+    return {
+        "too_short": "too_few_direction_samples",
+        "below_size": "below_component_size",
+        "insufficient_motion": "below_shift",
+        "wrong_direction": "wrong_direction",
+    }.get(reason, reason)
+
+
+def _zone_quality_name(zone: ZoneInspection) -> str:
+    rows = len(zone.analysis)
+    cols = len(zone.analysis[0]) if rows else 0
+    if rows < 1 or cols < 1:
+        return "n/a"
+    assessed = evaluate_detection_zone(
+        cols * zone.block_size,
+        rows * zone.block_size,
+        zone.block_size,
+        zone.direction,
+    )
+    return assessed.rating.value
+
+
+def _scaled_zone_lines(settings: DetectorSettings, fps: int) -> tuple[str, ...]:
+    lines: list[str] = []
+    for index, zone in enumerate(settings.zones, start=1):
+        assessed = evaluate_detection_zone(
+            zone.roi.width,
+            zone.roi.height,
+            settings.block_size,
+            settings.direction,
+            fps,
+        )
+        lines.append(
+            " ".join(
+                [
+                    f"Zone {index} scaled:",
+                    f"width={zone.roi.width}",
+                    f"height={zone.roi.height}",
+                    f"grid={assessed.usable_blocks_x}x{assessed.usable_blocks_y}",
+                    f"travel_blocks={assessed.blocks_in_travel_direction}",
+                    f"cross_blocks={assessed.blocks_cross_direction}",
+                    f"quality={assessed.rating.value}",
+                    f"block={assessed.block_size}",
+                ]
+            )
+        )
+    return tuple(lines)
 
 
 def _zone_by_key(inspection: FrameInspection | None, key: tuple[str, int]) -> ZoneInspection | None:

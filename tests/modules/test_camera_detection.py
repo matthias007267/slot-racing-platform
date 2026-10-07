@@ -5,8 +5,9 @@ detection line is x=40..43. At the default block size that strip is a 5 by 2
 grid of 2-pixel tiles, so a car is a full column moving from the left tile to
 the right tile.
 
-A separate 40 by 40 picture is used where the test needs a larger block grid:
-connectivity, travel direction, sensitivity and ghost patterns.
+A separate 80 by 80 picture with 20 px tiles is used where the test needs a
+larger block grid: connectivity, travel direction, sensitivity and ghost
+patterns. One tile step is 20 pixels, the reference size of the sensitivity.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ LINE_WIDTH = 4
 LANE_HEIGHT = 10
 CAR = 255
 POSITION = "start_finish"
-SQUARE = 40
+SQUARE = 80
 
 
 def lane_roi(lane: int, x: int = LINE_X, width: int = LINE_WIDTH) -> DetectionRoi:
@@ -98,14 +99,14 @@ def square_frame() -> GrayFrame:
     return GrayFrame.blank(SQUARE, SQUARE)
 
 
-def blob(x: int, y: int, width: int = 20, height: int = 20, value: int = CAR) -> GrayFrame:
+def blob(x: int, y: int, width: int = 40, height: int = 40, value: int = CAR) -> GrayFrame:
     return square_frame().paint(DetectionRoi(x, y, width, height), value)
 
 
 def square_detector(
     direction: TravelDirection = TravelDirection.LEFT_TO_RIGHT,
     sensitivity: int = 50,
-    block_size: int = 10,
+    block_size: int = 20,
     *,
     debug: bool = False,
     background: GrayFrame | None = None,
@@ -388,10 +389,10 @@ def test_isolated_blocks_and_a_single_pixel_do_not_cross() -> None:
     speck = square_frame().paint(DetectionRoi(0, 0, 1, 1), CAR)
     assert found.observe(speck, 1) == ()
     assert found.observe(speck.paint(DetectionRoi(10, 0, 1, 1), CAR), 2) == ()
-    scattered = blob(0, 0, 10, 10).paint(DetectionRoi(30, 0, 10, 10), CAR)
-    scattered = scattered.paint(DetectionRoi(0, 30, 10, 10), CAR)
-    moved = blob(10, 0, 10, 10).paint(DetectionRoi(30, 10, 10, 10), CAR)
-    moved = moved.paint(DetectionRoi(10, 30, 10, 10), CAR)
+    scattered = blob(0, 0, 20, 20).paint(DetectionRoi(60, 0, 20, 20), CAR)
+    scattered = scattered.paint(DetectionRoi(0, 60, 20, 20), CAR)
+    moved = blob(20, 0, 20, 20).paint(DetectionRoi(60, 20, 20, 20), CAR)
+    moved = moved.paint(DetectionRoi(20, 60, 20, 20), CAR)
     assert found.observe(scattered, 3) == ()
     assert found.observe(moved, 4) == ()
     assert found.zone_state(POSITION, 1) is ZoneState.CLEAR
@@ -405,11 +406,11 @@ def test_connected_blocks_moving_the_right_way_cross_once() -> None:
     found = square_detector(debug=True)
     assert found.observe(blob(0, 0), 1) == ()
     assert found.zone_state(POSITION, 1) is ZoneState.CLEAR
-    crossings = found.observe(blob(10, 0), 2)
+    crossings = found.observe(blob(20, 0), 2)
     assert len(crossings) == 1
     assert crossings[0].foreground_pixels == 4
     assert found.zone_state(POSITION, 1) is ZoneState.OCCUPIED
-    assert found.observe(blob(20, 0), 3) == ()
+    assert found.observe(blob(40, 0), 3) == ()
     decision = found.trace()
     assert decision is not None
     assert decision[0].reason == "occupied"
@@ -418,10 +419,10 @@ def test_connected_blocks_moving_the_right_way_cross_once() -> None:
 
 def test_motion_in_each_travel_direction_is_accepted() -> None:
     cases = (
-        (TravelDirection.LEFT_TO_RIGHT, blob(0, 0), blob(10, 0)),
-        (TravelDirection.RIGHT_TO_LEFT, blob(20, 0), blob(10, 0)),
-        (TravelDirection.TOP_TO_BOTTOM, blob(0, 0), blob(0, 10)),
-        (TravelDirection.BOTTOM_TO_TOP, blob(0, 20), blob(0, 10)),
+        (TravelDirection.LEFT_TO_RIGHT, blob(0, 0), blob(20, 0)),
+        (TravelDirection.RIGHT_TO_LEFT, blob(40, 0), blob(20, 0)),
+        (TravelDirection.TOP_TO_BOTTOM, blob(0, 0), blob(0, 20)),
+        (TravelDirection.BOTTOM_TO_TOP, blob(0, 40), blob(0, 20)),
     )
     for direction, first, second in cases:
         found = square_detector(direction)
@@ -433,7 +434,7 @@ def test_motion_in_each_travel_direction_is_accepted() -> None:
 def test_motion_against_the_travel_direction_is_rejected() -> None:
     found = square_detector(TravelDirection.RIGHT_TO_LEFT, debug=True)
     assert found.observe(blob(0, 0), 1) == ()
-    assert found.observe(blob(10, 0), 2) == ()
+    assert found.observe(blob(20, 0), 2) == ()
     assert found.zone_state(POSITION, 1) is ZoneState.CLEAR
     decision = found.trace()
     assert decision is not None
@@ -457,15 +458,15 @@ def test_a_change_that_does_not_move_is_not_a_car() -> None:
 def test_fast_slow_and_too_slow_motion() -> None:
     fast = square_detector()
     assert fast.observe(blob(0, 0), 5) == ()
-    assert len(fast.observe(blob(10, 0), 6)) == 1
+    assert len(fast.observe(blob(20, 0), 6)) == 1
 
     slow = square_detector()
     assert slow.observe(blob(0, 0), 0) == ()
-    assert len(slow.observe(blob(10, 0), 1_000_000_000)) == 1
+    assert len(slow.observe(blob(20, 0), 1_000_000_000)) == 1
 
     late = square_detector(debug=True)
     assert late.observe(blob(0, 0), 0) == ()
-    assert late.observe(blob(10, 0), 2_000_000_000) == ()
+    assert late.observe(blob(20, 0), 2_000_000_000) == ()
     decision = late.trace()
     assert decision is not None
     assert decision[0].reason == "too_short"
@@ -476,34 +477,34 @@ def test_a_one_frame_gap_does_not_drop_the_pass() -> None:
     found = square_detector()
     assert found.observe(blob(0, 0), 0) == ()
     assert found.observe(square_frame(), 100) == ()
-    assert len(found.observe(blob(10, 0), 200)) == 1
+    assert len(found.observe(blob(20, 0), 200)) == 1
 
 
 def test_a_creep_across_three_frames_still_crosses() -> None:
     found = square_detector()
     assert found.observe(blob(0, 0), 1) == ()
-    assert found.observe(blob(0, 0, width=30), 2) == ()
-    assert len(found.observe(blob(10, 0), 3)) == 1
+    assert found.observe(blob(0, 0, width=60), 2) == ()
+    assert len(found.observe(blob(20, 0), 3)) == 1
 
 
 def test_low_sensitivity_demands_a_larger_shift_and_high_sensitivity_a_faint_car() -> None:
     strict = square_detector(sensitivity=0)
     assert strict.observe(blob(0, 0), 0) == ()
-    assert strict.observe(blob(10, 0), 100_000_000) == ()
-    assert len(strict.observe(blob(20, 0), 200_000_000)) == 1
+    assert strict.observe(blob(20, 0), 100_000_000) == ()
+    assert len(strict.observe(blob(40, 0), 200_000_000)) == 1
 
     faint = square_detector(sensitivity=50)
     assert faint.observe(blob(0, 0, value=20), 1) == ()
-    assert faint.observe(blob(10, 0, value=20), 2) == ()
+    assert faint.observe(blob(20, 0, value=20), 2) == ()
 
     loose = square_detector(sensitivity=100)
     assert loose.observe(blob(0, 0, value=20), 1) == ()
-    assert len(loose.observe(blob(10, 0, value=20), 2)) == 1
+    assert len(loose.observe(blob(20, 0, value=20), 2)) == 1
 
 
 def test_small_and_large_groups_follow_the_sensitivity() -> None:
-    small = blob(0, 0, 10, 20)
-    small_next = blob(10, 0, 10, 20)
+    small = blob(0, 0, 20, 40)
+    small_next = blob(20, 0, 20, 40)
     normal = square_detector(sensitivity=50)
     assert normal.observe(small, 1) == ()
     assert normal.observe(small_next, 2) == ()
@@ -516,11 +517,11 @@ def test_small_and_large_groups_follow_the_sensitivity() -> None:
 
     large = square_detector(block_size=5)
     assert large.observe(blob(0, 0), 1) == ()
-    assert len(large.observe(blob(5, 0), 2)) == 1
+    assert len(large.observe(blob(20, 0), 2)) == 1
 
     coarse = square_detector(block_size=100)
-    assert coarse.observe(blob(0, 0, 20, 40), 1) == ()
-    assert len(coarse.observe(blob(20, 0, 20, 40), 2)) == 1
+    assert coarse.observe(blob(0, 0, 40, 80), 1) == ()
+    assert len(coarse.observe(blob(40, 0, 40, 80), 2)) == 1
 
 
 def test_a_long_stay_emits_only_once() -> None:
@@ -647,7 +648,7 @@ def test_debug_reports_the_decision_and_stays_empty_when_disabled() -> None:
     assert first[0].reason == "too_short"
     assert first[0].changed_blocks == 4
     assert first[0].strength > 0
-    assert traced.observe(blob(10, 0), 2)
+    assert traced.observe(blob(20, 0), 2)
     accepted = traced.trace()
     assert accepted is not None
     assert accepted[0].accepted is True

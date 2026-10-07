@@ -1,8 +1,9 @@
 """Global camera setup page.
 
 The page edits the saved camera document: device, resolution, frame rate,
-travel direction, sensitivity and detection zones. Block size stays at the
-stored value; it is not a control on this page. The picture is a configuration
+travel direction, sensitivity, detection resolution and detection zones.
+Detection resolution chooses the analysis tile. It is stored as ``block_size``.
+The picture is a configuration
 preview. The page does not start a race and does not publish sensor events.
 Erkennungsdiagnose, opened from this page, reads the shared capture and runs
 the race detector on its own session. It does not open a second camera.
@@ -46,8 +47,16 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredCamera,
     StoredDetection,
     StoredDetectionZone,
+    roi_to_pixels,
 )
-from slot_racing.modules.timing_camera.detection import TravelDirection
+from slot_racing.modules.timing_camera.detection import (
+    RESOLUTION_PRESETS,
+    TravelDirection,
+    ZoneAssessment,
+    ZoneRating,
+    evaluate_detection_zone,
+    resolution_preset_name,
+)
 from slot_racing.modules.timing_camera.diagnostic import CaptureCounters, DiagnosticListener
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
@@ -148,6 +157,20 @@ class CameraSetupPage(QWidget):
         self.sensitivity.setRange(0, 100)
         self.sensitivity_less = QLabel(self._tr("camera.sensitivity.less"))
         self.sensitivity_more = QLabel(self._tr("camera.sensitivity.more"))
+        self.detection_resolution = QSlider(Qt.Orientation.Horizontal)
+        self.detection_resolution.setObjectName("camera-detection-resolution")
+        self.detection_resolution.setRange(0, len(RESOLUTION_PRESETS) - 1)
+        self.detection_resolution.setSingleStep(1)
+        self.detection_resolution.setPageStep(1)
+        self.detection_resolution.setTickInterval(1)
+        self.detection_resolution.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.resolution_coarse = QLabel(self._tr("camera.resolution.coarse"))
+        self.resolution_fine = QLabel(self._tr("camera.resolution.very_fine"))
+        self.resolution_value = QLabel()
+        self.resolution_value.setObjectName("camera-detection-resolution-value")
+        self.zone_hint = QLabel()
+        self.zone_hint.setObjectName("camera-zone-hint")
+        self.zone_hint.setWordWrap(True)
         self.zones = QListWidget()
         self.zones.setObjectName("camera-zones")
         self.position = QLineEdit()
@@ -184,6 +207,12 @@ class CameraSetupPage(QWidget):
         sensitivity_row.addWidget(self.sensitivity, 1)
         sensitivity_row.addWidget(self.sensitivity_more)
         camera_form.addRow(self._tr("camera.field.sensitivity"), sensitivity_row)
+        resolution_row = QHBoxLayout()
+        resolution_row.addWidget(self.resolution_coarse)
+        resolution_row.addWidget(self.detection_resolution, 1)
+        resolution_row.addWidget(self.resolution_fine)
+        camera_form.addRow(self._tr("camera.field.detection_resolution"), resolution_row)
+        camera_form.addRow("", self.resolution_value)
         zone_form = QFormLayout()
         zone_form.addRow(self._tr("camera.field.position"), self.position)
 
@@ -196,6 +225,7 @@ class CameraSetupPage(QWidget):
         side_layout.addWidget(self.diagnostic)
         side_layout.addWidget(_section(self._tr("camera.section.zones")))
         side_layout.addWidget(self.zones, 1)
+        side_layout.addWidget(self.zone_hint)
         side_layout.addLayout(zone_form)
         side_layout.addWidget(self.add_zone)
         side_layout.addWidget(self.delete_zone)
@@ -218,6 +248,7 @@ class CameraSetupPage(QWidget):
         self.fps.currentIndexChanged.connect(self._on_camera_changed)
         self.direction.currentIndexChanged.connect(self._note_edit)
         self.sensitivity.valueChanged.connect(self._note_edit)
+        self.detection_resolution.valueChanged.connect(self._on_resolution)
         self.zones.currentRowChanged.connect(self._on_list)
         self.position.textChanged.connect(self._on_position)
         self.add_zone.clicked.connect(self._on_add)
@@ -285,6 +316,7 @@ class CameraSetupPage(QWidget):
         self._block_size = config.detection.block_size
         self._fill_direction(config.detection.direction)
         self.sensitivity.setValue(config.detection.sensitivity)
+        self._show_resolution_control()
         self._fill_devices(self._probe(), config.camera.device_index)
         self._fill_choices(
             self.resolution,
@@ -378,6 +410,7 @@ class CameraSetupPage(QWidget):
         self._fill_editors()
         self.zones.blockSignals(False)
         self._loading = False
+        self._refresh_zone_hint()
 
     def _fill_editors(self) -> None:
         index = self.stage.selected_index()
@@ -430,6 +463,92 @@ class CameraSetupPage(QWidget):
             width=width,
             height=height,
             fps=self._frame_rate(),
+        )
+
+    def _show_resolution_control(self) -> None:
+        chosen = 0
+        matched = False
+        for index, (_name, size) in enumerate(RESOLUTION_PRESETS):
+            if size == self._block_size:
+                chosen = index
+                matched = True
+                break
+        if not matched:
+            chosen = min(
+                range(len(RESOLUTION_PRESETS)),
+                key=lambda index: abs(RESOLUTION_PRESETS[index][1] - self._block_size),
+            )
+        self.detection_resolution.blockSignals(True)
+        self.detection_resolution.setValue(chosen)
+        self.detection_resolution.blockSignals(False)
+        self._show_resolution_value()
+
+    def _show_resolution_value(self) -> None:
+        preset = resolution_preset_name(self._block_size)
+        if preset == "custom":
+            name = str(self._block_size)
+        else:
+            name = self._tr(f"camera.resolution.{preset}")
+        self.resolution_value.setText(
+            self._translator.format(
+                "camera.resolution.value",
+                name=name,
+                size=self._block_size,
+            )
+        )
+
+    def _on_resolution(self, value: int) -> None:
+        if self._loading or value < 0 or value >= len(RESOLUTION_PRESETS):
+            return
+        self._block_size = RESOLUTION_PRESETS[value][1]
+        self._show_resolution_value()
+        self._note_edit()
+
+    def _refresh_zone_hint(self) -> None:
+        lines: list[str] = []
+        fps_line: str | None = None
+        for index, draft in enumerate(self._drafts):
+            assessment = self._assess_zone(draft.roi)
+            if assessment is None or assessment.rating is ZoneRating.GOOD:
+                item = self.zones.item(index)
+                if item is not None:
+                    item.setToolTip("")
+                continue
+            if assessment.rating is ZoneRating.CRITICAL:
+                sentence = self._tr("camera.zone.quality.critical")
+            else:
+                sentence = self._tr("camera.zone.quality.limited")
+            if "cross_narrow" in assessment.warnings:
+                sentence = f"{sentence} {self._tr('camera.zone.quality.cross')}"
+            number = self._translator.format("camera.zone.number", number=index + 1)
+            lines.append(f"{number}: {sentence}")
+            item = self.zones.item(index)
+            if item is not None:
+                item.setToolTip(sentence)
+            if fps_line is None and assessment.frame_interval_ms is not None:
+                fps_line = self._translator.format(
+                    "camera.zone.quality.fps",
+                    fps=assessment.camera_fps,
+                    interval=assessment.frame_interval_ms,
+                )
+        if fps_line is not None and lines:
+            lines.append(fps_line)
+        self.zone_hint.setText("\n".join(lines))
+
+    def _assess_zone(self, roi: NormalizedRoi) -> ZoneAssessment | None:
+        frame_width, frame_height = self.stage.frame_size()
+        if frame_width < 1 or frame_height < 1:
+            frame_width, frame_height = self._resolution()
+        try:
+            pixels = roi_to_pixels(roi, frame_width, frame_height)
+        except ValueError:
+            return None
+        return evaluate_detection_zone(
+            pixels.width,
+            pixels.height,
+            self._block_size,
+            self._direction(),
+            self._frame_rate(),
         )
 
     def _direction(self) -> TravelDirection:
@@ -497,6 +616,7 @@ class CameraSetupPage(QWidget):
         self._error_key = None
         self._detail = None
         self._refresh_status()
+        self._refresh_zone_hint()
 
     def _on_camera_changed(self) -> None:
         if self._loading:
@@ -707,6 +827,7 @@ class CameraSetupPage(QWidget):
         if delivered is not None:
             self._preview_frames += 1
             self.stage.set_frame(delivered.frame)
+            self._refresh_zone_hint()
             # A live feed already delivers every captured frame. The preview
             # timer only paints the picture, so a 50 ms repaint cannot drop
             # frames the detector should see.

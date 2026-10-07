@@ -280,7 +280,7 @@ def test_initialization_then_ready_and_a_zone_reports_activity() -> None:
 def test_a_crossing_is_logged_and_the_wrong_direction_keeps_a_reason() -> None:
     crossing = _session(square_settings(), SQUARE, SQUARE)
     try:
-        _feed(crossing, (square_frame(), blob(0, 0), blob(10, 0)))
+        _feed(crossing, (square_frame(), blob(0, 0), blob(20, 0)))
         assert len(crossing.crossings()) == 1
         assert "ZONE 1 DETECTION" in crossing.text()
         assert "reason=accepted" in crossing.text()
@@ -289,7 +289,7 @@ def test_a_crossing_is_logged_and_the_wrong_direction_keeps_a_reason() -> None:
 
     rejected = _session(square_settings(), SQUARE, SQUARE)
     try:
-        _feed(rejected, (square_frame(), blob(10, 0), blob(0, 0)))
+        _feed(rejected, (square_frame(), blob(20, 0), blob(0, 0)))
         assert rejected.crossings() == ()
         assert "reason=wrong_direction" in rejected.text()
     finally:
@@ -325,7 +325,7 @@ def test_peaks_record_the_highest_activity_when_no_event_is_emitted() -> None:
         summary = summaries[0]
         assert summary.detection_event is False
         assert summary.direction_confirmed is False
-        assert summary.reason == "insufficient_motion"
+        assert summary.reason == "below_shift"
         assert summary.peak_changed_blocks > 0
         assert summary.peak_difference > 0
         assert "ACTIVITY_END" in session.text()
@@ -438,7 +438,7 @@ def test_submit_skips_unread_frames_and_does_not_detect_on_the_caller(
 def test_reading_the_snapshot_does_not_change_the_crossings() -> None:
     configured = square_settings()
     session = _session(configured, SQUARE, SQUARE)
-    pictures = (square_frame(), blob(0, 0), blob(10, 0))
+    pictures = (square_frame(), blob(0, 0), blob(20, 0))
     session.start()
     try:
         for index, picture in enumerate(pictures):
@@ -501,7 +501,7 @@ def _square_zone() -> object:
 
     return DetectorSettings(
         (DetectionZone(POSITION, 1, DetectionRoi(0, 0, SQUARE, SQUARE)),),
-        block_size=10,
+        block_size=20,
     )
 
 
