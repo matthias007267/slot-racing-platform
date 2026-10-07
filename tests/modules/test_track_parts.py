@@ -238,7 +238,13 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     assert by_article["20020560"].category == BORDER
     assert by_article["20020560"].connectors == ()
     assert by_article["20020560"].attachment is not None
-    assert by_article["20020563"].attachment is not None
+    outer = next(
+        record.spec
+        for record in planner.list_parts()
+        if record.spec.article_number == "20020563" and record.spec.attachment is not None
+    )
+    assert outer.attachment is not None
+    assert outer.name == "Außenrandstreifen Kurve 3/30°"
     assert by_article["20020592"].attachment is not None
     assert SUPPORT in CATEGORIES
     assert set(CATEGORIES) >= {

@@ -109,6 +109,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "error.planner.start_straight": "Nur die Anschlussgerade kann Start und Ziel sein.",
         "error.planner.stock": "Der Bestand muss eine ganze Zahl ab 0 sein.",
+        "error.planner.stock_adjustment": (
+            "Die Korrektur würde den physischen Bestand unter 0 setzen."
+        ),
+        "error.planner.package": "Die Packung ist ungültig.",
+        "error.planner.package_exists": "Diese Packung gibt es schon.",
+        "error.planner.package_in_use": (
+            "Diese Packung hat noch einen Bestand und kann nicht gelöscht werden."
+        ),
+        "error.planner.part_in_package": (
+            "Dieses Bauteil ist Inhalt einer Packung und kann nicht gelöscht werden."
+        ),
         "planner.mode": "Baumodus",
         "planner.mode.unlimited": "Unbegrenzt",
         "planner.mode.collection": "Eigene Sammlung",
@@ -127,6 +138,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Nicht verfügbare Bauteile sind im Streckenplan rot markiert."
         ),
         "planner.stock.warning": "⚠ Strecke überschreitet deine Bauteilsammlung",
+        "planner.stock.packages": "Packungen",
+        "planner.stock.parts": "Physische Bauteile",
+        "planner.stock.package_qty": "Packungen",
+        "planner.stock.per_pack": "Je Packung",
+        "planner.stock.contained": "Enthalten",
+        "planner.stock.adjustment": "Korrektur",
+        "planner.stock.derived_value": "Grundbestand: {count}",
+        "planner.stock.physical_value": "Physischer Bestand: {count}",
+        "planner.stock.used_value": "Verbaut: {count}",
+        "planner.stock.available_value": "Verfügbar: {count}",
+        "planner.stock.over": "{count} über Bestand",
         "planner.delete_track": "Strecke löschen",
         "planner.delete_track.title": "Strecke wirklich löschen?",
         "planner.delete_track.confirm": "„{name}“ wird dauerhaft gelöscht.",
