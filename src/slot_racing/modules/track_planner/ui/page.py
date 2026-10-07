@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PySide6.QtGui import QKeyEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -39,6 +40,11 @@ from slot_racing.core.config.models import (
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.track_planner.attachment import (
+    attachment_fits,
+    slot_taken,
+    slots_for_host,
+)
 from slot_racing.modules.track_planner.document import (
     CLOCKWISE,
     COUNTERCLOCKWISE,
@@ -49,6 +55,7 @@ from slot_racing.modules.track_planner.document import (
     Piece,
     TrackPlan,
     add_piece,
+    attach_accessory,
     duplicate_instances,
     empty_plan,
     extend_from_connector,
@@ -57,7 +64,7 @@ from slot_racing.modules.track_planner.document import (
     next_origin,
     place_instance,
     place_start_finish,
-    remove_instance,
+    remove_instances,
     remove_marker,
     remove_piece,
     reposition_instance,
@@ -338,6 +345,7 @@ class PlannerPage(QWidget):
         self.canvas.set_rotation_listener(self._rotated)
         self.canvas.set_drop_listener(self._dropped)
         self.canvas.set_extend_listener(self._extended)
+        self.canvas.set_accessory_listener(self._show_accessory_menu)
         self.canvas.scene().selectionChanged.connect(self._show_selection)
         self.selection_label = QLabel(translate("planner.none"))
         self.selection_label.setObjectName("planner-selection")
@@ -570,6 +578,107 @@ class PlannerPage(QWidget):
         self._commit(reset_plan(self._plan))
         self.status.show_info(self._translator.translate("planner.reset_done"))
 
+    def add_accessory(self, host_id: str, slot: str) -> None:
+        """Attach the library part that fits ``slot`` on this rail. One part per slot."""
+        host = next((item for item in self._plan.instances if item.id == host_id), None)
+        host_spec = None if host is None else self._parts.get(host.part_id)
+        record: PartRecord | None = None
+        if host is not None and host.host_id is None and host_spec is not None:
+            record = self._accessory_record(host_spec, slot)
+        if not self._accessory_allowed(host, host_spec, record, host_id, slot):
+            trace(
+                "ACCESSORY_ADD_BLOCKED",
+                result="blocked",
+                parent_instance_id=host_id,
+                part_definition_id="" if record is None else record.id,
+                attachment_slot=slot,
+            )
+            return
+        assert host is not None
+        assert host_spec is not None
+        assert record is not None
+        try:
+            updated = attach_accessory(
+                self._plan, host_id, record.id, record.spec, slot, self._parts
+            )
+        except ValidationError:
+            trace(
+                "ACCESSORY_ADD_BLOCKED",
+                result="blocked",
+                parent_instance_id=host_id,
+                part_definition_id=record.id,
+                attachment_slot=slot,
+            )
+            return
+        created = next(
+            instance
+            for instance in updated.instances
+            if instance.host_id == host_id and instance.attachment_slot == slot
+        )
+        trace(
+            "ACCESSORY_ADD",
+            result="added",
+            parent_instance_id=host_id,
+            accessory_instance_id=created.id,
+            part_definition_id=record.id,
+            attachment_slot=slot,
+        )
+        self._commit(updated, created.id)
+
+    def accessory_menu(self, host_id: str) -> QMenu | None:
+        """Context menu for the slots of one selected rail. Incompatible slots stay disabled."""
+        host = next((item for item in self._plan.instances if item.id == host_id), None)
+        if host is None or host.host_id is not None:
+            return None
+        host_spec = self._parts.get(host.part_id)
+        if host_spec is None:
+            return None
+        slots = slots_for_host(host_spec)
+        if not slots:
+            return None
+        menu = QMenu(self)
+        menu.setObjectName("planner-accessory-menu")
+        submenu = menu.addMenu(self._translator.translate("planner.accessory.menu"))
+        submenu.setObjectName("planner-accessory-submenu")
+        for slot in slots:
+            action = submenu.addAction(self._translator.translate(f"planner.accessory.{slot}"))
+            action.setObjectName(f"planner-accessory-{slot}")
+            record = self._accessory_record(host_spec, slot)
+            action.setEnabled(self._accessory_allowed(host, host_spec, record, host_id, slot))
+            action.triggered.connect(
+                lambda _checked=False, chosen=slot: self.add_accessory(host_id, chosen)
+            )
+        return menu
+
+    def _show_accessory_menu(self, host_id: str, global_pos: QPoint) -> None:
+        menu = self.accessory_menu(host_id)
+        if menu is not None:
+            menu.popup(global_pos)
+
+    def _accessory_record(self, host_spec: PartSpec, slot: str) -> PartRecord | None:
+        for record in self._records:
+            if attachment_fits(record.spec, host_spec, slot):
+                return record
+        return None
+
+    def _accessory_allowed(
+        self,
+        host: PartInstance | None,
+        host_spec: PartSpec | None,
+        record: PartRecord | None,
+        host_id: str,
+        slot: str,
+    ) -> bool:
+        if host is None or host.host_id is not None or host_spec is None or record is None:
+            return False
+        if slot_taken(self._plan.instances, host_id, slot):
+            return False
+        if not attachment_fits(record.spec, host_spec, slot):
+            return False
+        if self._collection_mode() and not self.show_all_parts.isChecked():
+            return self._inventory().balance(record.id).available >= 1
+        return True
+
     def delete_selected(self) -> None:
         selected = set(self.canvas.selected_ids())
         if not selected:
@@ -578,9 +687,22 @@ class PlannerPage(QWidget):
         for piece in self._plan.pieces:
             if piece.id in selected:
                 plan = remove_piece(plan, piece.id)
-        for instance in self._plan.instances:
-            if instance.id in selected:
-                plan = remove_instance(plan, instance.id)
+        instance_ids = [instance.id for instance in plan.instances if instance.id in selected]
+        if instance_ids:
+            before = {instance.id: instance for instance in plan.instances}
+            plan = remove_instances(plan, instance_ids)
+            gone = {instance.id for instance in plan.instances}
+            for instance_id, instance in before.items():
+                if instance_id in gone or instance.host_id is None:
+                    continue
+                trace(
+                    "ACCESSORY_REMOVE",
+                    result="removed",
+                    parent_instance_id=instance.host_id,
+                    accessory_instance_id=instance_id,
+                    part_definition_id=instance.part_id,
+                    attachment_slot=instance.attachment_slot,
+                )
         for marker in plan.markers:
             if marker.id in selected:
                 plan = remove_marker(plan, marker.id)
@@ -889,13 +1011,17 @@ class PlannerPage(QWidget):
         elif isinstance(selected, PartInstance):
             spec = self._parts.get(selected.part_id)
             label = spec.name if spec is not None else self._translator.translate("planner.none")
+            if selected.host_id is not None and selected.attachment_slot is not None:
+                side = self._translator.translate(f"planner.accessory.{selected.attachment_slot}")
+                label = f"{label} · {side}"
+            attached = selected.host_id is not None
             self.selection_label.setText(label)
             self.x_spin.setEnabled(False)
             self.y_spin.setEnabled(False)
             self.rotation.setEnabled(False)
-            self.rotation_free.setEnabled(True)
-            self.x_mm.setEnabled(True)
-            self.y_mm.setEnabled(True)
+            self.rotation_free.setEnabled(not attached)
+            self.x_mm.setEnabled(not attached)
+            self.y_mm.setEnabled(not attached)
             self.rotation_free.setValue(selected.rotation_z_deg)
             self.x_mm.setValue(selected.x_mm)
             self.y_mm.setValue(selected.y_mm)
@@ -1091,7 +1217,7 @@ class PlannerPage(QWidget):
         if self._filling:
             return
         selected = self._selected()
-        if not isinstance(selected, PartInstance):
+        if not isinstance(selected, PartInstance) or selected.host_id is not None:
             return
         try:
             updated = reposition_instance(
@@ -1107,7 +1233,7 @@ class PlannerPage(QWidget):
         if self._filling:
             return
         selected = self._selected()
-        if not isinstance(selected, PartInstance):
+        if not isinstance(selected, PartInstance) or selected.host_id is not None:
             return
         self._commit(
             rotate_instance(self._plan, selected.id, self.rotation_free.value()), selected.id

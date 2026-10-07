@@ -139,6 +139,22 @@ class SlotPath:
 
 
 @dataclass(frozen=True, slots=True)
+class AttachmentProfile:
+    """Where one accessory may sit. The numbers describe the host, not a world side.
+
+    A retail box is not a field here. Stock still counts this definition, and a
+    box that holds several strips is not expanded into those strips.
+    """
+
+    host_shape: str
+    slots: tuple[str, ...]
+    host_length_mm: float | None = None
+    host_radius_mm: float | None = None
+    host_angle_deg: float | None = None
+    host_lanes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PartSpec:
     """One part. ``scale`` is one of :data:`SCALES` and is not part of the identity."""
 
@@ -156,6 +172,8 @@ class PartSpec:
     outline: tuple[tuple[float, float], ...]
     # Empty means "derive the ordinary lanes". Diverging parts store their grooves here.
     slot_paths: tuple[SlotPath, ...] = ()
+    # Set only when this part rides on another instance instead of joining the track.
+    attachment: AttachmentProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +198,9 @@ class PartInstance:
     rotation_z_deg: float = 0.0
     start_straight: bool = False
     group_id: str | None = None
+    # Set together. The pose is copied from that instance; the slot is relative to it.
+    host_id: str | None = None
+    attachment_slot: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1109,6 +1130,8 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             outline=rectangle(345.0, 345.0),
         )
     )
+    # One mountable strip per definition. The retail box holds several strips
+    # and, for the curves, end pieces. Those contents are not expanded here.
     border_width = 40.0
     add(
         PartSpec(
@@ -1122,8 +1145,63 @@ def standard_catalog() -> tuple[PartSpec, ...]:
             radius_mm=None,
             angle_deg=0.0,
             lane_count=2,
-            connectors=straight_connectors(345.0, 2, kind=BORDER_JOINT),
+            connectors=(),
             outline=rectangle(345.0, border_width),
+            attachment=AttachmentProfile(
+                "straight",
+                ("left", "right"),
+                host_length_mm=345.0,
+                host_lanes=2,
+            ),
+        )
+    )
+    # Centre of the strip: road radius ± half the two-lane width ± half the strip.
+    outer_radius = 700.0 + 100.0 + border_width / 2.0
+    inner_radius = 700.0 - 100.0 - border_width / 2.0
+    add(
+        PartSpec(
+            article_number="20020563",
+            scale=scale,
+            name="Außenrandstreifen Kurve 3/30°",
+            category=BORDER,
+            length_mm=None,
+            width_mm=border_width,
+            height_mm=None,
+            radius_mm=700.0,
+            angle_deg=30.0,
+            lane_count=2,
+            connectors=(),
+            outline=arc_outline(outer_radius, 30.0, border_width),
+            attachment=AttachmentProfile(
+                "curve_flat",
+                ("outer",),
+                host_radius_mm=700.0,
+                host_angle_deg=30.0,
+                host_lanes=2,
+            ),
+        )
+    )
+    add(
+        PartSpec(
+            article_number="20020592",
+            scale=scale,
+            name="Innenrandstreifen Kurve 3/30°",
+            category=BORDER,
+            length_mm=None,
+            width_mm=border_width,
+            height_mm=None,
+            radius_mm=700.0,
+            angle_deg=30.0,
+            lane_count=2,
+            connectors=(),
+            outline=arc_outline(inner_radius, 30.0, border_width),
+            attachment=AttachmentProfile(
+                "curve_flat",
+                ("inner",),
+                host_radius_mm=700.0,
+                host_angle_deg=30.0,
+                host_lanes=2,
+            ),
         )
     )
     return tuple(specs)

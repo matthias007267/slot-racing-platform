@@ -16,6 +16,7 @@ from slot_racing.modules.track_planner.models import (
     TrackPlanInstance,
 )
 from slot_racing.modules.track_planner.parts import (
+    AttachmentProfile,
     ConnectorSpec,
     PartInstance,
     PartRecord,
@@ -63,9 +64,23 @@ class PartLibrary:
                     stored.add(key)
             for row in rows:
                 known = catalog.get(identity_key(row.name, row.article_number))
-                if known is None or not known.slot_paths or row.slot_paths:
+                if known is None:
                     continue
-                row.slot_paths = encode_slot_paths(known.slot_paths)
+                if known.slot_paths and not row.slot_paths:
+                    row.slot_paths = encode_slot_paths(known.slot_paths)
+                if self._needs_attachment_refresh(session, row, known):
+                    self._assign_attachment(row, known)
+                    row.outline = [list(point) for point in known.outline]
+                    row.length_mm = known.length_mm
+                    row.width_mm = known.width_mm
+                    row.radius_mm = known.radius_mm
+                    row.angle_deg = known.angle_deg
+                    row.category = known.category
+                    row.lane_count = known.lane_count
+                    session.execute(
+                        delete(TrackPartConnector).where(TrackPartConnector.part_id == row.id)
+                    )
+                    self._add_connectors(session, row.id, known)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         try:
@@ -98,6 +113,7 @@ class PartLibrary:
                 definition.lane_count = spec.lane_count
                 definition.outline = [list(point) for point in spec.outline]
                 definition.slot_paths = encode_slot_paths(spec.slot_paths)
+                self._assign_attachment(definition, spec)
                 session.execute(
                     delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id)
                 )
@@ -181,6 +197,8 @@ class PartLibrary:
                 rotation_z_deg=row.rotation_z_deg,
                 start_straight=bool(row.is_start_straight),
                 group_id=row.group_id,
+                host_id=row.host_instance_id,
+                attachment_slot=row.attachment_slot,
             )
             for row in rows
         )
@@ -193,7 +211,10 @@ class PartLibrary:
             if instance.part_id not in known:
                 raise ValidationError("error.planner.part")
         session.execute(delete(TrackPlanInstance).where(TrackPlanInstance.track_id == track_id))
-        for index, instance in enumerate(instances):
+        # Hosts first so a reader that walks the insert order sees the parent
+        # before the accessory. There is no foreign key; the plan enforces it.
+        ordered = sorted(instances, key=lambda instance: instance.host_id is not None)
+        for index, instance in enumerate(ordered):
             session.add(
                 TrackPlanInstance(
                     id=instance.id,
@@ -208,6 +229,8 @@ class PartLibrary:
                     is_start_straight=instance.start_straight,
                     group_id=instance.group_id,
                     sort_order=index,
+                    host_instance_id=instance.host_id,
+                    attachment_slot=instance.attachment_slot,
                 )
             )
 
@@ -226,6 +249,7 @@ class PartLibrary:
             outline=[list(point) for point in spec.outline],
             slot_paths=encode_slot_paths(spec.slot_paths),
         )
+        self._assign_attachment(definition, spec)
         session.add(definition)
         session.flush()
         self._add_connectors(session, definition.id, spec)
@@ -278,8 +302,43 @@ class PartLibrary:
             ),
             outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
             slot_paths=decode_slot_paths(definition.slot_paths),
+            attachment=_attachment_profile(definition),
         )
         return PartRecord(definition.id, spec)
+
+    def _needs_attachment_refresh(
+        self, session: Session, row: TrackPartDefinition, spec: PartSpec
+    ) -> bool:
+        """True when a stored catalogue accessory still has the pre-attachment joints."""
+        profile = spec.attachment
+        if profile is None:
+            return False
+        if row.attachment_host_shape != profile.host_shape:
+            return True
+        if (row.attachment_slots or "") != ",".join(profile.slots):
+            return True
+        stored = session.scalars(
+            select(TrackPartConnector).where(TrackPartConnector.part_id == row.id)
+        ).all()
+        return len(stored) != len(spec.connectors)
+
+    @staticmethod
+    def _assign_attachment(definition: TrackPartDefinition, spec: PartSpec) -> None:
+        profile = spec.attachment
+        if profile is None:
+            definition.attachment_host_shape = None
+            definition.attachment_slots = None
+            definition.attachment_host_length_mm = None
+            definition.attachment_host_radius_mm = None
+            definition.attachment_host_angle_deg = None
+            definition.attachment_host_lanes = None
+            return
+        definition.attachment_host_shape = profile.host_shape
+        definition.attachment_slots = ",".join(profile.slots)
+        definition.attachment_host_length_mm = profile.host_length_mm
+        definition.attachment_host_radius_mm = profile.host_radius_mm
+        definition.attachment_host_angle_deg = profile.host_angle_deg
+        definition.attachment_host_lanes = profile.host_lanes
 
     def _reject_duplicate(
         self, session: Session, spec: PartSpec, *, except_id: int | None = None
@@ -298,3 +357,18 @@ class PartLibrary:
             name=spec.name.strip(),
             article=spec.article_number.strip(),
         )
+
+
+def _attachment_profile(definition: TrackPartDefinition) -> AttachmentProfile | None:
+    shape = definition.attachment_host_shape
+    if not shape:
+        return None
+    slots = tuple(part for part in (definition.attachment_slots or "").split(",") if part)
+    return AttachmentProfile(
+        host_shape=shape,
+        slots=slots,
+        host_length_mm=definition.attachment_host_length_mm,
+        host_radius_mm=definition.attachment_host_radius_mm,
+        host_angle_deg=definition.attachment_host_angle_deg,
+        host_lanes=definition.attachment_host_lanes,
+    )
