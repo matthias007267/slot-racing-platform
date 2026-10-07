@@ -8,6 +8,7 @@ is full. A wide window therefore stays one row.
 from __future__ import annotations
 
 from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
@@ -59,7 +60,7 @@ class FlowLayout(QLayout):
     def sizeHint(self) -> QSize:  # noqa: N802
         """Width of one unwrapped row. The layout may still be given less and wrap."""
         margins = self.contentsMargins()
-        hints = [self._hint(item) for item in self._items]
+        hints = [self._hint(item) for item in self._taken()]
         if not hints:
             return QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
         gaps = self.spacing() * (len(hints) - 1)
@@ -73,7 +74,7 @@ class FlowLayout(QLayout):
     def minimumSize(self) -> QSize:  # noqa: N802
         """The widest single control. Narrower than that, a label would be clipped."""
         size = QSize()
-        for item in self._items:
+        for item in self._taken():
             size = size.expandedTo(self._hint(item))
         margins = self.contentsMargins()
         return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
@@ -108,7 +109,7 @@ class FlowLayout(QLayout):
                 if share and _expands(item):
                     shift += share
 
-        for item in self._items:
+        for item in self._taken():
             hint = self._hint(item)
             if line and x + hint.width() > limit + 1:
                 flush(y, line_height)
@@ -122,11 +123,77 @@ class FlowLayout(QLayout):
         flush(y, line_height)
         return y + line_height + margins.bottom() - rect.y()
 
+    def _taken(self) -> list[QLayoutItem]:
+        """Hidden controls must not reserve a gap in the row."""
+        return [item for item in self._items if not item.isEmpty()]
+
     @staticmethod
     def _hint(item: QLayoutItem) -> QSize:
         hint = item.sizeHint()
         minimum = item.minimumSize()
         return QSize(max(hint.width(), minimum.width()), max(hint.height(), minimum.height()))
+
+
+class FlowHost(QWidget):
+    """A bar whose height is the wrapped height of its :class:`FlowLayout`.
+
+    ``sizeHint`` stays one unwrapped row wide, and ``minimumSize`` of the
+    layout stays the widest control. The widget itself must still grow when
+    that width wraps. A vertical box otherwise keeps a shorter height from an
+    earlier, wider pass, or steals a row when the page is short, while the
+    layout has already placed the next row past the widget's bottom edge.
+    """
+
+    def __init__(self, object_name: str) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        FlowLayout(self)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        return layout.heightForWidth(max(0, width))
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        hint = layout.sizeHint()
+        if self.width() <= 0:
+            return hint
+        return QSize(hint.width(), self.heightForWidth(self.width()))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        floor = layout.minimumSize()
+        if self.width() <= 0:
+            return floor
+        return QSize(floor.width(), self.heightForWidth(self.width()))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.refit()
+
+    def refit(self) -> None:
+        """Recompute the wrapped height after labels or the width change."""
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+        if self.width() <= 0:
+            self.updateGeometry()
+            return
+        needed = self.heightForWidth(self.width())
+        # Replace the previous width's height. A narrow wrap must not stay
+        # as a minimum after the bar is wide enough for fewer rows.
+        if self.minimumHeight() != needed:
+            self.setMinimumHeight(needed)
+        self.updateGeometry()
 
 
 def _expands(item: QLayoutItem) -> bool:

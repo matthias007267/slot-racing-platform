@@ -93,15 +93,18 @@ from slot_racing.modules.track_planner.trace import trace
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
 from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
 from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog, dialog_is_alive
-from slot_racing.modules.track_planner.ui.flow_layout import FlowLayout, retain_content_width
+from slot_racing.modules.track_planner.ui.flow_layout import FlowHost, retain_content_width
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.library_view import PartLibrary
 from slot_racing.uikit.errors import describe_error
-from slot_racing.uikit.theme import configure_page, set_role, set_tone
+from slot_racing.uikit.theme import SPACE, configure_page, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
 
 logger = logging.getLogger(__name__)
+
+
+_COLUMN_FLOOR = 48
 
 
 class _BodyHost(QWidget):
@@ -113,26 +116,51 @@ class _BodyHost(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         layout = self.layout()
         width = 0 if layout is None else layout.minimumSize().width()
-        return QSize(width, 48)
+        return QSize(width, _COLUMN_FLOOR)
 
 
 class _RowScroll(QScrollArea):
-    """Grows the row to the viewport, and scrolls sideways when the columns do not fit."""
+    """Grows the row to the viewport, and scrolls sideways when the columns do not fit.
+
+    The action bar lives in the same host as the columns, so a host that is
+    only the viewport tall would let a short window steal the bar's wrapped
+    height. The host then grows and this area scrolls vertically instead.
+    """
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         host = self.widget()
         if host is None:
             return
-        needed = host.minimumSizeHint().width()
         viewport = self.viewport().size()
-        width = max(needed, viewport.width())
-        height = viewport.height()
-        if width > viewport.width():
-            bar = self.horizontalScrollBar().sizeHint().height()
-            height = max(1, viewport.height() - bar)
+        width = max(host.minimumSizeHint().width(), viewport.width())
+        height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
+        if height > viewport.height():
+            narrowed = max(
+                host.minimumSizeHint().width(),
+                viewport.width() - self.verticalScrollBar().sizeHint().width(),
+            )
+            if narrowed != width:
+                width = narrowed
+                height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
         if host.width() != width or host.height() != height:
             host.resize(width, height)
+
+    def _host_height(
+        self, host: QWidget, width: int, viewport_height: int, *, horizontal_bar: bool
+    ) -> int:
+        height = viewport_height
+        if horizontal_bar and width > self.viewport().width():
+            height -= self.horizontalScrollBar().sizeHint().height()
+        layout = host.layout()
+        spacing = 0 if layout is None else max(0, layout.spacing())
+        actions = host.findChild(QWidget, "planner-actions")
+        action_height = (
+            actions.heightForWidth(width)
+            if actions is not None and actions.hasHeightForWidth()
+            else 0
+        )
+        return max(1, height, action_height + spacing + _COLUMN_FLOOR)
 
 
 class _PlanStage(QWidget):
@@ -141,6 +169,7 @@ class _PlanStage(QWidget):
     def __init__(self, canvas: QWidget, warning: QWidget) -> None:
         super().__init__()
         self.setObjectName("planner-stage")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(canvas, 0, 0)
@@ -155,7 +184,9 @@ class _PlanStage(QWidget):
         return QSize(160, 120)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 48)
+        # Same floor as the column. A short window may leave only this strip
+        # once the wrapped toolbar and action bar have taken their height.
+        return QSize(0, _COLUMN_FLOOR)
 
 
 class PlannerPage(QWidget):
@@ -419,16 +450,13 @@ class PlannerPage(QWidget):
         tools.addWidget(self.reset_filter)
         self.library.setMinimumWidth(0)
         self.library.setMinimumHeight(72)
+        # Ignored keeps the catalogue's own size hint from stretching the column
+        # to every card. Stretch gives the list whatever height the column has left.
         self.library.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         tools.addWidget(self.library, 1)
-        tools.addWidget(self.show_all_parts)
-        tools.addWidget(self.manage_stock)
-        tools.addWidget(self.add_part)
-        tools.addWidget(self.manage_library)
-        tools.addWidget(self.delete_track_button)
-        tools.addStretch(1)
         library_panel = QWidget()
         library_panel.setObjectName("planner-library-panel")
+        library_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         library_panel.setLayout(tools)
         labeled = (
             self.mode_unlimited,
@@ -454,7 +482,19 @@ class PlannerPage(QWidget):
         library_scroll.setWidget(library_panel)
         gutter = library_scroll.verticalScrollBar().sizeHint().width()
         library_scroll.setMinimumWidth(library_panel.minimumWidth() + gutter)
-        library_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        library_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.action_bar = FlowHost("planner-actions")
+        self._action_buttons = (
+            self.show_all_parts,
+            self.manage_stock,
+            self.add_part,
+            self.manage_library,
+            self.delete_track_button,
+        )
+        actions = self.action_bar.layout()
+        assert actions is not None
+        for button in self._action_buttons:
+            actions.addWidget(button)
         track_label = QLabel(translate("planner.track"))
         track_label.setObjectName("planner-track-label")
         self._toolbar_widgets: tuple[QWidget, ...] = (
@@ -471,9 +511,9 @@ class PlannerPage(QWidget):
             self.discard_button,
             self.reset_button,
         )
-        self.toolbar = QWidget()
-        self.toolbar.setObjectName("planner-toolbar")
-        header = FlowLayout(self.toolbar)
+        self.toolbar = FlowHost("planner-toolbar")
+        header = self.toolbar.layout()
+        assert header is not None
         for widget in self._toolbar_widgets:
             header.addWidget(widget)
         self._fit_toolbar()
@@ -497,13 +537,26 @@ class PlannerPage(QWidget):
         bar = properties_scroll.verticalScrollBar().sizeHint().width()
         properties_scroll.setMinimumWidth(side.sizeHint().width() + bar)
         properties_scroll.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Ignored)
-        body = QHBoxLayout()
-        body.addWidget(library_scroll)
-        body.addWidget(stage, 1)
-        body.addWidget(properties_scroll)
+        columns = QHBoxLayout()
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(library_scroll)
+        columns.addWidget(stage, 1)
+        columns.addWidget(properties_scroll)
+        column_row = _BodyHost()
+        column_row.setObjectName("planner-columns")
+        column_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        column_row.setLayout(columns)
+        # The bar shares this host with the columns. A page-level bar only
+        # spans the viewport, while Windows fonts make the columns wider and
+        # this scroll area pans sideways to the properties.
+        stack = QVBoxLayout()
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setSpacing(SPACE.md)
+        stack.addWidget(column_row, 1)
+        stack.addWidget(self.action_bar)
         body_host = _BodyHost()
         body_host.setObjectName("planner-body")
-        body_host.setLayout(body)
+        body_host.setLayout(stack)
         body_scroll = _RowScroll()
         body_scroll.setObjectName("planner-body-scroll")
         body_scroll.setWidgetResizable(True)
@@ -1275,7 +1328,15 @@ class PlannerPage(QWidget):
     def _fit_toolbar(self) -> None:
         for widget in self._toolbar_widgets:
             retain_content_width(widget)
-        self.toolbar.updateGeometry()
+        assert isinstance(self.toolbar, FlowHost)
+        self.toolbar.refit()
+        self._fit_actions()
+
+    def _fit_actions(self) -> None:
+        for button in self._action_buttons:
+            retain_content_width(button)
+        assert isinstance(self.action_bar, FlowHost)
+        self.action_bar.refit()
 
     def _toggle_group(self) -> None:
         ids = [
@@ -1479,6 +1540,7 @@ class PlannerPage(QWidget):
             return
         self._build_mode = mode
         self.show_all_parts.setVisible(mode == TRACK_PLANNER_BUILD_COLLECTION)
+        self._fit_actions()
         if mode != TRACK_PLANNER_BUILD_COLLECTION and self.show_all_parts.isChecked():
             self._filling = True
             self.show_all_parts.setChecked(False)
