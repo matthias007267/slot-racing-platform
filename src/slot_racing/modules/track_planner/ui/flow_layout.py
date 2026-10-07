@@ -8,6 +8,7 @@ is full. A wide window therefore stays one row.
 from __future__ import annotations
 
 from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
@@ -131,6 +132,66 @@ class FlowLayout(QLayout):
         hint = item.sizeHint()
         minimum = item.minimumSize()
         return QSize(max(hint.width(), minimum.width()), max(hint.height(), minimum.height()))
+
+
+class FlowHost(QWidget):
+    """A bar whose height is the wrapped height of its :class:`FlowLayout`.
+
+    ``sizeHint`` stays one unwrapped row wide, and ``minimumSize`` of the
+    layout stays the widest control. The widget itself must still grow when
+    that width wraps. A vertical box otherwise keeps a shorter height from an
+    earlier, wider pass, or steals a row when the page is short, while the
+    layout has already placed the next row past the widget's bottom edge.
+    """
+
+    def __init__(self, object_name: str) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        FlowLayout(self)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        return layout.heightForWidth(max(0, width))
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        hint = layout.sizeHint()
+        if self.width() <= 0:
+            return hint
+        return QSize(hint.width(), self.heightForWidth(self.width()))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        assert isinstance(layout, FlowLayout)
+        floor = layout.minimumSize()
+        if self.width() <= 0:
+            return floor
+        return QSize(floor.width(), self.heightForWidth(self.width()))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.refit()
+
+    def refit(self) -> None:
+        """Recompute the wrapped height after labels or the width change."""
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+        if self.width() <= 0:
+            self.updateGeometry()
+            return
+        needed = self.heightForWidth(self.width())
+        if self.minimumHeight() != needed:
+            self.setMinimumHeight(needed)
+        self.updateGeometry()
 
 
 def _expands(item: QLayoutItem) -> bool:
