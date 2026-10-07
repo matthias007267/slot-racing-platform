@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from slot_racing.core.clock import Clock
+from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import (
     Participant,
     ParticipantResult,
@@ -218,6 +219,7 @@ class RaceController:
         if self.active is not None and self.active.is_active:
             raise ValidationError("error.race.already_running")
         runner = self._assemble(race_id)
+        record("RACE_OPEN", module="races", page="races", result="open", race_id=int(race_id))
         self._start_runner(runner)
         if self.active is not None:
             self.active.close()
@@ -235,6 +237,7 @@ class RaceController:
         if self.active is not None and not self.active.is_finished:
             raise ValidationError("error.race.already_running")
         runner = self._assemble(race_id)
+        record("RACE_OPEN", module="races", page="races", result="prepared", race_id=int(race_id))
         if self.active is not None:
             self.active.close()
         self.active = runner
@@ -287,15 +290,31 @@ class RaceController:
         return RaceRunner(race, engine, self._bus, self._storage_errors)
 
     def _start_runner(self, runner: RaceRunner) -> None:
+        race_id = int(runner.race.id)
+        record(
+            "RACE_START_REQUEST",
+            module="races",
+            page="races",
+            result="requested",
+            race_id=race_id,
+        )
         try:
             runner.start()
         except Exception:
+            record(
+                "RACE_START_REQUEST",
+                module="races",
+                page="races",
+                result="failed",
+                race_id=race_id,
+            )
             runner.close()
             if self.active is runner:
                 self.active = None
             self._service.cancel_heat_start(runner.race.id)
             self._service.abort_race(runner.race.id)
             raise
+        record("RACE_STARTED", module="races", page="races", result="running", race_id=race_id)
 
     def shutdown(self) -> None:
         """Abort a running race so its results are stored, then release the runner."""

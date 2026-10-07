@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.parts import PartRecord
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.trace import trace
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_view import PartPreview
 from slot_racing.uikit.errors import describe_error
@@ -39,6 +40,7 @@ class LibraryManager(QDialog):
         color_coding: bool = False,
     ) -> None:
         super().__init__()
+        trace("LIBRARY_MANAGER_OPEN", result="opened")
         self.setObjectName("library-manager")
         self.setWindowTitle(translator.translate("planner.library.manage"))
         self.setMinimumSize(560, 480)
@@ -83,6 +85,10 @@ class LibraryManager(QDialog):
         layout.addWidget(self.status)
         self.reload()
 
+    def closeEvent(self, event: object) -> None:  # noqa: N802
+        trace("LIBRARY_MANAGER_CLOSE", result="closed")
+        super().closeEvent(event)  # type: ignore[arg-type]
+
     def reload(self) -> None:
         records = self._planner.list_parts()
         while self._rows_layout.count() > 1:
@@ -124,6 +130,8 @@ class LibraryManager(QDialog):
         if record is None:
             return
         if record.id in self._used:
+            trace("PART_DELETE_REQUEST", result="requested", part_id=record.id)
+            trace("PART_DELETE_BLOCKED", result="in_use", part_id=record.id)
             self.status.show_error(self._translator.format("error.planner.part_in_use", count=1))
             return
         try:

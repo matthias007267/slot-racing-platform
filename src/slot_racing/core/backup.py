@@ -29,6 +29,7 @@ from sqlalchemy import Connection
 
 from slot_racing import __version__
 from slot_racing.core.config import AppConfig, save_config
+from slot_racing.core.diagnostics import record
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage.database import Database, alembic_config
 
@@ -123,6 +124,7 @@ def create_backup(
     ``config.backup_keep``; manual backups and safety copies stay.
     """
     directory.mkdir(parents=True, exist_ok=True)
+    record("BACKUP_START", module="backup", result="started", kind=kind)
     created = _utc(moment)
     destination = _unique_path(directory, _filename(created, kind))
     temporary = destination.with_suffix(destination.suffix + ".partial")
@@ -146,12 +148,14 @@ def create_backup(
             _write_archive(temporary, manifest, snapshot, _config_payload(config), assets)
         temporary.replace(destination)
         validate_backup(destination)
-    except Exception:
+    except Exception as error:
         temporary.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
+        record("BACKUP_FAILED", module="backup", result=type(error).__name__, kind=kind)
         raise
     if kind == "auto":
         _prune_automatic(directory, config.backup_keep)
+    record("BACKUP_COMPLETE", module="backup", result="written", kind=kind)
     return destination
 
 
@@ -185,25 +189,32 @@ def restore_backup(
     The archive is checked first. A safety copy of the current data is written next. Only then
     is the database file exchanged. A failure rolls the previous file back.
     """
+    record("RESTORE_START", module="backup", result="started")
     target = database.file_path()
     if target is None:
+        record("RESTORE_FAILED", module="backup", result="no_database_file")
         raise BackupError("error.backup.no_database_file")
-    with open_backup(archive) as opened:
-        safety = _safety_copy(database, config, backup_directory)
-        incoming = target.with_name(target.name + ".incoming")
-        try:
-            _prepare_incoming(opened.database_file, incoming)
-            if before_swap is not None:
-                before_swap()
-            _swap_in(database, target, incoming, opened, config, config_path)
-        except BackupError:
-            incoming.unlink(missing_ok=True)
-            raise
-        except Exception as error:
-            incoming.unlink(missing_ok=True)
-            raise BackupError("error.backup.failed") from error
-        finally:
-            incoming.unlink(missing_ok=True)
+    try:
+        with open_backup(archive) as opened:
+            safety = _safety_copy(database, config, backup_directory)
+            incoming = target.with_name(target.name + ".incoming")
+            try:
+                _prepare_incoming(opened.database_file, incoming)
+                if before_swap is not None:
+                    before_swap()
+                _swap_in(database, target, incoming, opened, config, config_path)
+            except BackupError:
+                incoming.unlink(missing_ok=True)
+                raise
+            except Exception as error:
+                incoming.unlink(missing_ok=True)
+                raise BackupError("error.backup.failed") from error
+            finally:
+                incoming.unlink(missing_ok=True)
+    except Exception as error:
+        record("RESTORE_FAILED", module="backup", result=type(error).__name__)
+        raise
+    record("RESTORE_COMPLETE", module="backup", result="restored")
     return safety
 
 

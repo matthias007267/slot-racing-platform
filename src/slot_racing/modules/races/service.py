@@ -10,6 +10,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from slot_racing.core.catalog import DriverCatalog, TrackCatalog, TrackInfo, VehicleCatalog
+from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import (
     DriverId,
     ParticipantResult,
@@ -836,7 +837,16 @@ class RaceService:
             if planned:
                 heats.replace_open_plan(session, race, track.lane_count)
             self._update_readiness(session, race)
-            return self._race_info(session, race)
+            info = self._race_info(session, race)
+        record(
+            "RACE_RESTART",
+            module="races",
+            page="races",
+            result="created",
+            race_id=int(info.id),
+            source_race_id=int(race_id),
+        )
+        return info
 
     def abort_race(self, race_id: RaceId) -> None:
         """Mark a race that is recorded as running as aborted. Other races are left alone."""

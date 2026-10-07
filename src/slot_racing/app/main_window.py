@@ -20,10 +20,16 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.app.dashboard import DashboardPage
+from slot_racing.app.diagnostics_ui import (
+    DiagnosticsSettings,
+    bind_crash_dialog,
+    offer_previous_session,
+)
 from slot_racing.app.pages import MessagePage, SettingsPage
 from slot_racing.app.runtime import Runtime
 from slot_racing.app.shell import ShellHeader, Sidebar, timing_state
 from slot_racing.core.config import save_config
+from slot_racing.core.diagnostics import record
 from slot_racing.core.events import PluginDisabled, PluginEnabled
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import SPACE, apply_theme, set_role
@@ -121,6 +127,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(content, 1)
         self.setCentralWidget(central)
 
+        self._shown_id: str | None = None
         self._sidebar.selected.connect(self._show)
         self._remove_listener = runtime.contributions.add_listener(self.refresh_navigation)
         self._subscriptions = [
@@ -128,6 +135,8 @@ class MainWindow(QMainWindow):
             runtime.bus.subscribe(PluginDisabled, lambda _event: self._dashboard.refresh()),
         ]
         self.refresh_navigation()
+        bind_crash_dialog(self, self._tr)
+        offer_previous_session(self, self._tr, on_create=self._export_diagnostics)
 
     def navigation_ids(self) -> list[str]:
         return self._sidebar.ids()
@@ -275,6 +284,12 @@ class MainWindow(QMainWindow):
         )
         return entries
 
+    def _export_diagnostics(self) -> None:
+        self.select("settings")
+        panel = self.current_page().findChild(DiagnosticsSettings)
+        if panel is not None:
+            panel.create_bundle()
+
     def _open_page(self, entry_id: str, action: str | None = None) -> None:
         if entry_id not in {entry.id for entry in self._entries()}:
             return
@@ -295,6 +310,16 @@ class MainWindow(QMainWindow):
             self._pages[entry_id] = page
             self._stack.addWidget(page)
         self._stack.setCurrentWidget(page)
+        if entry_id != self._shown_id:
+            previous = "" if self._shown_id is None else self._shown_id
+            self._shown_id = entry_id
+            record(
+                "NAVIGATION",
+                module="app",
+                page=entry_id,
+                result="shown",
+                **{"from": previous, "to": entry_id},
+            )
         entry = self._factories.get(entry_id)
         if entry is not None:
             self._header.set_title(entry.title)

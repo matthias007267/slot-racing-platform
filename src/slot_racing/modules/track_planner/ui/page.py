@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -81,6 +82,7 @@ from slot_racing.modules.track_planner.parts import (
     can_dock,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.trace import trace
 from slot_racing.modules.track_planner.ui.canvas import PlanCanvas
 from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
 from slot_racing.modules.track_planner.ui.flow_layout import FlowLayout, retain_content_width
@@ -90,6 +92,8 @@ from slot_racing.modules.track_planner.ui.library_view import PartLibrary
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import configure_page, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
+
+logger = logging.getLogger(__name__)
 
 
 class _BodyHost(QWidget):
@@ -502,6 +506,7 @@ class PlannerPage(QWidget):
         layout.addWidget(self.toolbar)
         layout.addWidget(body_scroll, 1)
         layout.addWidget(self.status)
+        trace("TRACK_PLANNER_OPEN", result="opened")
         self._refresh_tracks()
 
     def plan(self) -> TrackPlan:
@@ -510,11 +515,15 @@ class PlannerPage(QWidget):
     def save(self) -> None:
         if self._lane_count < 1:
             return
+        track_id = int(self._plan.track_id)
+        trace("TRACK_SAVE", result="started", track_id=track_id)
         try:
             self._plan = self._planner.save(self._plan)
         except Exception as error:
+            trace("TRACK_SAVE", result=type(error).__name__, track_id=track_id)
             self._report(error)
             return
+        trace("TRACK_SAVE", result="saved", track_id=track_id)
         self._dirty = False
         self.status.show_info(self._translator.translate("planner.saved"))
         self._draw()
@@ -580,12 +589,14 @@ class PlannerPage(QWidget):
     def undo(self) -> None:
         if not self._history:
             return
+        trace("UNDO", result="applied", track_id=int(self._plan.track_id))
         self._future.append(self._plan)
         self._restore(self._history.pop())
 
     def redo(self) -> None:
         if not self._future:
             return
+        trace("REDO", result="applied", track_id=int(self._plan.track_id))
         self._history.append(self._plan)
         self._restore(self._future.pop())
 
@@ -627,6 +638,7 @@ class PlannerPage(QWidget):
             self._refresh_tracks()
 
     def hideEvent(self, event: object) -> None:  # noqa: N802
+        trace("LIBRARY_VIEW_CLOSE", result="hidden")
         self._detach_keys()
         super().hideEvent(event)  # type: ignore[arg-type]
 
@@ -733,11 +745,15 @@ class PlannerPage(QWidget):
         track = self._tracks.get_track(track_id)
         if track is None:
             return
+        trace("TRACK_LOAD", result="started", track_id=int(track_id))
         try:
             self._plan = self._planner.load(track_id)
         except Exception as error:
+            trace("TRACK_LOAD", result=type(error).__name__, track_id=int(track_id))
             self._report(error)
             self._plan = empty_plan(track_id)
+        else:
+            trace("TRACK_LOAD", result="loaded", track_id=int(track_id))
         self._lane_count = track.lane_count
         self._dirty = False
         self._history.clear()
@@ -975,11 +991,18 @@ class PlannerPage(QWidget):
             )
 
     def _load_parts(self) -> None:
+        trace("LIBRARY_VIEW_OPEN", result="started")
+        trace("LIBRARY_VIEW_OPEN_REQUEST", result="started")
+        trace("LIBRARY_DATA_LOAD_START", result="started")
         records = self._planner.list_parts()
         self._records = records
         self._parts = {record.id: record.spec for record in records}
         self._stock = self._planner.stock_quantities()
+        trace("LIBRARY_DATA_LOAD_COMPLETE", result="complete", part_count=len(records))
+        trace("LIBRARY_WIDGET_BUILD_START", result="started")
         self._apply_filters()
+        trace("LIBRARY_WIDGET_BUILD_COMPLETE", result="complete", part_count=self.library.count())
+        trace("LIBRARY_VIEW_VISIBLE", result="visible")
 
     def _show_grid(self) -> None:
         self._filling = True
@@ -1207,6 +1230,12 @@ class PlannerPage(QWidget):
             if selected is not None:
                 self._draw(selected)
             return
+        before = {instance.id for instance in self._plan.instances}
+        after = {instance.id for instance in plan.instances}
+        for instance_id in sorted(after - before):
+            trace("PLAN_INSTANCE_ADD", result="added", instance_id=instance_id)
+        for instance_id in sorted(before - after):
+            trace("PLAN_INSTANCE_DELETE", result="deleted", instance_id=instance_id)
         self._history.append(self._plan)
         if len(self._history) > 50:
             self._history.pop(0)
@@ -1333,6 +1362,8 @@ class PlannerPage(QWidget):
             self.announce_stock_problem()
 
     def _report(self, error: Exception) -> None:
+        if not isinstance(error, ValidationError):
+            logger.exception("Track planner action failed")
         self.status.show_error(describe_error(self._translator, error))
 
 
