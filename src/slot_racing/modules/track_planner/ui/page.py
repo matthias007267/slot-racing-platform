@@ -141,6 +141,7 @@ class _PlanStage(QWidget):
     def __init__(self, canvas: QWidget, warning: QWidget) -> None:
         super().__init__()
         self.setObjectName("planner-stage")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(canvas, 0, 0)
@@ -419,16 +420,13 @@ class PlannerPage(QWidget):
         tools.addWidget(self.reset_filter)
         self.library.setMinimumWidth(0)
         self.library.setMinimumHeight(72)
+        # Ignored keeps the catalogue's own size hint from stretching the column
+        # to every card. Stretch gives the list whatever height the column has left.
         self.library.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         tools.addWidget(self.library, 1)
-        tools.addWidget(self.show_all_parts)
-        tools.addWidget(self.manage_stock)
-        tools.addWidget(self.add_part)
-        tools.addWidget(self.manage_library)
-        tools.addWidget(self.delete_track_button)
-        tools.addStretch(1)
         library_panel = QWidget()
         library_panel.setObjectName("planner-library-panel")
+        library_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         library_panel.setLayout(tools)
         labeled = (
             self.mode_unlimited,
@@ -454,7 +452,20 @@ class PlannerPage(QWidget):
         library_scroll.setWidget(library_panel)
         gutter = library_scroll.verticalScrollBar().sizeHint().width()
         library_scroll.setMinimumWidth(library_panel.minimumWidth() + gutter)
-        library_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        library_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.action_bar = QWidget()
+        self.action_bar.setObjectName("planner-actions")
+        self.action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._action_buttons = (
+            self.show_all_parts,
+            self.manage_stock,
+            self.add_part,
+            self.manage_library,
+            self.delete_track_button,
+        )
+        actions = FlowLayout(self.action_bar)
+        for button in self._action_buttons:
+            actions.addWidget(button)
         track_label = QLabel(translate("planner.track"))
         track_label.setObjectName("planner-track-label")
         self._toolbar_widgets: tuple[QWidget, ...] = (
@@ -515,6 +526,7 @@ class PlannerPage(QWidget):
         configure_page(layout)
         layout.addWidget(self.toolbar)
         layout.addWidget(body_scroll, 1)
+        layout.addWidget(self.action_bar)
         layout.addWidget(self.status)
         trace("TRACK_PLANNER_OPEN", result="opened")
         self._refresh_tracks()
@@ -1276,6 +1288,12 @@ class PlannerPage(QWidget):
         for widget in self._toolbar_widgets:
             retain_content_width(widget)
         self.toolbar.updateGeometry()
+        self._fit_actions()
+
+    def _fit_actions(self) -> None:
+        for button in self._action_buttons:
+            retain_content_width(button)
+        self.action_bar.updateGeometry()
 
     def _toggle_group(self) -> None:
         ids = [
@@ -1479,6 +1497,7 @@ class PlannerPage(QWidget):
             return
         self._build_mode = mode
         self.show_all_parts.setVisible(mode == TRACK_PLANNER_BUILD_COLLECTION)
+        self.action_bar.updateGeometry()
         if mode != TRACK_PLANNER_BUILD_COLLECTION and self.show_all_parts.isChecked():
             self._filling = True
             self.show_all_parts.setChecked(False)

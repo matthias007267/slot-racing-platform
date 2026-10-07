@@ -59,7 +59,7 @@ class FlowLayout(QLayout):
     def sizeHint(self) -> QSize:  # noqa: N802
         """Width of one unwrapped row. The layout may still be given less and wrap."""
         margins = self.contentsMargins()
-        hints = [self._hint(item) for item in self._items]
+        hints = [self._hint(item) for item in self._taken()]
         if not hints:
             return QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
         gaps = self.spacing() * (len(hints) - 1)
@@ -73,7 +73,7 @@ class FlowLayout(QLayout):
     def minimumSize(self) -> QSize:  # noqa: N802
         """The widest single control. Narrower than that, a label would be clipped."""
         size = QSize()
-        for item in self._items:
+        for item in self._taken():
             size = size.expandedTo(self._hint(item))
         margins = self.contentsMargins()
         return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
@@ -108,7 +108,7 @@ class FlowLayout(QLayout):
                 if share and _expands(item):
                     shift += share
 
-        for item in self._items:
+        for item in self._taken():
             hint = self._hint(item)
             if line and x + hint.width() > limit + 1:
                 flush(y, line_height)
@@ -121,6 +121,10 @@ class FlowLayout(QLayout):
             line_height = max(line_height, hint.height())
         flush(y, line_height)
         return y + line_height + margins.bottom() - rect.y()
+
+    def _taken(self) -> list[QLayoutItem]:
+        """Hidden controls must not reserve a gap in the row."""
+        return [item for item in self._items if not item.isEmpty()]
 
     @staticmethod
     def _hint(item: QLayoutItem) -> QSize:
