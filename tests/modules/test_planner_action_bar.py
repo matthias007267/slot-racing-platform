@@ -88,8 +88,10 @@ def test_the_library_fills_the_column_and_actions_sit_below_the_planner(
         _assert_flow_heights_match_their_width(page)
         _assert_wraps_exactly_when_the_row_is_narrower_than_one_line(page)
         _assert_column_gives_the_list_the_leftover_height(page, panel, library_scroll)
-        assert stage.height() > 48
+        _assert_stage_keeps_the_leftover(page, stage, above_floor=height >= 600)
         assert properties.width() > 0
+
+    _assert_wrapped_height_is_released(window, page, stage)
 
 
 def test_the_bar_covers_the_row_when_the_columns_are_wider_than_the_window(
@@ -125,7 +127,7 @@ def test_the_bar_covers_the_row_when_the_columns_are_wider_than_the_window(
         _assert_flow_heights_match_their_width(page)
         assert body.width() + 1 >= properties.width()
         assert page.library.height() > 40
-        assert stage.height() > 40
+        _assert_stage_keeps_the_leftover(page, stage, above_floor=height >= 600)
 
 
 def _assert_column_gives_the_list_the_leftover_height(
@@ -189,9 +191,57 @@ def _assert_contained(host: QWidget, widgets: tuple[QWidget, ...]) -> None:
             assert not left.intersects(right)
 
 
+def _assert_stage_keeps_the_leftover(
+    page: PlannerPage, stage: QWidget, *, above_floor: bool
+) -> None:
+    """48 px is the stage's defined floor, not a stuck layout.
+
+    The canvas publishes no minimum of its own. On a short window the wrapped
+    toolbar can leave the column exactly that floor, and the stage may sit on
+    it. A normal window has to hand the leftover back, above the floor.
+    """
+    floor = stage.minimumSizeHint().height()
+    assert stage.height() >= floor
+    if above_floor:
+        assert stage.height() > floor
+    assert page.canvas.height() == stage.height()
+    assert page.canvas.geometry().top() >= 0
+    assert page.canvas.geometry().bottom() <= stage.height()
+
+
+def _assert_wrapped_height_is_released(
+    window: MainWindow, page: PlannerPage, stage: QWidget
+) -> None:
+    """720 x 560, then 1600 x 1000, then 860 x 600 must not keep the narrow wrap."""
+    _activate(window, 720, 560)
+    narrow_toolbar = page.toolbar.height()
+    narrow_action = page.action_bar.height()
+    narrow_stage = stage.height()
+    _assert_flow_heights_match_their_width(page)
+    assert narrow_stage >= stage.minimumSizeHint().height()
+
+    _activate(window, 1600, 1000)
+    assert page.toolbar.height() < narrow_toolbar
+    assert page.action_bar.height() <= narrow_action
+    assert page.toolbar.minimumHeight() < narrow_toolbar
+    assert stage.height() > narrow_stage
+    _assert_flow_heights_match_their_width(page)
+
+    _activate(window, 860, 600)
+    assert page.toolbar.height() < narrow_toolbar
+    assert page.action_bar.height() <= narrow_action
+    assert stage.height() > stage.minimumSizeHint().height()
+    assert stage.height() > narrow_stage
+    _assert_flow_heights_match_their_width(page)
+    _assert_buttons_are_fully_visible(page)
+    _assert_toolbar_buttons_are_inside(page)
+
+
 def _assert_flow_heights_match_their_width(page: PlannerPage) -> None:
     for host in (page.toolbar, page.action_bar):
-        assert host.height() + 1 >= host.heightForWidth(host.width())
+        needed = host.heightForWidth(host.width())
+        assert host.minimumHeight() == needed
+        assert abs(host.height() - needed) <= 1
 
 
 def _assert_wraps_exactly_when_the_row_is_narrower_than_one_line(page: PlannerPage) -> None:

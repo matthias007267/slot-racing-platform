@@ -189,6 +189,8 @@ class FlowHost(QWidget):
             self.updateGeometry()
             return
         needed = self.heightForWidth(self.width())
+        # Replace the previous width's height. A narrow wrap must not stay
+        # as a minimum after the bar is wide enough for fewer rows.
         if self.minimumHeight() != needed:
             self.setMinimumHeight(needed)
         self.updateGeometry()

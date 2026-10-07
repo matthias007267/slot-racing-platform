@@ -184,7 +184,9 @@ class _PlanStage(QWidget):
         return QSize(160, 120)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 48)
+        # Same floor as the column. A short window may leave only this strip
+        # once the wrapped toolbar and action bar have taken their height.
+        return QSize(0, _COLUMN_FLOOR)
 
 
 class PlannerPage(QWidget):
