@@ -10,6 +10,7 @@ from pathlib import Path
 
 from slot_racing.core.clock import Clock
 from slot_racing.core.config import AppConfig
+from slot_racing.core.diagnostics import record as trace
 from slot_racing.core.events import EventDispatcher, PluginDisabled, PluginEnabled
 from slot_racing.core.i18n import Translator
 from slot_racing.core.plugin.context import PluginContext
@@ -141,6 +142,12 @@ class PluginManager:
             record.plugin.activate(context)
         except Exception as error:
             logger.exception("Plugin %s failed to activate", name)
+            trace(
+                "PLUGIN_ACTIVATE_FAILED",
+                module="plugins",
+                result=type(error).__name__,
+                plugin_id=name,
+            )
             self._safe_deactivate(record.plugin)
             context.release()
             self._mark_failed(record, f"{type(error).__name__}: {error}")
@@ -148,6 +155,7 @@ class PluginManager:
 
         record.context = context
         record.state = PluginState.ENABLED
+        trace("PLUGIN_ACTIVATE", module="plugins", result="enabled", plugin_id=name)
         record.error = None
         self._activation_order.append(name)
         self._bus.publish(
@@ -210,10 +218,19 @@ class PluginManager:
 
     @staticmethod
     def _safe_deactivate(plugin: Plugin) -> None:
+        name = plugin.manifest.name
         try:
             plugin.deactivate()
         except Exception:
-            logger.exception("Plugin %s failed to deactivate cleanly", plugin.manifest.name)
+            logger.exception("Plugin %s failed to deactivate cleanly", name)
+            trace(
+                "PLUGIN_DEACTIVATE_FAILED",
+                module="plugins",
+                result="failed",
+                plugin_id=name,
+            )
+            return
+        trace("PLUGIN_DEACTIVATE", module="plugins", result="disabled", plugin_id=name)
 
     def _dependency_order(self, names: list[str]) -> tuple[list[str], list[str]]:
         """Topologically sort ``names`` (required and optional dependencies first).

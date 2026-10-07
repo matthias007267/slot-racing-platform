@@ -37,6 +37,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from slot_racing.core.clock import Clock
+from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import (
     DriverId,
     Participant,
@@ -337,6 +338,13 @@ class RaceEngine:
     def _finish(self, timestamp_ns: int, *, aborted: bool) -> None:
         if self._status is RaceStatus.FINISHED:
             return
+        record(
+            "RACE_ABORT" if aborted else "RACE_FINISH",
+            module="races",
+            page="races",
+            result="aborted" if aborted else "finished",
+            race_id=int(self._config.race_id),
+        )
         self._final_elapsed_ns = max(0, self._race_time(timestamp_ns))
         self._status = RaceStatus.FINISHED
         self._release()

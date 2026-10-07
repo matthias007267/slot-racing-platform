@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from slot_racing.core.diagnostics import record
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import (
     CameraFrameSource,
@@ -491,6 +492,13 @@ class CameraSession:
             consumer or "-",
             reason,
             duration_ns / 1_000_000,
+        )
+        record(
+            action,
+            module="timing_camera",
+            page="camera",
+            result=reason,
+            consumer=consumer or "-",
         )
 
 

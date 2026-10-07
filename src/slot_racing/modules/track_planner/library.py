@@ -26,6 +26,7 @@ from slot_racing.modules.track_planner.parts import (
     require_scale,
     standard_catalog,
 )
+from slot_racing.modules.track_planner.trace import trace
 
 
 class PartLibrary:
@@ -72,9 +73,11 @@ class PartLibrary:
                 self._reject_duplicate(session, spec)
                 definition = self._insert(session, spec)
                 session.flush()
-                return self._record(session, definition)
+                created = self._record(session, definition)
         except IntegrityError as error:
             raise self._duplicate(spec) from error
+        trace("PART_CREATE", result="created", part_id=created.id)
+        return created
 
     def update_part(self, part_id: int, spec: PartSpec) -> PartRecord:
         try:
@@ -100,9 +103,11 @@ class PartLibrary:
                 )
                 self._add_connectors(session, part_id, spec)
                 session.flush()
-                return self._record(session, definition)
+                updated = self._record(session, definition)
         except IntegrityError as error:
             raise self._duplicate(spec) from error
+        trace("PART_UPDATE", result="updated", part_id=part_id)
+        return updated
 
     def delete_part(self, part_id: int) -> None:
         """Remove a part from the placeable library.
@@ -112,6 +117,7 @@ class PartLibrary:
         otherwise insert it again. An unused custom part is deleted, and its
         stock row goes with it.
         """
+        trace("PART_DELETE_REQUEST", result="requested", part_id=part_id)
         catalog = {identity_key(spec.name, spec.article_number) for spec in standard_catalog()}
         with self._database.session() as session:
             definition = session.get(TrackPartDefinition, part_id)
@@ -123,12 +129,14 @@ class PartLibrary:
                 .where(TrackPlanInstance.part_id == part_id)
             )
             if used:
+                trace("PART_DELETE_BLOCKED", result="in_use", part_id=part_id)
                 raise ValidationError("error.planner.part_in_use", count=int(used))
             key = identity_key(definition.name, definition.article_number)
             if key in catalog:
                 definition.suppressed = True
-                return
-            session.delete(definition)
+            else:
+                session.delete(definition)
+        trace("PART_DELETE_SUCCESS", result="deleted", part_id=part_id)
 
     def stock_quantities(self) -> dict[int, int]:
         """Owned counts keyed by part id. A missing row means the user owns none."""

@@ -75,5 +75,39 @@ SHELL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "backup.file_filter": "Slot-Racing Backup (*.slbackup)",
         "page.placeholder": "Diese Ansicht ist noch nicht implementiert.",
         "page.error": "Diese Ansicht konnte nicht geladen werden.",
+        "diagnostics.title": "Diagnose",
+        "diagnostics.version": "Version",
+        "diagnostics.session": "Sitzung",
+        "diagnostics.os": "Betriebssystem",
+        "diagnostics.python": "Python",
+        "diagnostics.qt": "PySide / Qt",
+        "diagnostics.schema": "Datenbankschema",
+        "diagnostics.log_dir": "Log-Verzeichnis",
+        "diagnostics.started": "Letzter Start",
+        "diagnostics.previous": "Vorherige Sitzung sauber beendet",
+        "diagnostics.previous.yes": "ja",
+        "diagnostics.previous.no": "nein",
+        "diagnostics.open_log": "Logdatei öffnen",
+        "diagnostics.open_folder": "Logordner öffnen",
+        "diagnostics.create": "Diagnosepaket erstellen",
+        "diagnostics.filter": "Diagnosepaket (*.zip)",
+        "diagnostics.created": "Diagnosepaket erstellt: {name}",
+        "diagnostics.failed": "Das Diagnosepaket konnte nicht erstellt werden.",
+        "diagnostics.inactive": "Die Diagnose ist in dieser Sitzung nicht aktiv.",
+        "diagnostics.open_failed": "Der Ordner konnte nicht geöffnet werden.",
+        "diagnostics.previous.title": "Vorherige Sitzung",
+        "diagnostics.previous.body": (
+            "Die vorherige Sitzung wurde nicht ordnungsgemäß beendet. "
+            "Möchtest du ein Diagnosepaket erstellen?"
+        ),
+        "diagnostics.previous.ignore": "Ignorieren",
+        "diagnostics.crash.title": "Unerwarteter Fehler",
+        "diagnostics.crash.body": (
+            "Ein unerwarteter Fehler ist aufgetreten.\n\n"
+            "Fehler-ID: {crash_id}\n"
+            "Der Fehler wurde lokal protokolliert."
+        ),
+        "diagnostics.crash.open": "Diagnose öffnen",
+        "diagnostics.crash.close": "Schließen",
     }
 }

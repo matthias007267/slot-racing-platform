@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from slot_racing.app.backup_settings import BackupSettings
+from slot_racing.app.diagnostics_ui import DiagnosticsSettings
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.plugin import PluginError, PluginState, SettingsSection
 from slot_racing.uikit.theme import configure_page, set_role, set_tone
@@ -83,6 +84,7 @@ class SettingsPage(QWidget):
             self._checkboxes[status.name] = checkbox
             self._body_layout.addWidget(checkbox)
         self._body_layout.addWidget(BackupSettings(self._runtime, self._after_restore))
+        self._body_layout.addWidget(DiagnosticsSettings(self._runtime))
         for section in self._runtime.contributions.settings_sections():
             self._add_section(section)
         self._body_layout.addWidget(self._message)
