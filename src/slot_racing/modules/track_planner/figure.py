@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from itertools import pairwise
 
+from slot_racing.modules.track_planner.attachment import (
+    HOST_STRAIGHT,
+    STRIP_WIDTH_MM,
+    placed_outline,
+)
 from slot_racing.modules.track_planner.parts import (
     BORDER,
     CROSSING,
@@ -78,19 +83,23 @@ class TrackFigure:
     edges: tuple[SlotPath, ...]
     outer_shoulder: tuple[tuple[float, float], ...] = ()
     inner_shoulder: tuple[tuple[float, float], ...] = ()
+    # Red bands of a border strip. Empty for a roadway.
+    stripes: tuple[tuple[tuple[float, float], ...], ...] = ()
 
 
-def track_figure(spec: PartSpec) -> TrackFigure:
-    """Geometry for ``spec``. The same definition returns the same object."""
-    return _cached_figure(spec)
+def track_figure(spec: PartSpec, slot: str | None = None) -> TrackFigure:
+    """Geometry for ``spec``. The same definition and slot return the same object."""
+    return _cached_figure(spec, slot)
 
 
 @lru_cache(maxsize=512)
-def _cached_figure(spec: PartSpec) -> TrackFigure:
-    return _build_figure(spec)
+def _cached_figure(spec: PartSpec, slot: str | None) -> TrackFigure:
+    return _build_figure(spec, slot)
 
 
-def _build_figure(spec: PartSpec) -> TrackFigure:
+def _build_figure(spec: PartSpec, slot: str | None) -> TrackFigure:
+    if spec.attachment is not None:
+        return _accessory(spec, slot)
     if spec.category in {BORDER, SUPPORT}:
         return _strip(spec)
     if _is_arc(spec):
@@ -107,6 +116,104 @@ def _build_figure(spec: PartSpec) -> TrackFigure:
         centerlines=_dashed(centers),
         edges=_long_edges(length, width, _side_mouths(spec)),
     )
+
+
+def _accessory(spec: PartSpec, slot: str | None) -> TrackFigure:
+    """A strip beside its host. No groove is invented for it."""
+    profile = spec.attachment
+    assert profile is not None
+    active = slot if slot in profile.slots else None
+    outline = placed_outline(spec, active)
+    if profile.host_shape == HOST_STRAIGHT:
+        length = profile.host_length_mm or 0.0
+        return TrackFigure(
+            roadway=outline,
+            road_arc=None,
+            slots=(),
+            centerlines=(),
+            edges=_outline_edges(outline),
+            stripes=_rect_stripes(outline, length),
+        )
+    if active is None:
+        radii = [math.hypot(x_mm, y_mm) for x_mm, y_mm in outline]
+        center = (min(radii) + max(radii)) / 2.0 if radii else 0.0
+        width = (max(radii) - min(radii)) if radii else STRIP_WIDTH_MM
+    else:
+        center = _strip_radius(profile.host_radius_mm or 0.0, active)
+        width = STRIP_WIDTH_MM
+    angle = profile.host_angle_deg or 0.0
+    road = RoadArc(center, angle, width)
+    return TrackFigure(
+        roadway=outline,
+        road_arc=road,
+        slots=(),
+        centerlines=(),
+        edges=_outline_edges(outline),
+        stripes=_arc_stripes(center, angle, width),
+    )
+
+
+def _strip_radius(road_radius: float, slot: str) -> float:
+    half = track_width(2) / 2.0
+    if slot == "outer":
+        return road_radius + half + STRIP_WIDTH_MM / 2.0
+    return max(road_radius - half - STRIP_WIDTH_MM / 2.0, STRIP_WIDTH_MM / 2.0)
+
+
+def _rect_stripes(
+    outline: tuple[tuple[float, float], ...], length_mm: float
+) -> tuple[tuple[tuple[float, float], ...], ...]:
+    if length_mm <= 0.0 or len(outline) < 3:
+        return ()
+    low = min(point[1] for point in outline)
+    high = max(point[1] for point in outline)
+    half = length_mm / 2.0
+    band = 46.0
+    stripes: list[tuple[tuple[float, float], ...]] = []
+    cursor = -half
+    index = 0
+    while cursor < half - 1e-6:
+        end = min(cursor + band, half)
+        if index % 2 == 0:
+            stripes.append(((cursor, low), (end, low), (end, high), (cursor, high)))
+        cursor = end
+        index += 1
+    return tuple(stripes)
+
+
+def _arc_stripes(
+    center_mm: float, angle_deg: float, width_mm: float
+) -> tuple[tuple[tuple[float, float], ...], ...]:
+    if angle_deg <= 0.0 or center_mm <= 0.0:
+        return ()
+    inner = max(center_mm - width_mm / 2.0, 0.0)
+    outer = center_mm + width_mm / 2.0
+    start = -angle_deg / 2.0
+    band = 5.0
+    stripes: list[tuple[tuple[float, float], ...]] = []
+    cursor = start
+    index = 0
+    while cursor < start + angle_deg - 1e-6:
+        sweep = min(band, start + angle_deg - cursor)
+        if index % 2 == 0:
+            stripes.append(_sector(inner, outer, cursor, sweep))
+        cursor += sweep
+        index += 1
+    return tuple(stripes)
+
+
+def _sector(
+    inner_mm: float, outer_mm: float, start_deg: float, sweep_deg: float
+) -> tuple[tuple[float, float], ...]:
+    steps = 3
+    points: list[tuple[float, float]] = []
+    for index in range(steps + 1):
+        theta = math.radians(start_deg + sweep_deg * index / steps)
+        points.append((outer_mm * math.cos(theta), outer_mm * math.sin(theta)))
+    for index in range(steps + 1):
+        theta = math.radians(start_deg + sweep_deg * (steps - index) / steps)
+        points.append((inner_mm * math.cos(theta), inner_mm * math.sin(theta)))
+    return tuple(points)
 
 
 def _strip(spec: PartSpec) -> TrackFigure:

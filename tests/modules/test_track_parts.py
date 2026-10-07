@@ -236,7 +236,10 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     assert by_article["20030350"].category == SPECIAL
     assert by_article["20020574"].radius_mm == pytest.approx(300)
     assert by_article["20020560"].category == BORDER
-    assert by_article["20020560"].connectors[0].kind == "border"
+    assert by_article["20020560"].connectors == ()
+    assert by_article["20020560"].attachment is not None
+    assert by_article["20020563"].attachment is not None
+    assert by_article["20020592"].attachment is not None
     assert SUPPORT in CATEGORIES
     assert set(CATEGORIES) >= {
         STRAIGHT,

@@ -46,6 +46,13 @@ class TrackPartDefinition(Base):
     slot_paths: Mapped[list[Any] | None] = mapped_column(JSON)
     # A catalog part the user removed. The row stays so seeding does not recreate it.
     suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Set together when this definition rides on a host instead of joining the track.
+    attachment_host_shape: Mapped[str | None] = mapped_column(String(16))
+    attachment_slots: Mapped[str | None] = mapped_column(String(40))
+    attachment_host_length_mm: Mapped[float | None] = mapped_column(Float)
+    attachment_host_radius_mm: Mapped[float | None] = mapped_column(Float)
+    attachment_host_angle_deg: Mapped[float | None] = mapped_column(Float)
+    attachment_host_lanes: Mapped[int | None] = mapped_column(Integer)
 
 
 class TrackPartConnector(Base):
@@ -85,6 +92,9 @@ class TrackPlanInstance(Base):
     group_id: Mapped[str | None] = mapped_column(String(40))
     # Position in the plan. New instances are appended, so this is the creation order.
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # The rail this instance rides on. Empty for every ordinary track piece.
+    host_instance_id: Mapped[str | None] = mapped_column(String(40))
+    attachment_slot: Mapped[str | None] = mapped_column(String(16))
 
 
 class TrackPartStock(Base):

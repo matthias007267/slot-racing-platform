@@ -14,6 +14,12 @@ from uuid import uuid4
 
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
+from slot_racing.modules.track_planner.attachment import (
+    ATTACHMENT_SLOTS,
+    attachment_fits,
+    follow_hosts,
+    slot_taken,
+)
 from slot_racing.modules.track_planner.parts import (
     DEFAULT_GRID_MM,
     DEFAULT_SNAP_MM,
@@ -351,7 +357,7 @@ def rotate_instances_around(
     delta_deg: float,
 ) -> TrackPlan:
     """Turn every listed instance around one shared point. Definitions stay untouched."""
-    wanted = set(instance_ids)
+    wanted = {instance_id for instance_id in instance_ids if _movable(plan, instance_id)}
     if not wanted or delta_deg % 360 == 0:
         return plan
     updated: list[PartInstance] = []
@@ -374,18 +380,36 @@ def rotate_instances_around(
 def duplicate_instances(
     plan: TrackPlan, instance_ids: Sequence[str], dx_mm: float, dy_mm: float
 ) -> tuple[TrackPlan, tuple[str, ...]]:
-    """New instances of the same definitions, shifted so the copy is not on the original."""
-    wanted = set(instance_ids)
+    """New instances of the same definitions, shifted so the copy is not on the original.
+
+    Copying a rail also copies the parts attached to it. The copies point at the
+    new rails. An attached part is not pasted onto the original rail.
+    """
+    by_id = {instance.id: instance for instance in plan.instances}
+    wanted = {instance_id for instance_id in instance_ids if instance_id in by_id}
+    for instance_id in list(wanted):
+        host_id = by_id[instance_id].host_id
+        if host_id is not None and host_id in by_id:
+            wanted.add(host_id)
+    for instance in plan.instances:
+        if instance.host_id in wanted:
+            wanted.add(instance.id)
+    if not wanted:
+        return plan, ()
+    id_map = {instance_id: new_id() for instance_id in wanted}
     created: list[str] = []
     extra: list[PartInstance] = []
     group_map: dict[str, str] = {}
     for instance in plan.instances:
         if instance.id not in wanted:
             continue
-        identifier = new_id()
-        group_id = instance.group_id
+        group_id = None if instance.host_id is not None else instance.group_id
         if group_id is not None and group_id not in group_map:
             group_map[group_id] = new_id()
+        host_id = None if instance.host_id is None else id_map.get(instance.host_id)
+        if instance.host_id is not None and host_id is None:
+            continue
+        identifier = id_map[instance.id]
         extra.append(
             replace(
                 instance,
@@ -394,6 +418,7 @@ def duplicate_instances(
                 y_mm=instance.y_mm + dy_mm,
                 start_straight=False,
                 group_id=None if group_id is None else group_map[group_id],
+                host_id=host_id,
             )
         )
         created.append(identifier)
@@ -419,10 +444,24 @@ def rotate_instance(plan: TrackPlan, instance_id: str, rotation_z_deg: float) ->
 
 
 def remove_instance(plan: TrackPlan, instance_id: str) -> TrackPlan:
-    instances = tuple(instance for instance in plan.instances if instance.id != instance_id)
-    if len(instances) == len(plan.instances):
+    return remove_instances(plan, (instance_id,))
+
+
+def remove_instances(plan: TrackPlan, instance_ids: Sequence[str]) -> TrackPlan:
+    """Remove the listed instances. A removed rail takes its attached parts with it."""
+    requested = set(instance_ids)
+    if not any(instance.id in requested for instance in plan.instances):
         raise ValidationError("error.planner.piece")
-    return _replace(plan, instances=instances)
+    drop = set(requested)
+    growing = True
+    while growing:
+        growing = False
+        for instance in plan.instances:
+            if instance.host_id in drop and instance.id not in drop:
+                drop.add(instance.id)
+                growing = True
+    kept = tuple(instance for instance in plan.instances if instance.id not in drop)
+    return _replace(plan, instances=kept)
 
 
 def set_start_straight(
@@ -450,7 +489,11 @@ def set_start_straight(
 
 def toggle_group(plan: TrackPlan, instance_ids: Sequence[str]) -> TrackPlan:
     """Group the selection, or dissolve it when the selection already is that group."""
-    wanted = [instance_id for instance_id in instance_ids if _has_instance(plan, instance_id)]
+    wanted = [
+        instance_id
+        for instance_id in instance_ids
+        if _has_instance(plan, instance_id) and _require_instance(plan, instance_id).host_id is None
+    ]
     if len(wanted) < 2:
         return plan
     selected = [instance for instance in plan.instances if instance.id in set(wanted)]
@@ -545,17 +588,22 @@ def extend_from_connector(
 
 def clone_plan(plan: TrackPlan, track_id: TrackId) -> TrackPlan:
     """A new plan with new instance ids and the same definitions, poses and markers."""
+    id_map = {instance.id: new_id() for instance in plan.instances}
     group_map: dict[str, str] = {}
     instances: list[PartInstance] = []
     for instance in plan.instances:
-        group_id = instance.group_id
+        group_id = None if instance.host_id is not None else instance.group_id
         if group_id is not None and group_id not in group_map:
             group_map[group_id] = new_id()
+        host_id = None if instance.host_id is None else id_map.get(instance.host_id)
+        if instance.host_id is not None and host_id is None:
+            continue
         instances.append(
             replace(
                 instance,
-                id=new_id(),
+                id=id_map[instance.id],
                 group_id=None if group_id is None else group_map[group_id],
+                host_id=host_id,
             )
         )
     return _validate(
@@ -604,6 +652,8 @@ def place_instance(
     catalog: dict[int, PartSpec],
 ) -> TrackPlan:
     """Append one instance. A nearby compatible joint wins over the grid."""
+    if spec.attachment is not None:
+        raise ValidationError("error.planner.part")
     placed = _placed(plan, catalog)
     pose = snap_pose(
         spec,
@@ -625,6 +675,42 @@ def place_instance(
     known = dict(catalog)
     known[part_id] = spec
     return set_start_straight(plan, instance.id, True, known)
+
+
+def attach_accessory(
+    plan: TrackPlan,
+    host_id: str,
+    part_id: int,
+    spec: PartSpec,
+    slot: str,
+    catalog: dict[int, PartSpec],
+) -> TrackPlan:
+    """Bind one accessory to one rail. The pose is the rail's pose."""
+    if spec.attachment is None or slot not in ATTACHMENT_SLOTS:
+        raise ValidationError("error.planner.part")
+    host = _require_instance(plan, host_id)
+    if host.host_id is not None:
+        raise ValidationError("error.planner.part")
+    host_spec = catalog.get(host.part_id)
+    if host_spec is None or not attachment_fits(spec, host_spec, slot):
+        raise ValidationError("error.planner.part")
+    if slot_taken(plan.instances, host_id, slot):
+        raise ValidationError("error.planner.part")
+    return add_instance(
+        plan,
+        PartInstance(
+            id=new_id(),
+            part_id=part_id,
+            x_mm=host.x_mm,
+            y_mm=host.y_mm,
+            z_mm=host.z_mm,
+            rotation_x_deg=host.rotation_x_deg,
+            rotation_y_deg=host.rotation_y_deg,
+            rotation_z_deg=host.rotation_z_deg,
+            host_id=host.id,
+            attachment_slot=slot,
+        ),
+    )
 
 
 def reposition_instance(
@@ -650,8 +736,16 @@ def reposition_selection(
     ``plan``, before this drag. The anchor only decides which part falls onto the grid when
     no free joint is in range.
     """
-    if anchor_id not in proposed_xy:
-        raise ValidationError("error.planner.part")
+    hosts_only = {
+        instance_id: point
+        for instance_id, point in proposed_xy.items()
+        if _movable(plan, instance_id)
+    }
+    if not hosts_only:
+        return plan
+    if anchor_id not in hosts_only:
+        anchor_id = next(iter(hosts_only))
+    proposed_xy = hosts_only
     topology = _placed(plan, catalog)
     by_id = {instance.id: (instance, spec) for instance, spec in topology}
     proposed: list[tuple[PartInstance, PartSpec]] = []
@@ -691,10 +785,19 @@ def _placed(
 ) -> tuple[tuple[PartInstance, PartSpec], ...]:
     placed: list[tuple[PartInstance, PartSpec]] = []
     for instance in plan.instances:
+        if instance.host_id is not None:
+            continue
         spec = catalog.get(instance.part_id)
         if spec is not None:
             placed.append((instance, spec))
     return tuple(placed)
+
+
+def _movable(plan: TrackPlan, instance_id: str) -> bool:
+    for instance in plan.instances:
+        if instance.id == instance_id:
+            return instance.host_id is None
+    return False
 
 
 def _require_instance(plan: TrackPlan, instance_id: str) -> PartInstance:
@@ -714,7 +817,7 @@ def _update_instance(plan: TrackPlan, instance_id: str, build: Any) -> TrackPlan
 
 
 def _instance_document(instance: PartInstance) -> dict[str, Any]:
-    return {
+    document = {
         "id": instance.id,
         "part_id": instance.part_id,
         "x": instance.x_mm,
@@ -726,6 +829,10 @@ def _instance_document(instance: PartInstance) -> dict[str, Any]:
         "start_straight": instance.start_straight,
         "group_id": instance.group_id,
     }
+    if instance.host_id is not None:
+        document["host_id"] = instance.host_id
+        document["attachment_slot"] = instance.attachment_slot
+    return document
 
 
 def _parse_instance(payload: object) -> PartInstance:
@@ -746,6 +853,8 @@ def _parse_instance(payload: object) -> PartInstance:
         rotation_z_deg=_angle(payload.get("rotation_z", 0)),
         start_straight=_optional_flag(payload.get("start_straight", False)),
         group_id=None if group_id is None else _identity(group_id),
+        host_id=_optional_identity(payload.get("host_id")),
+        attachment_slot=_optional_identity(payload.get("attachment_slot")),
     )
 
 
@@ -767,6 +876,14 @@ def _check_instance(instance: PartInstance) -> None:
         raise ValidationError("error.planner.part")
     if instance.group_id is not None:
         _identity(instance.group_id)
+    host_id = instance.host_id
+    slot = instance.attachment_slot
+    if (host_id is None) != (slot is None):
+        raise ValidationError("error.planner.part")
+    if host_id is not None:
+        _identity(host_id)
+        if host_id == instance.id or slot not in ATTACHMENT_SLOTS:
+            raise ValidationError("error.planner.part")
 
 
 def _millimetre(value: object) -> float:
@@ -841,7 +958,7 @@ def _validate(plan: TrackPlan) -> TrackPlan:
         _check_instance(instance)
     if not isinstance(plan.grid_enabled, bool) or plan.grid_mm <= 0 or plan.snap_mm < 0:
         raise ValidationError("error.planner.invalid")
-    instances = _dissolve_small_groups(plan.instances)
+    instances = _dissolve_small_groups(follow_hosts(plan.instances))
     if sum(instance.start_straight for instance in instances) > 1:
         raise ValidationError("error.planner.invalid")
     marker_ids: set[str] = set()
@@ -921,6 +1038,12 @@ def _cell(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValidationError("error.planner.invalid")
     return value
+
+
+def _optional_identity(value: object) -> str | None:
+    if value is None:
+        return None
+    return _identity(value)
 
 
 def _identity(value: object) -> str:

@@ -39,6 +39,9 @@ from slot_racing.modules.track_planner.parts import SPAN_ARC, PartSpec, SlotPath
 from slot_racing.uikit.theme import COLORS
 
 _MIN_PX = 1.2
+# Red and white are paint, not the identity of a border strip.
+STRIP_WHITE = "#f4f4f4"
+STRIP_RED = "#d0121a"
 
 
 @dataclass(slots=True)
@@ -49,6 +52,7 @@ class _Drawn:
     edges: QPainterPath
     outer_shoulder: QPainterPath
     inner_shoulder: QPainterPath
+    stripes: QPainterPath
 
 
 def paint_part(
@@ -59,16 +63,18 @@ def paint_part(
     selected: bool,
     start_straight: bool,
     shortage: bool = False,
+    attachment_slot: str | None = None,
 ) -> None:
     """Draw ``spec`` in local millimetres. The caller sets the transform."""
+    accessory = spec.attachment is not None
     paint_figure(
         painter,
-        track_figure(spec),
-        fill=roadway_fill(spec, coded=color_coding),
+        track_figure(spec, attachment_slot),
+        fill=STRIP_WHITE if accessory else roadway_fill(spec, coded=color_coding),
         selected=selected,
-        start_straight=start_straight,
+        start_straight=start_straight and not accessory,
         part_width=spec.width_mm or 0.0,
-        shortage=shortage,
+        shortage=shortage and not accessory,
     )
 
 
@@ -86,6 +92,7 @@ def paint_figure(
     painter.save()
     _fill(painter, drawn.outer_shoulder, SHOULDER)
     _fill(painter, drawn.roadway, fill)
+    _fill(painter, drawn.stripes, STRIP_RED)
     _fill(painter, drawn.inner_shoulder, SHOULDER)
     _stroke(painter, drawn.edges, ROADWAY_EDGE, EDGE_WIDTH_MM, round_cap=False)
     # Flat caps end on the span point. A round cap would stick out by half the stroke.
@@ -136,7 +143,19 @@ def _drawn(figure: TrackFigure) -> _Drawn:
         edges=_grooves(figure.edges),
         outer_shoulder=_polygon(figure.outer_shoulder),
         inner_shoulder=_polygon(figure.inner_shoulder),
+        stripes=_polygons(figure.stripes),
     )
+
+
+def _polygons(groups: tuple[tuple[tuple[float, float], ...], ...]) -> QPainterPath:
+    path = QPainterPath()
+    for polygon in groups:
+        path.addPolygon(_points(polygon))
+    return path
+
+
+def _points(polygon: tuple[tuple[float, float], ...]) -> QPolygonF:
+    return QPolygonF([QPointF(x_mm, y_mm) for x_mm, y_mm in polygon])
 
 
 def _fill(painter: QPainter, path: QPainterPath, color: str) -> None:

@@ -14,6 +14,7 @@ from pytestqt.qtbot import QtBot
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner.document import (
+    attach_accessory,
     empty_plan,
     extend_from_connector,
     place_instance,
@@ -37,6 +38,7 @@ from slot_racing.modules.track_planner.parts import (
     extend_article,
     extend_pose,
     find_catalog_part,
+    free_connector_indexes,
     offered_extend_directions,
     placed_continuation_delta_deg,
     standard_catalog,
@@ -156,7 +158,6 @@ def test_another_curve_continues_around_the_same_centre() -> None:
 def test_extend_respects_compatibility_snap_and_leaves_failures_unchanged() -> None:
     catalog = _catalog()
     straight_id, straight = standard_extend_parts(catalog)[EXTEND_STRAIGHT]
-    curve = standard_extend_parts(catalog)[EXTEND_LEFT][1]
     plan = place_instance(empty_plan(TrackId(1)), straight_id, straight, 0, 0, 0, catalog)
     moved = replace(plan.instances[0], x_mm=3, y_mm=7, rotation_z_deg=15)
     plan = set_plan_grid(with_instances(plan, (moved,)), enabled=True, grid_mm=10, snap_mm=25)
@@ -183,15 +184,21 @@ def test_extend_respects_compatibility_snap_and_leaves_failures_unchanged() -> N
     assert len(updated.instances) == 2
 
     border = next(spec for spec in standard_catalog() if spec.article_number == "20020560")
+    assert border.connectors == ()
     border_id = max(catalog) + 1
     catalog[border_id] = border
-    border_plan = place_instance(empty_plan(TrackId(2)), border_id, border, 0, 0, 0, catalog)
-    border_joint = border.connectors[0]
-    assert offered_extend_directions(border_plan.instances[0], border_joint, straight, curve) == ()
+    with pytest.raises(ValidationError):
+        place_instance(empty_plan(TrackId(2)), border_id, border, 0, 0, 0, catalog)
+    host_plan = place_instance(empty_plan(TrackId(2)), straight_id, straight, 0, 0, 0, catalog)
+    attached = attach_accessory(
+        host_plan, host_plan.instances[0].id, border_id, border, "left", catalog
+    )
+    strip = attached.instances[-1]
+    assert free_connector_indexes(strip, border, [(attached.instances[0], straight)]) == ()
     with pytest.raises(ValidationError) as incompatible:
-        extend_from_connector(border_plan, border_plan.instances[0].id, 0, EXTEND_RIGHT, catalog)
+        extend_from_connector(attached, strip.id, 0, EXTEND_RIGHT, catalog)
     assert incompatible.value.key == "error.planner.extend"
-    assert len(border_plan.instances) == 1
+    assert len(attached.instances) == 2
 
     without_straight = {
         part_id: spec
@@ -351,7 +358,8 @@ def test_free_joints_show_local_arrows_and_occupied_joints_do_not(qtbot: QtBot, 
     )
     assert after == pytest.approx(sorted((heading + 90) % 360 for heading in before))
 
-    _place(page, "20020560", x=900, y=400)
+    straight = _instances(page)[0]
+    page.add_accessory(straight.item_id, "left")
     assert _arrows(page) == []
     _place(page, "20030341", x=900, y=-400)
     assert _arrows(page) == []

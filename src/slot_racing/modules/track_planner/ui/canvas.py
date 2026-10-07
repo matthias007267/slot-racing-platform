@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from slot_racing.modules.track_planner.attachment import placed_outline
 from slot_racing.modules.track_planner.document import (
     CLOCKWISE,
     CURVE_90,
@@ -76,6 +77,7 @@ MovedGroup = Callable[[str, list[tuple[str, float, float]]], None]
 Rotated = Callable[[list[str], float, float, float], None]
 Dropped = Callable[[int, float, float], None]
 Extended = Callable[[str, int, str], None]
+AccessoryRequested = Callable[[str, QPoint], None]
 
 
 def rect_fully_inside(inner: QRectF, outer: QRectF) -> bool:
@@ -138,6 +140,8 @@ class PlanCanvas(QGraphicsView):
         self._rotate_center = (0.0, 0.0)
         self._rotate_start = 0.0
         self._rotate_starts: dict[str, tuple[float, float, float]] = {}
+        self._on_accessory: AccessoryRequested | None = None
+        self._right_at: QPointF | None = None
 
     def set_listener(self, listener: Moved) -> None:
         self._on_moved = listener
@@ -153,6 +157,9 @@ class PlanCanvas(QGraphicsView):
 
     def set_extend_listener(self, listener: Extended) -> None:
         self._on_extended = listener
+
+    def set_accessory_listener(self, listener: AccessoryRequested) -> None:
+        self._on_accessory = listener
 
     def set_color_coding(self, enabled: bool) -> None:
         """Restyle the parts already on the plan. The scene is not rebuilt."""
@@ -267,6 +274,7 @@ class PlanCanvas(QGraphicsView):
         if event.button() == Qt.MouseButton.RightButton:
             self._panning = True
             self._pan_at = event.position()
+            self._right_at = event.position()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -308,7 +316,11 @@ class PlanCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton and self._panning:
+            right_at = self._right_at
+            self._right_at = None
             self._panning = False
+            if right_at is not None and (event.position() - right_at).manhattanLength() < _DRAG_PX:
+                self._offer_accessory_menu(event)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self.rotation_handle.dragging:
@@ -316,14 +328,14 @@ class PlanCanvas(QGraphicsView):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._rubber_at is not None:
-            origin = self._rubber_at
+            rubber_at = self._rubber_at
             self._rubber_at = None
             self._band.hide()
             end = event.position().toPoint()
-            if (end - origin).manhattanLength() < _DRAG_PX:
+            if (end - rubber_at).manhattanLength() < _DRAG_PX:
                 self._scene.clearSelection()
             else:
-                area = QRectF(self.mapToScene(origin), self.mapToScene(end)).normalized()
+                area = QRectF(self.mapToScene(rubber_at), self.mapToScene(end)).normalized()
                 self.select_fully_inside(area)
             event.accept()
             return
@@ -361,8 +373,18 @@ class PlanCanvas(QGraphicsView):
             return
         self._on_group(anchor, moves)
 
-    def _begin_rotate(self, scene_pos: QPointF) -> None:
+    def _offer_accessory_menu(self, event: QMouseEvent) -> None:
         selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
+        if len(selected) != 1 or selected[0].host_id is not None or self._on_accessory is None:
+            return
+        self._on_accessory(selected[0].item_id, event.globalPosition().toPoint())
+
+    def _begin_rotate(self, scene_pos: QPointF) -> None:
+        selected = [
+            item
+            for item in self._scene.selectedItems()
+            if isinstance(item, InstanceItem) and item.host_id is None
+        ]
         if not selected:
             return
         center_x = sum(item.pos().x() for item in selected) / len(selected)
@@ -388,6 +410,17 @@ class PlanCanvas(QGraphicsView):
             x_mm, y_mm, rotation = self._rotate_starts[item.item_id]
             dx, dy = rotate_xy(x_mm - self._rotate_center[0], y_mm - self._rotate_center[1], delta)
             item.preview(self._rotate_center[0] + dx, self._rotate_center[1] + dy, rotation + delta)
+        hosts = {
+            item.item_id: item
+            for item in self._scene.items()
+            if isinstance(item, InstanceItem) and item.host_id is None
+        }
+        for item in self._scene.items():
+            if not isinstance(item, InstanceItem) or item.host_id not in self._rotate_starts:
+                continue
+            host = hosts.get(item.host_id or "")
+            if host is not None:
+                item.preview(host.pos().x() / MM, host.pos().y() / MM, host.rotation())
         self.rotation_handle.setPos(center)
         self.rotation_handle.set_knob(self._knob_offset(self._rotating_items()))
 
@@ -443,10 +476,12 @@ class PlanCanvas(QGraphicsView):
         if self._loading:
             return
         selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
-        if len(selected) != 1:
+        if len(selected) != 1 or selected[0].host_id is not None:
             return
         item = selected[0]
-        placed = [(_live_instance(other), other.spec) for other in self._instances()]
+        placed = [
+            (_live_instance(other), other.spec) for other in self._instances() if not other.host_id
+        ]
         live = _live_instance(item)
         chosen = standard_extend_parts(self._catalog)
         straight = chosen.get(EXTEND_STRAIGHT)
@@ -485,7 +520,11 @@ class PlanCanvas(QGraphicsView):
         ]
 
     def _place_handle(self) -> None:
-        selected = [item for item in self._scene.selectedItems() if isinstance(item, InstanceItem)]
+        selected = [
+            item
+            for item in self._scene.selectedItems()
+            if isinstance(item, InstanceItem) and item.host_id is None
+        ]
         if not selected or self._loading:
             self.rotation_handle.hide()
             return
@@ -683,6 +722,8 @@ class InstanceItem(QGraphicsItem):
         self.item_id = instance.id
         self.spec = spec
         self.group_id = instance.group_id
+        self.host_id = instance.host_id
+        self.attachment_slot = instance.attachment_slot
         self._start_straight = instance.start_straight
         self._color_coding = False
         self._shortage = False
@@ -690,18 +731,22 @@ class InstanceItem(QGraphicsItem):
         self._ready = False
         self._press: QPointF | None = None
         self._starts: dict[str, QPointF] = {}
+        outline = placed_outline(spec, instance.attachment_slot)
         self._polygon = QPolygonF(
-            [QPointF(x * MM, y * MM) for x, y in spec.outline]
+            [QPointF(x * MM, y * MM) for x, y in outline]
             or [QPointF(-8, -8), QPointF(8, -8), QPointF(8, 8), QPointF(-8, 8)]
         )
         # Stroke and a later shoulder may sit just outside the roadway outline.
         bounds = self._polygon.boundingRect().adjusted(-4, -4, 4, 4)
         self._bounds = bounds
-        self.setFlags(
+        flags = (
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-            | QGraphicsItem.GraphicsItemFlag.ItemIsMovable
             | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
         )
+        if instance.host_id is None:
+            flags |= QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+        self.setFlags(flags)
+        self.setZValue(4 if instance.host_id is not None else 1)
         self.setTransformOriginPoint(0, 0)
         self.setPos(instance.x_mm * MM, instance.y_mm * MM)
         self.setRotation(instance.rotation_z_deg)
@@ -709,6 +754,11 @@ class InstanceItem(QGraphicsItem):
 
     def boundingRect(self) -> QRectF:  # noqa: N802
         return self._bounds
+
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        path.addPolygon(self._polygon)
+        return path
 
     def geometry_scene_rect(self) -> QRectF:
         """Axis-aligned bounds of the visible outline, without the stroke padding."""
@@ -737,6 +787,7 @@ class InstanceItem(QGraphicsItem):
             selected=self.isSelected(),
             start_straight=self._start_straight,
             shortage=self._shortage,
+            attachment_slot=self.attachment_slot,
         )
         painter.restore()
 
@@ -748,6 +799,9 @@ class InstanceItem(QGraphicsItem):
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
         super().mousePressEvent(event)
+        if self.host_id is not None:
+            self._press = None
+            return
         view = self.scene().views()
         if view and isinstance(view[0], PlanCanvas):
             view[0].expand_groups()
@@ -759,25 +813,38 @@ class InstanceItem(QGraphicsItem):
         }
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
+        if self.host_id is not None:
+            return
         super().mouseMoveEvent(event)
         if self._press is None:
             return
         delta = self.pos() - self._press
         for item in self.scene().selectedItems():
             if isinstance(item, InstanceItem) and item is not self and item.item_id in self._starts:
+                if item.host_id is not None:
+                    continue
                 item.preview(
                     (self._starts[item.item_id].x() + delta.x()) / MM,
                     (self._starts[item.item_id].y() + delta.y()) / MM,
                     item.rotation(),
                 )
+        self._preview_accessories()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:  # noqa: N802
+        if self.host_id is not None:
+            super().mouseReleaseEvent(event)
+            self._press = None
+            return
         super().mouseReleaseEvent(event)
         if not self._ready or self._press is None:
             return
         delta = self.pos() - self._press
         moves: list[tuple[str, float, float]] = []
-        selected = [item for item in self.scene().selectedItems() if isinstance(item, InstanceItem)]
+        selected = [
+            item
+            for item in self.scene().selectedItems()
+            if isinstance(item, InstanceItem) and item.host_id is None
+        ]
         if not any(item is self for item in selected):
             selected = [self]
         for item in selected:
@@ -790,6 +857,24 @@ class InstanceItem(QGraphicsItem):
                 )
         self._press = None
         self._report(self.item_id, moves)
+
+    def _preview_accessories(self) -> None:
+        scene = self.scene()
+        if scene is None:
+            return
+        hosts = {
+            item.item_id: item
+            for item in scene.items()
+            if isinstance(item, InstanceItem) and item.host_id is None
+        }
+        moving = set(self._starts) | {self.item_id}
+        for item in scene.items():
+            if not isinstance(item, InstanceItem) or item.host_id not in moving:
+                continue
+            host = hosts.get(item.host_id or "")
+            if host is None:
+                continue
+            item.preview(host.pos().x() / MM, host.pos().y() / MM, host.rotation())
 
 
 class RotationHandle(QGraphicsItem):

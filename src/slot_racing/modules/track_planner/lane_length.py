@@ -82,9 +82,9 @@ def connected_runs(
     catalog: Mapping[int, PartSpec],
 ) -> tuple[TrackRun, ...]:
     """Every connected group, in plan order. Short groups are included."""
-    by_id = {instance.id: instance for instance in instances}
-    neighbors: dict[str, set[str]] = {instance.id: set() for instance in instances}
-    ordered = list(instances)
+    ordered = [instance for instance in instances if instance.host_id is None]
+    by_id = {instance.id: instance for instance in ordered}
+    neighbors: dict[str, set[str]] = {instance.id: set() for instance in ordered}
     for index, left in enumerate(ordered):
         left_spec = catalog.get(left.part_id)
         if left_spec is None:
