@@ -46,12 +46,20 @@ class StartLightWidget(QWidget):
         self.setObjectName("start-lights")
         self._lit = 0
         self._go = False
+        self._overlay = False
         policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
         self.setMinimumWidth(_MIN_WIDTH)
         self._sync_height()
         self.hide()
+
+    def use_as_overlay(self) -> None:
+        """Draw at a geometry the host assigns. Showing the gantry does not reflow a layout."""
+        self._overlay = True
+        self.setMinimumSize(1, 1)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     @property
     def lit_lights(self) -> int:
@@ -112,6 +120,8 @@ class StartLightWidget(QWidget):
         painter.end()
 
     def _sync_height(self) -> None:
+        if self._overlay:
+            return
         width = self.width() if self.width() > 0 else _MIN_WIDTH
         height = self._height_for(width)
         if self.minimumHeight() != height:

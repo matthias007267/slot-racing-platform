@@ -5,19 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QHideEvent
-from PySide6.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QMessageBox,
-    QScrollArea,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtCore import QPoint, QRect, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QHideEvent, QResizeEvent
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
 
-from slot_racing.core.clock import format_duration
 from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.events import (
@@ -35,34 +26,18 @@ from slot_racing.core.events import (
 )
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
-    HudConfiguration,
     HudConfigurationStore,
+    HudLayout,
+    LightFrame,
     default_hud_configuration,
+    to_pixels,
 )
-from slot_racing.modules.races.runner import LiveRow, RaceController, RaceRunner, RaceSnapshot
+from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.time_trial_board import build_time_trial_board
-from slot_racing.modules.races.ui.formatting import (
-    EMPTY_DISPLAY,
-    format_lap_progress,
-    format_progress_cell,
-    participant_status_key,
-    start_number_text,
-)
+from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY
 from slot_racing.modules.races.ui.heat_gate import HeatGate
-from slot_racing.modules.races.ui.hud_widgets import (
-    BestLapWidget,
-    DriverHighlightWidget,
-    LapProgressWidget,
-    LastLapWidget,
-    LiveRankingWidget,
-    RaceClockWidget,
-    RaceControlsWidget,
-    RaceHeaderWidget,
-    RaceMessageWidget,
-    RaceStatusWidget,
-)
-from slot_racing.modules.races.ui.lane_card import LaneCardBoard
+from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.race_audio import RaceAudio
 from slot_racing.modules.races.ui.start_cue import (
     StartCue,
@@ -72,9 +47,9 @@ from slot_racing.modules.races.ui.start_cue import (
 )
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
 from slot_racing.modules.races.ui.time_trial_board_view import TimeTrialBoardView
-from slot_racing.uikit import describe_error, fill_table, provider_label, selected_id
+from slot_racing.uikit import describe_error
 from slot_racing.uikit.errors import is_expected
-from slot_racing.uikit.theme import configure_page, set_tone
+from slot_racing.uikit.theme import configure_page
 
 logger = logging.getLogger(__name__)
 
@@ -116,39 +91,29 @@ class LiveRaceView(QWidget):
         self._snapshot: RaceSnapshot | None = None
         self._announced_end = False
         self._busy = False
-        self._last_lap: tuple[int, int] | None = None
         self._lap_notice: tuple[int, int] | None = None
         self._announced_finishers: set[int] = set()
         self._message = ""
         self._cue: StartCue | None = None
+        self._light_frame = LightFrame()
+        self._layout_bound = False
         self.audio = RaceAudio(parent=self, config=config)
         self.cue_interval_ms = 1000
-        self._unsubscribe_hud: Callable[[], None] | None = None
         self.confirm: Callable[[str], bool] = lambda text: (
             QMessageBox.question(self, translator.translate("common.confirm"), text)
             == QMessageBox.StandardButton.Yes
         )
 
-        self.header = RaceHeaderWidget(translator)
-        self.clock = RaceClockWidget(translator)
-        self.progress = LapProgressWidget(translator)
-        self.ranking = LiveRankingWidget(translator)
-        self.highlight = DriverHighlightWidget(translator)
-        self.last_lap = LastLapWidget(translator)
-        self.best_lap = BestLapWidget(translator)
-        self.status = RaceStatusWidget(translator)
-        self.messages = RaceMessageWidget(translator)
-        self.controls = RaceControlsWidget(translator)
-
-        self.name_label = self.header.name_label
-        self.track_label = self.header.track_label
-        self.provider_label = self.header.provider_label
-        self.status_label = self.status.status_label
-        self.time_label = self.clock.time_label
-        self.laps_label = self.progress.laps_label
-        self.table = self.ranking.table
-        self.detail_title = self.highlight.detail_title
-        self.detail = self.highlight.detail
+        self.stage = LiveHudStage(translator)
+        self.clock = self.stage.clock
+        self.status = self.stage.status
+        self.ranking = self.stage.ranking
+        self.messages = self.stage.messages
+        self.controls = self.stage.controls
+        self.lanes = self.stage.lanes
+        self.status_label = self.stage.status_label
+        self.time_label = self.stage.time_label
+        self.table = self.stage.table
         self.warning = self.messages.warning
         self.pause_button = self.controls.pause_button
         self.resume_button = self.controls.resume_button
@@ -156,24 +121,15 @@ class LiveRaceView(QWidget):
         self.results_button = self.controls.results_button
         self.back_button = self.controls.back_button
 
-        self.lanes = LaneCardBoard(translator)
-        self.stage = _stage(
-            self.clock, self.status, self.lanes, self.ranking, self.messages, self.controls
-        )
-        for retired in (self.header, self.progress, self.highlight, self.last_lap, self.best_lap):
-            retired.setParent(self)
-            retired.hide()
-
         self.board = TimeTrialBoardView(translator)
         self.board.hide()
         self.heat_gate = HeatGate(translator)
-
-        self.start_lights = StartLightWidget()
+        self.start_lights = StartLightWidget(self)
+        self.start_lights.use_as_overlay()
 
         layout = QVBoxLayout(self)
         configure_page(layout)
         layout.setSpacing(0)
-        layout.addWidget(self.start_lights)
         layout.addWidget(self.heat_gate)
         layout.addWidget(self.stage, 1)
         layout.addWidget(self.board, 1)
@@ -194,30 +150,36 @@ class LiveRaceView(QWidget):
         self.heat_gate.start_requested.connect(self._start_next_heat)
         self.heat_gate.postpone_requested.connect(self._postpone_driver)
         self.heat_gate.disqualify_requested.connect(self._disqualify_driver)
-        self.table.itemSelectionChanged.connect(self._show_detail)
         self._subscriptions = [self._listen(event_type) for event_type in _RACE_EVENTS]
         self.destroyed.connect(lambda *_args: self._release())
-        initial = default_hud_configuration() if store is None else store.load()
-        self.apply_configuration(initial)
-        if store is not None:
-            self._unsubscribe_hud = store.add_listener(self.apply_configuration)
+        self.apply_layout(self._default_layout())
         self._update_buttons()
 
     @property
     def runner(self) -> RaceRunner | None:
         return self._runner
 
-    def apply_configuration(self, configuration: HudConfiguration) -> None:
-        """The live layout is fixed. A saved HUD document no longer moves these panels."""
-        del configuration
+    def bound_layout(self) -> HudLayout:
+        """The presentation this view is using. A running race keeps the one it opened with."""
+        return self.stage.layout_spec()
+
+    def apply_layout(self, layout: HudLayout) -> None:
+        """Apply one saved presentation. A race that already started keeps its own copy."""
+        if self._layout_bound:
+            return
+        self._light_frame = layout.lights
+        self.stage.apply_layout(layout)
+        self._place_lights()
 
     def show_runner(self, runner: RaceRunner) -> None:
         self._cancel_cue()
+        self._layout_bound = False
+        self.apply_layout(self._default_layout())
+        self._layout_bound = True
         self._runner = runner
         self._snapshot = None
         self._announced_end = False
         self.heat_gate.hide()
-        self._last_lap = None
         self._lap_notice = None
         self._announced_finishers = set()
         self._message = ""
@@ -262,6 +224,7 @@ class LiveRaceView(QWidget):
         if not isinstance(step, StartCueStep):
             return
         self.start_lights.show_lights(step.lit_lights, go=step.phase is StartPhase.START_SIGNAL)
+        self._place_lights()
 
     def _play_start_sound(self, step: object) -> None:
         """Start the step's tone. The cue does not wait for it, and neither does the race."""
@@ -270,6 +233,28 @@ class LiveRaceView(QWidget):
 
     def _hide_cue(self) -> None:
         self.start_lights.clear()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._place_lights()
+
+    def _default_layout(self) -> HudLayout:
+        if self._store is None:
+            return default_hud_configuration().default_layout()
+        return self._store.load_default_layout()
+
+    def _place_lights(self) -> None:
+        """Pin the gantry over the HUD. It is not in the layout, so nothing else moves."""
+        target = self.board if self.stage.isHidden() and not self.board.isHidden() else self.stage
+        if target.width() <= 1 or target.height() <= 1:
+            return
+        rect = to_pixels(self._light_frame.as_config(), target.width(), target.height())
+        origin = target.mapTo(self, QPoint(0, 0))
+        placed = QRect(origin.x() + rect.x, origin.y() + rect.y, rect.width, rect.height)
+        if self.start_lights.geometry() != placed:
+            self.start_lights.setGeometry(placed)
+        if not self.start_lights.isHidden():
+            self.start_lights.raise_()
 
     def _leave(self) -> None:
         self._cancel_cue()
@@ -376,7 +361,6 @@ class LiveRaceView(QWidget):
         """Keep the latest message and the latest completed lap. Both come from race events."""
         tr = self.translator.translate
         if isinstance(event, LapCompleted):
-            self._last_lap = (event.lane, event.lap_time_ns)
             self._lap_notice = (event.lane, event.lap_number)
             return
         if isinstance(event, RaceStarted):
@@ -410,35 +394,11 @@ class LiveRaceView(QWidget):
         snapshot = runner.snapshot()
         self._snapshot = snapshot
         tr = self.translator.translate
-        status_text = tr(f"race.status.{snapshot.status.value}")
-        if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
-            status_text = tr("race.status.aborted")
-        self.name_label.setText(snapshot.name)
-        self.track_label.setText(snapshot.track_name)
-        self.header.header_status.setText(status_text)
-        self.header.participants_label.setText(
-            self.translator.format("hud.header.participants", count=len(snapshot.rows))
+        status_text, tone = self.stage.show_standings(
+            snapshot, mode=runner.race.mode, lane_count=runner.race.lane_count
         )
-        provider = provider_label(self.translator, snapshot.timing_provider)
-        self.provider_label.setText(provider)
-        self.status_label.setText(f"● {status_text}")
-        tone = _status_tone(snapshot)
-        set_tone(self.status_label, tone)
-        self.status.emphasize(tone)
-        self.time_label.setText(format_duration(snapshot.elapsed_ns))
-        self._show_progress(snapshot)
-        ended = snapshot.status is RaceStatus.FINISHED
-        paused = snapshot.status is RaceStatus.PAUSED
-        fill_table(
-            self.table,
-            [self._cells(snapshot, row, ended=ended, paused=paused) for row in snapshot.rows],
-            [row.lane for row in snapshot.rows],
-        )
-        if self.table.rowCount() and selected_id(self.table) is None:
+        if self.table.rowCount() and self.table.currentRow() < 0:
             self.table.selectRow(0)
-        self.ranking.present()
-        self._show_detail()
-        self._show_laps(snapshot)
         lap_message = self._consume_lap_message(snapshot)
         self._announce_finishers(snapshot)
         if lap_message:
@@ -457,7 +417,7 @@ class LiveRaceView(QWidget):
         self.board.setVisible(time_trial)
         if time_trial:
             self._show_time_trial(runner, snapshot, status_text, tone)
-        self.lanes.show_snapshot(snapshot, lane_count=runner.race.lane_count, mode=runner.race.mode)
+        self._place_lights()
         self._update_buttons()
         if snapshot.status is not RaceStatus.FINISHED:
             self.heat_gate.hide()
@@ -505,12 +465,6 @@ class LiveRaceView(QWidget):
             warning=warning,
         )
 
-    def _show_progress(self, snapshot: RaceSnapshot) -> None:
-        leader = min(snapshot.rows, key=lambda row: row.position, default=None)
-        current = 0 if leader is None else leader.current_lap
-        completed = max((row.laps_completed for row in snapshot.rows), default=0)
-        self.progress.show_counts(current, snapshot.laps, completed)
-
     def _consume_lap_message(self, snapshot: RaceSnapshot) -> str:
         notice = self._lap_notice
         if notice is None:
@@ -523,22 +477,6 @@ class LiveRaceView(QWidget):
             lap=lap_number,
         )
 
-    def _show_laps(self, snapshot: RaceSnapshot) -> None:
-        if self._last_lap is None:
-            self.last_lap.value_label.setText(EMPTY_DISPLAY)
-        else:
-            lane, lap_time_ns = self._last_lap
-            name = _name_on_lane(snapshot, lane)
-            self.last_lap.value_label.setText(f"{name}\n{format_duration(lap_time_ns)}")
-        timed = [row for row in snapshot.rows if row.best_lap_ns is not None]
-        if not timed:
-            self.best_lap.value_label.setText(EMPTY_DISPLAY)
-            return
-        best = min(timed, key=lambda row: (row.best_lap_ns or 0, row.position))
-        self.best_lap.value_label.setText(
-            f"{best.driver_label}\n{format_duration(best.best_lap_ns)}"
-        )
-
     def _announce_finishers(self, snapshot: RaceSnapshot) -> None:
         if snapshot.status is RaceStatus.FINISHED:
             return
@@ -548,73 +486,6 @@ class LiveRaceView(QWidget):
                 self._message = self.translator.format(
                     "hud.message.driver_finished", driver=row.driver_label
                 )
-
-    def _cells(
-        self, snapshot: RaceSnapshot, row: LiveRow, *, ended: bool, paused: bool
-    ) -> tuple[str, ...]:
-        tr = self.translator.translate
-        return (
-            str(row.position),
-            row.driver_label,
-            row.vehicle_label,
-            start_number_text(row.start_number),
-            str(row.lane),
-            str(row.laps_completed),
-            format_progress_cell(row.current_lap, snapshot.laps),
-            format_duration(row.last_lap_ns),
-            format_duration(row.best_lap_ns),
-            format_duration(row.total_time_ns),
-            format_progress_cell(row.laps_completed, snapshot.laps),
-            tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),
-        )
-
-    def _show_detail(self) -> None:
-        snapshot = self._snapshot
-        tr = self.translator.translate
-        lane = None if snapshot is None else selected_id(self.table)
-        row = (
-            None
-            if snapshot is None
-            else next((item for item in snapshot.rows if item.lane == lane), None)
-        )
-        if snapshot is None or row is None:
-            self.highlight.clear_driver()
-            self.detail.setText(tr("race.live.detail_empty"))
-            return
-        self.highlight.show_driver(
-            position=f"P{row.position}",
-            name=row.driver_label,
-            vehicle=row.vehicle_label,
-            lap=format_lap_progress(row.current_lap, snapshot.laps),
-            last=_shown_time(row.last_lap_ns),
-            best=_shown_time(row.best_lap_ns),
-        )
-        times = ", ".join(format_duration(lap) for lap in row.lap_times_ns) or "-"
-        status = tr(
-            participant_status_key(
-                finished=row.finished,
-                paused=snapshot.status is RaceStatus.PAUSED,
-                ended=snapshot.status is RaceStatus.FINISHED,
-            )
-        )
-        self.detail.setText(
-            "\n".join(
-                (
-                    f"{tr('race.column.driver')}: {row.driver_label}",
-                    f"{tr('race.column.vehicle')}: {row.vehicle_label}",
-                    f"{tr('race.column.start_number')}: {start_number_text(row.start_number)}",
-                    f"{tr('race.column.position')}: {row.position}",
-                    f"{tr('race.column.lane')}: {row.lane}",
-                    f"{tr('race.column.current_lap')}: "
-                    f"{format_progress_cell(row.current_lap, snapshot.laps)}",
-                    f"{tr('race.column.laps_done')}: {row.laps_completed}",
-                    f"{tr('race.column.last_lap')}: {format_duration(row.last_lap_ns)}",
-                    f"{tr('race.column.best_lap')}: {format_duration(row.best_lap_ns)}",
-                    f"{tr('race.live.lap_times')}: {times}",
-                    f"{tr('race.column.status')}: {status}",
-                )
-            )
-        )
 
     def _update_buttons(self) -> None:
         runner = self._runner
@@ -723,21 +594,6 @@ class LiveRaceView(QWidget):
         for subscription in self._subscriptions:
             subscription.cancel()
         self._subscriptions.clear()
-        if self._unsubscribe_hud is not None:
-            self._unsubscribe_hud()
-            self._unsubscribe_hud = None
-
-
-def _status_tone(snapshot: RaceSnapshot) -> str:
-    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
-        return "error"
-    if snapshot.status is RaceStatus.RUNNING:
-        return "ok"
-    if snapshot.status is RaceStatus.PAUSED:
-        return "warn"
-    if snapshot.status is RaceStatus.FINISHED:
-        return "info"
-    return "muted"
 
 
 def _status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> str:
@@ -755,61 +611,3 @@ def _status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> 
 def _name_on_lane(snapshot: RaceSnapshot, lane: int) -> str:
     row = next((item for item in snapshot.rows if item.lane == lane), None)
     return str(lane) if row is None else row.driver_label
-
-
-def _shown_time(value: int | None) -> str:
-    return EMPTY_DISPLAY if value is None else format_duration(value)
-
-
-_SPACE_GAP = 8
-
-
-def _stage(
-    clock: QWidget,
-    status: QWidget,
-    lanes: QWidget,
-    ranking: QWidget,
-    messages: QWidget,
-    controls: QWidget,
-) -> QScrollArea:
-    """Clock and status on top, lane cards beside a compact ranking, controls along the bottom."""
-    for widget in (clock, status):
-        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        widget.setMinimumSize(80, 96)
-    lanes.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-    lanes.setMinimumHeight(180)
-    ranking.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-    ranking.setMinimumSize(200, 120)
-    ranking.setMaximumWidth(420)
-    for widget in (messages, controls):
-        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
-        widget.setMinimumHeight(120)
-    top = QHBoxLayout()
-    top.setSpacing(_SPACE_GAP)
-    top.addWidget(clock, 1)
-    top.addWidget(status, 1)
-    middle = QHBoxLayout()
-    middle.setSpacing(_SPACE_GAP)
-    middle.addWidget(lanes, 3)
-    middle.addWidget(ranking, 1)
-    bottom = QHBoxLayout()
-    bottom.setSpacing(_SPACE_GAP)
-    bottom.addWidget(messages, 1)
-    bottom.addWidget(controls, 1)
-    content = QWidget()
-    content.setObjectName("live-layout")
-    content.setMinimumSize(0, 0)
-    body = QVBoxLayout(content)
-    body.setContentsMargins(0, 0, 0, 0)
-    body.setSpacing(_SPACE_GAP)
-    body.addLayout(top, 1)
-    body.addLayout(middle, 4)
-    body.addLayout(bottom, 1)
-    scroll = QScrollArea()
-    scroll.setObjectName("live-scroll")
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setWidget(content)
-    scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-    return scroll

@@ -273,14 +273,14 @@ def test_quit_saves_the_open_hud_and_closes(
     window.select("settings")
     editor = window.findChild(HudEditor)
     assert editor is not None
-    editor.set_widget_geometry("race_clock", 0.25, 0.25, 0.25, 0.25)
+    editor.set_font_scale(130)
     _click_when_shown("quit-confirm")
     confirm_quit = window.findChild(QPushButton, "app-quit")
     assert confirm_quit is not None
     confirm_quit.click()
     assert not window.isVisible()
-    saved = HudConfigurationStore(runtime.database).load().widget("race_clock")
-    assert saved is not None and saved.x == 0.25
+    saved = HudConfigurationStore(runtime.database).load().selected()
+    assert saved.font_scale == 130
     assert runtime.config_path.is_file()
 
 

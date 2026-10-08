@@ -1,81 +1,228 @@
-"""Settings editor for the race HUD. Drag and resize write the same configuration."""
+"""Settings editor for the live HUD. The preview is the same surface as a race."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDialog,
-    QFrame,
+    QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
-    WIDGET_IDS,
+    FIELD_IDS,
+    SCALE_MAX,
+    SCALE_MIN,
+    SCALE_STEP,
+    SHARE_MAX,
+    SHARE_MIN,
+    FieldStyle,
     HudConfiguration,
     HudConfigurationStore,
+    HudLayout,
     HudWidgetConfig,
-    default_hud_configuration,
-    stacking_order,
+    LightFrame,
+    add_layout,
+    clamp_widget,
+    delete_layout,
+    factory_layout,
+    mark_default,
+    replace_layout,
+    snap_alignment,
+    snap_scale,
+    snap_share,
     to_pixels,
-    with_widget,
 )
-from slot_racing.uikit.theme import SPACE, configure_page, polish, set_role
+from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
+from slot_racing.modules.races.ui.live_stage import LiveHudStage
+from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep
+from slot_racing.modules.races.ui.start_lights import StartLightWidget
+from slot_racing.uikit.theme import SPACE, configure_page
 
-_HANDLE = 12
-_GRID_X = 16 * 8
-_GRID_Y = 9 * 8
-_GRID_MAJOR = 8
-_BUTTON_CHROME = 14 * 2 + 2
-_BUTTON_SPARE = 8
+_HANDLE = 14
+_PREVIEW_STATUSES: tuple[tuple[str, str], ...] = (
+    ("running", "race.status.running"),
+    ("paused", "race.status.paused"),
+    ("finished", "race.status.finished"),
+    ("aborted", "race.status.aborted"),
+)
+_DRIVERS = ("Zoe", "Anna", "Ben", "Mia")
+_VEHICLES = ("Porsche 911", "Ferrari 488", "Audi R8", "BMW M4")
 
 
-def snap_axis(value: float, parts: int) -> float:
-    """Nearest grid line. ``parts`` is the number of cells along that axis."""
-    return round(value * parts) / parts
+def _clamped_frame(frame: LightFrame) -> LightFrame:
+    clamped = clamp_widget(
+        HudWidgetConfig("start_lights", frame.visible, frame.x, frame.y, frame.width, frame.height)
+    )
+    return LightFrame(
+        visible=frame.visible,
+        x=clamped.x,
+        y=clamped.y,
+        width=clamped.width,
+        height=clamped.height,
+    )
 
 
-def _paint_grid(
-    painter: QPainter,
-    canvas_width: int,
-    canvas_height: int,
-    origin_x: int,
-    origin_y: int,
-    view_width: int,
-    view_height: int,
-) -> None:
-    """Draw the canvas grid through one rectangle. ``origin`` is that rectangle's top left."""
-    if canvas_width <= 1 or canvas_height <= 1 or view_width <= 0 or view_height <= 0:
-        return
-    minor = QPen(QColor(255, 255, 255, 55))
-    major = QPen(QColor(255, 196, 64, 220))
-    for index in range(_GRID_X + 1):
-        x = round(index * canvas_width / _GRID_X) - origin_x
-        if 0 <= x <= view_width:
-            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
-            painter.drawLine(x, 0, x, view_height)
-    for index in range(_GRID_Y + 1):
-        y = round(index * canvas_height / _GRID_Y) - origin_y
-        if 0 <= y <= view_height:
-            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
-            painter.drawLine(0, y, view_width, y)
-    center_y = canvas_height // 2 - origin_y
-    if 0 <= center_y <= view_height:
-        painter.setPen(major)
-        painter.drawLine(0, center_y, view_width, center_y)
+def _fresh_id(document: HudConfiguration) -> str:
+    taken = {item.id for item in document.layouts}
+    number = 2
+    while f"layout-{number}" in taken:
+        number += 1
+    return f"layout-{number}"
+
+
+def _sample(status_key: str, lanes: int) -> tuple[RaceSnapshot, str]:
+    aborted = status_key == "aborted"
+    status = {
+        "running": RaceStatus.RUNNING,
+        "paused": RaceStatus.PAUSED,
+        "finished": RaceStatus.FINISHED,
+        "aborted": RaceStatus.FINISHED,
+    }[status_key]
+    message = {
+        "running": "hud.message.started",
+        "paused": "hud.message.paused",
+        "finished": "hud.message.finished",
+        "aborted": "hud.message.aborted",
+    }[status_key]
+    rows: list[LiveRow] = []
+    for lane in range(1, lanes + 1):
+        rows.append(
+            LiveRow(
+                position=1 if lane == 2 else lane,
+                lane=lane,
+                driver_label=_DRIVERS[lane - 1],
+                vehicle_label=_VEHICLES[lane - 1],
+                start_number=lane + 6,
+                current_lap=3,
+                laps_completed=2,
+                last_lap_ns=4_200_000_000 + lane * 80_000_000,
+                total_time_ns=18_400_000_000,
+                best_lap_ns=4_050_000_000,
+                finished=status is RaceStatus.FINISHED and not aborted,
+                lap_times_ns=(4_200_000_000,),
+            )
+        )
+    if lanes >= 2:
+        rows[0] = replace(rows[0], position=2)
+    snapshot = RaceSnapshot(
+        race_id=RaceId(1),
+        name="Vorschau",
+        track_name="Heimbahn",
+        timing_provider="simulation",
+        status=status,
+        aborted=aborted,
+        laps=8,
+        elapsed_ns=95_000_000_000,
+        rows=tuple(rows),
+        source_errors=(),
+    )
+    return snapshot, message
+
+
+class LightHandle(QWidget):
+    """Editor chrome for the start gantry. The gantry itself does not take mouse clicks."""
+
+    moved = Signal(int, int, int, int)
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("hud-light-handle")
+        self._drag: tuple[str, QPoint, QRect] | None = None
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def is_dragging(self) -> bool:
+        return self._drag is not None
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(255, 196, 64), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+        grip = QRect(self.width() - _HANDLE, self.height() - _HANDLE, _HANDLE - 1, _HANDLE - 1)
+        painter.setBrush(QColor(255, 196, 64))
+        painter.drawRect(grip)
+        painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position().toPoint()
+        mode = "resize" if self._on_grip(pos) else "move"
+        self._drag = (mode, event.globalPosition().toPoint(), QRect(self.geometry()))
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag is None or not event.buttons() & Qt.MouseButton.LeftButton:
+            return
+        mode, start, origin = self._drag
+        delta = event.globalPosition().toPoint() - start
+        rect = QRect(origin)
+        if mode == "move":
+            rect.translate(delta)
+        else:
+            rect.setWidth(max(_HANDLE * 2, origin.width() + delta.x()))
+            rect.setHeight(max(_HANDLE * 2, origin.height() + delta.y()))
+        self.setGeometry(rect)
+        self.moved.emit(rect.x(), rect.y(), rect.width(), rect.height())
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag is not None:
+            rect = self.geometry()
+            self._drag = None
+            self.moved.emit(rect.x(), rect.y(), rect.width(), rect.height())
+        super().mouseReleaseEvent(event)
+
+    def _on_grip(self, pos: QPoint) -> bool:
+        return pos.x() >= self.width() - _HANDLE and pos.y() >= self.height() - _HANDLE
+
+
+class HudPreviewHost(QWidget):
+    """Live HUD plus the light overlay. The gantry is not part of the stage layout."""
+
+    def __init__(
+        self,
+        translator: Translator,
+        on_resize: Callable[[], None],
+        on_drag: Callable[[int, int, int, int], None],
+    ) -> None:
+        super().__init__()
+        self.setObjectName("hud-preview")
+        self.setMinimumSize(640, 420)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.stage = LiveHudStage(translator, object_name="hud-live-preview")
+        self.lights = StartLightWidget(self)
+        self.lights.use_as_overlay()
+        self.handle = LightHandle(self)
+        self.handle.moved.connect(on_drag)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.stage)
+        self._on_resize = on_resize
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._on_resize()
 
 
 class HudEditor(QWidget):
-    """Preview plus the element list. Standard loads the factory layout; save writes it."""
+    """Configure the live HUD: type, shares, visibility and the start-light overlay."""
 
     def __init__(self, translator: Translator, store: HudConfigurationStore) -> None:
         super().__init__()
@@ -83,425 +230,524 @@ class HudEditor(QWidget):
         self._translator = translator
         self._store = store
         self._config = store.load()
-        self._selected: str | None = LIVE_RANKING_DEFAULT
-        self._checks: dict[str, QCheckBox] = {}
-        self._fullscreen: HudPreviewWindow | None = None
-        tr = translator.translate
-
-        self.preview = HudPreview(translator, self)
-        self.preview.hide()
-        self._previews: list[HudPreview] = [self.preview]
-
-        layout = QVBoxLayout(self)
-        configure_page(layout)
-        elements = QLabel(tr("hud.elements"))
-        set_role(elements, "section")
-        layout.addWidget(elements)
-        for widget_id in WIDGET_IDS:
-            layout.addWidget(self._element_row(widget_id))
-
-        layout.addLayout(self._actions())
-        self._set_config(self._config)
+        self._filling = False
+        self._cue: StartCue | None = None
+        self._sequence_started = False
+        self._preview_status = "running"
+        self._preview_lanes = 2
+        self.preview = HudPreviewHost(translator, self._place_lights, self._on_handle)
+        self.stage = self.preview.stage
+        self.lights = self.preview.lights
+        self.handle = self.preview.handle
+        self._build()
+        self.stage.apply_layout(self.selected_layout())
+        self._fill_form()
+        self._show_sample()
+        self._place_lights()
+        self.destroyed.connect(lambda *_args: self._stop_cue(restore=False))
 
     def configuration(self) -> HudConfiguration:
         return self._config
 
-    @property
-    def selected_id(self) -> str | None:
-        return self._selected
+    def selected_layout(self) -> HudLayout:
+        return self._config.selected()
 
     @property
-    def fullscreen(self) -> HudPreviewWindow | None:
-        return self._fullscreen
+    def light_preview_started(self) -> bool:
+        """True once the preview sequence has reached the lights-out start signal."""
+        return self._sequence_started
 
-    def box(self, widget_id: str) -> HudBox | None:
-        return self.preview.box(widget_id)
-
-    def select(self, widget_id: str) -> None:
-        if self._config.widget(widget_id) is None:
+    def select_layout(self, layout_id: str) -> None:
+        if self._config.layout(layout_id) is None:
             return
-        self._selected = widget_id
-        self._show_selection()
+        self._stop_cue()
+        self._config = replace(self._config, selected_id=layout_id)
+        self._apply_preview()
+        self._fill_form()
 
-    def set_visible(self, widget_id: str, visible: bool) -> None:
-        current = self._require(widget_id)
-        self._replace(replace(current, visible=visible))
+    def add_layout(self, name: str | None = None) -> str:
+        current = self.selected_layout()
+        layout_id = _fresh_id(self._config)
+        number = layout_id.removeprefix("layout-")
+        title = name.strip() if isinstance(name, str) and name.strip() else f"Layout {number}"
+        created = replace(current, id=layout_id, name=title, builtin=False)
+        self._config = add_layout(self._config, created)
+        self._apply_preview()
+        self._fill_form()
+        return layout_id
 
-    def set_widget_geometry(
-        self, widget_id: str, x: float, y: float, width: float, height: float
-    ) -> None:
-        current = self._require(widget_id)
-        self._replace(replace(current, x=x, y=y, width=width, height=height))
-
-    def bring_forward(self) -> None:
-        current = self._selected_widget()
-        if current is None:
+    def delete_selected(self) -> None:
+        current = self.selected_layout()
+        if current.builtin:
             return
-        top = max(item.z_index for item in self._config.widgets)
-        self._replace(replace(current, z_index=top + 1))
+        self._stop_cue()
+        self._config = self._store.save(delete_layout(self._config, current.id))
+        self._apply_preview()
+        self._fill_form()
 
-    def send_backward(self) -> None:
-        current = self._selected_widget()
-        if current is None:
-            return
-        bottom = min(item.z_index for item in self._config.widgets)
-        self._replace(replace(current, z_index=bottom - 1))
+    def set_font_scale(self, value: int) -> None:
+        self._commit(replace(self.selected_layout(), font_scale=snap_scale(value)))
+
+    def set_alignment(self, alignment: str) -> None:
+        self._commit(replace(self.selected_layout(), alignment=snap_alignment(alignment)))
+
+    def set_field_visible(self, field_id: str, visible: bool) -> None:
+        style = self.selected_layout().field(field_id)
+        self._commit(self._with_field(field_id, replace(style, visible=visible)))
+
+    def set_field_scale(self, field_id: str, value: int) -> None:
+        style = self.selected_layout().field(field_id)
+        self._commit(self._with_field(field_id, replace(style, scale=snap_scale(value))))
+
+    def set_share(self, part: str, value: int) -> None:
+        layout = self.selected_layout()
+        shares = {
+            "clock": replace(layout, clock_share=snap_share(value, layout.clock_share)),
+            "status": replace(layout, status_share=snap_share(value, layout.status_share)),
+            "lanes": replace(layout, lanes_share=snap_share(value, layout.lanes_share)),
+            "ranking": replace(layout, ranking_share=snap_share(value, layout.ranking_share)),
+        }
+        updated = shares.get(part)
+        if updated is not None:
+            self._commit(updated)
+
+    def set_light_frame(self, frame: LightFrame) -> None:
+        self._commit(replace(self.selected_layout(), lights=_clamped_frame(frame)))
+
+    def reset_lights(self) -> None:
+        self._commit(replace(self.selected_layout(), lights=LightFrame()))
 
     def apply_standard_layout(self) -> None:
-        """Show the factory layout in the editor. It is stored only when the user saves."""
-        self._set_config(default_hud_configuration())
+        """Restore the factory presentation of the selected layout. Save stores it."""
+        current = self.selected_layout()
+        factory = factory_layout()
+        self._commit(replace(factory, id=current.id, name=current.name, builtin=current.builtin))
 
-    def revert(self) -> None:
-        """Discard unsaved edits and show the last stored layout."""
-        self._set_config(self._store.load())
+    def mark_default(self) -> None:
+        """Persist the selected layout as the one a new live view loads."""
+        self._config = self._store.save(mark_default(self._config, self.selected_layout().id))
+        self._fill_form()
 
     def save(self) -> HudConfiguration:
-        stored = self._store.save(self._config)
-        self._set_config(stored)
-        return stored
+        self._config = self._store.save(self._config)
+        self._fill_form()
+        return self._config
 
     def save_persistent(self) -> None:
         """Write the layout that is on screen, including edits that were not saved yet."""
         self.save()
 
-    def open_fullscreen_preview(self) -> HudPreviewWindow:
-        """Open the layout in its own fullscreen view, at the screen's aspect ratio."""
-        if self._fullscreen is not None:
-            self._fullscreen.raise_()
-            self._fullscreen.activateWindow()
-            return self._fullscreen
-        window = HudPreviewWindow(self._translator, self)
-        self._fullscreen = window
-        self.add_preview(window.preview)
-        window.showFullScreen()
-        return window
+    def revert(self) -> None:
+        self._stop_cue()
+        self._config = self._store.load()
+        self._apply_preview()
+        self._fill_form()
 
-    def add_preview(self, preview: HudPreview) -> None:
-        if preview not in self._previews:
-            self._previews.append(preview)
-        preview.apply(self._config)
-        preview.set_selected(self._selected)
+    def preview_start_sequence(self) -> None:
+        """Play the existing start cue in the preview. It does not start a race."""
+        self._stop_cue()
+        self._sequence_started = False
+        cue = StartCue(self._note_sequence_started, interval_ms=60_000, parent=self)
+        cue.changed.connect(self._show_preview_step)
+        cue.finished.connect(self._finish_preview_sequence)
+        self._cue = cue
+        cue.begin()
 
-    def note_preview_closed(self, window: HudPreviewWindow) -> None:
-        if window.preview in self._previews and window.preview is not self.preview:
-            self._previews.remove(window.preview)
-        if self._fullscreen is window:
-            self._fullscreen = None
+    def advance_light_preview(self) -> None:
+        cue = self._cue
+        if cue is not None:
+            cue.advance()
 
-    def _element_row(self, widget_id: str) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        checkbox = QCheckBox(self._title(widget_id))
-        checkbox.setObjectName(f"hud-visible-{widget_id}")
-        checkbox.toggled.connect(lambda checked, name=widget_id: self.set_visible(name, checked))
-        choose = QPushButton(self._translator.translate("hud.edit"))
-        choose.setObjectName(f"hud-select-{widget_id}")
-        set_role(choose, "ghost")
-        choose.clicked.connect(lambda _checked=False, name=widget_id: self.select(name))
-        layout.addWidget(checkbox, 1)
-        layout.addWidget(choose)
-        self._checks[widget_id] = checkbox
-        return row
+    def _build(self) -> None:
+        tr = self._translator.translate
+        form = QWidget()
+        form.setObjectName("hud-editor-form")
+        column = QVBoxLayout(form)
+        column.setContentsMargins(0, 0, SPACE.sm, 0)
+        column.setSpacing(SPACE.sm)
 
-    def _actions(self) -> QHBoxLayout:
-        translate = self._translator.translate
-        buttons = QHBoxLayout()
-        buttons.setSpacing(SPACE.sm)
-        preview = _solid_button("hud-open-preview", translate("hud.open_preview"), "primary")
-        preview.clicked.connect(self.open_fullscreen_preview)
-        buttons.addWidget(preview)
-        buttons.addStretch(1)
-        return buttons
+        self._layouts = QComboBox()
+        self._layouts.setObjectName("hud-layout")
+        self._layouts.currentIndexChanged.connect(self._on_layout)
+        self._name = QLineEdit()
+        self._name.setObjectName("hud-layout-name")
+        self._name.editingFinished.connect(self._on_name)
+        self._default_mark = QLabel()
+        self._default_mark.setObjectName("hud-default-mark")
+        column.addWidget(self._layouts)
+        column.addWidget(self._name)
+        column.addWidget(self._default_mark)
 
-    def _title(self, widget_id: str) -> str:
-        return self._translator.translate(f"hud.widget.{widget_id}")
+        actions = QHBoxLayout()
+        self._new = _button("hud-layout-new", tr("hud.layout.new"), self._on_new)
+        self._delete = _button("hud-layout-delete", tr("hud.layout.delete"), self.delete_selected)
+        self._default = _button("hud-set-default", tr("hud.layout.default"), self.mark_default)
+        actions.addWidget(self._new)
+        actions.addWidget(self._delete)
+        column.addLayout(actions)
+        column.addWidget(self._default)
 
-    def _require(self, widget_id: str) -> HudWidgetConfig:
-        current = self._config.widget(widget_id)
-        if current is None:
-            raise KeyError(widget_id)
-        return current
+        self._font = _scale_spin("hud-font-scale")
+        self._font.valueChanged.connect(self._on_font)
+        _row(column, tr("hud.font_scale"), self._font)
+        self._alignment = QComboBox()
+        self._alignment.setObjectName("hud-alignment")
+        for key in ("center", "left", "right"):
+            self._alignment.addItem(tr(f"hud.alignment.{key}"), key)
+        self._alignment.currentIndexChanged.connect(self._on_alignment)
+        _row(column, tr("hud.alignment"), self._alignment)
 
-    def _selected_widget(self) -> HudWidgetConfig | None:
-        if self._selected is None:
-            return None
-        return self._config.widget(self._selected)
+        self._visible: dict[str, QCheckBox] = {}
+        self._scales: dict[str, QSpinBox] = {}
+        for field_id in FIELD_IDS:
+            checkbox = QCheckBox(tr(f"hud.field.{field_id}"))
+            checkbox.setObjectName(f"hud-visible-{field_id}")
+            scale = _scale_spin(f"hud-scale-{field_id}")
+            checkbox.toggled.connect(
+                lambda checked, field=field_id: self._on_visible(field, checked)
+            )
+            scale.valueChanged.connect(
+                lambda value, field=field_id: self._on_field_scale(field, value)
+            )
+            line = QHBoxLayout()
+            line.addWidget(checkbox, 1)
+            line.addWidget(scale)
+            column.addLayout(line)
+            self._visible[field_id] = checkbox
+            self._scales[field_id] = scale
 
-    def _replace(self, widget: HudWidgetConfig) -> None:
-        self._config = with_widget(self._config, widget)
-        self._refresh_checks()
-        self._show_config()
+        self._shares: dict[str, QSpinBox] = {}
+        for part in ("clock", "status", "lanes", "ranking"):
+            spin = QSpinBox()
+            spin.setObjectName(f"hud-share-{part}")
+            spin.setRange(SHARE_MIN, SHARE_MAX)
+            spin.valueChanged.connect(lambda value, name=part: self._on_share(name, value))
+            self._shares[part] = spin
+            _row(column, tr(f"hud.share.{part}"), spin)
 
-    def _set_config(self, config: HudConfiguration) -> None:
-        self._config = config
-        if self._selected is None or config.widget(self._selected) is None:
-            self._selected = config.widgets[0].id if config.widgets else None
-        self._refresh_checks()
-        self._show_config()
-
-    def _show_config(self) -> None:
-        for preview in self._previews:
-            preview.apply(self._config)
-            preview.set_selected(self._selected)
-
-    def _show_selection(self) -> None:
-        for preview in self._previews:
-            preview.set_selected(self._selected)
-
-    def _refresh_checks(self) -> None:
-        for widget_id, checkbox in self._checks.items():
-            item = self._config.widget(widget_id)
-            checkbox.blockSignals(True)
-            checkbox.setChecked(bool(item and item.visible))
-            checkbox.blockSignals(False)
-
-
-LIVE_RANKING_DEFAULT = "live_ranking"
-
-
-class HudPreviewWindow(QDialog):
-    """Fullscreen editing view at the screen resolution. It is not the live race."""
-
-    def __init__(self, translator: Translator, editor: HudEditor) -> None:
-        super().__init__(editor)
-        self.setObjectName("hud-fullscreen-preview")
-        self.setWindowTitle(translator.translate("hud.preview"))
-        self.setModal(False)
-        self.setWindowOpacity(1.0)
-        self._editor = editor
-        self.preview = HudPreview(translator, editor)
-        self.preview.setObjectName("hud-fullscreen-canvas")
-        translate = translator.translate
-        self.standard_button = _solid_button("hud-standard", translate("hud.standard"), "secondary")
-        self.save_button = _solid_button("hud-save", translate("hud.save"), "primary")
-        self.revert_button = _solid_button("hud-revert", translate("hud.revert"), "secondary")
-        self.forward_button = _solid_button("hud-forward", translate("hud.forward"), "secondary")
-        self.backward_button = _solid_button("hud-backward", translate("hud.backward"), "secondary")
-        self.close_button = _solid_button(
-            "hud-preview-close", translate("hud.preview_close"), "secondary"
+        self._lights_visible = QCheckBox(tr("hud.lights.visible"))
+        self._lights_visible.setObjectName("hud-lights-visible")
+        self._lights_visible.toggled.connect(self._on_lights_visible)
+        column.addWidget(self._lights_visible)
+        self._light_spins: dict[str, QSpinBox] = {}
+        for axis in ("x", "y", "width", "height"):
+            spin = QSpinBox()
+            spin.setObjectName(f"hud-lights-{axis}")
+            spin.setSuffix(" %")
+            spin.setRange(0, 100)
+            spin.valueChanged.connect(self._on_light_spin)
+            self._light_spins[axis] = spin
+            _row(column, tr(f"hud.lights.{axis}"), spin)
+        light_actions = QHBoxLayout()
+        light_actions.addWidget(
+            _button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights)
         )
-        self.standard_button.clicked.connect(editor.apply_standard_layout)
-        self.save_button.clicked.connect(editor.save)
-        self.revert_button.clicked.connect(editor.revert)
-        self.forward_button.clicked.connect(editor.bring_forward)
-        self.backward_button.clicked.connect(editor.send_backward)
-        self.close_button.clicked.connect(self.close)
-        toolbar = QWidget()
-        toolbar.setObjectName("hud-preview-toolbar")
-        toolbar.setAutoFillBackground(True)
-        actions = QHBoxLayout(toolbar)
-        actions.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
-        actions.setSpacing(SPACE.sm)
-        for button in (
-            self.standard_button,
-            self.save_button,
-            self.revert_button,
-            self.forward_button,
-            self.backward_button,
-            self.close_button,
-        ):
-            actions.addWidget(button)
-        actions.addStretch(1)
-        self.caption = QLabel(translate("hud.preview_hint"))
-        self.caption.setObjectName("hud-preview-hint")
-        set_role(self.caption, "caption")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(toolbar)
-        layout.addWidget(self.caption)
+        light_actions.addWidget(
+            _button("hud-lights-preview", tr("hud.lights.preview"), self.preview_start_sequence)
+        )
+        column.addLayout(light_actions)
+
+        self._status = QComboBox()
+        self._status.setObjectName("hud-preview-status")
+        for key, label_key in _PREVIEW_STATUSES:
+            self._status.addItem(tr(label_key), key)
+        self._status.currentIndexChanged.connect(self._on_preview_status)
+        _row(column, tr("hud.preview.status"), self._status)
+        self._lanes = QSpinBox()
+        self._lanes.setObjectName("hud-preview-lanes")
+        self._lanes.setRange(2, 4)
+        self._lanes.valueChanged.connect(self._on_preview_lanes)
+        _row(column, tr("hud.preview.lanes"), self._lanes)
+
+        store_actions = QHBoxLayout()
+        store_actions.addWidget(
+            _button("hud-standard", tr("hud.standard"), self.apply_standard_layout)
+        )
+        store_actions.addWidget(_button("hud-save", tr("hud.save"), self.save_persistent))
+        store_actions.addWidget(_button("hud-revert", tr("hud.revert"), self.revert))
+        column.addLayout(store_actions)
+        column.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(form)
+        scroll.setMinimumWidth(340)
+        scroll.setMaximumWidth(460)
+
+        layout = QHBoxLayout(self)
+        configure_page(layout)
+        layout.addWidget(scroll)
         layout.addWidget(self.preview, 1)
 
-    def done(self, result: int) -> None:
-        self._editor.note_preview_closed(self)
-        super().done(result)
+    def _commit(self, layout: HudLayout) -> None:
+        self._config = replace_layout(replace(self._config, selected_id=layout.id), layout)
+        self._apply_preview()
+        self._fill_form()
 
-
-class HudPreview(QWidget):
-    """Scaled canvas. Hidden elements stay out of the picture until they are enabled again."""
-
-    def __init__(self, translator: Translator, editor: HudEditor) -> None:
-        super().__init__()
-        self.setObjectName("hud-preview")
-        self.setMinimumHeight(200)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        policy.setHeightForWidth(True)
-        self.setSizePolicy(policy)
-        self._editor = editor
-        self._translator = translator
-        self._boxes: dict[str, HudBox] = {}
-        self._config = default_hud_configuration()
-        self.grid = HudGrid(self)
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return max(180, int(width * 9 / 16))
-
-    def box(self, widget_id: str) -> HudBox | None:
-        return self._boxes.get(widget_id)
-
-    def apply(self, config: HudConfiguration) -> None:
-        self._config = config
-        ids = {item.id for item in config.widgets}
-        for extra in list(self._boxes):
-            if extra not in ids:
-                self._boxes.pop(extra).deleteLater()
-        for item in config.widgets:
-            box = self._boxes.get(item.id)
-            if box is None:
-                title = self._translator.translate(f"hud.widget.{item.id}")
-                box = HudBox(item.id, title, self)
-                self._boxes[item.id] = box
-            box.setVisible(item.visible)
-        self.relayout()
-
-    def set_selected(self, widget_id: str | None) -> None:
-        for box_id, box in self._boxes.items():
-            active = box_id == widget_id
-            box.setProperty("active", "true" if active else "false")
-            polish(box)
-
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self.relayout()
-
-    def relayout(self) -> None:
-        width = self.width()
-        height = self.height()
-        for item in stacking_order(self._config.widgets):
-            box = self._boxes.get(item.id)
-            if box is None or not item.visible or width <= 0 or height <= 0:
-                continue
-            rect = to_pixels(item, width, height)
-            box.setGeometry(rect.x, rect.y, rect.width, rect.height)
-            box.raise_()
-        self.grid.setGeometry(0, 0, max(width, 0), max(height, 0))
-        self.grid.lower()
-        self.grid.update()
-
-    def move_widget(self, widget_id: str, x: float, y: float, width: float, height: float) -> None:
-        self._editor.set_widget_geometry(
-            widget_id,
-            snap_axis(x, _GRID_X),
-            snap_axis(y, _GRID_Y),
-            snap_axis(width, _GRID_X),
-            snap_axis(height, _GRID_Y),
+    def _with_field(self, field_id: str, style: FieldStyle) -> HudLayout:
+        fields = tuple(
+            (key, style if key == field_id else value)
+            for key, value in self.selected_layout().fields
         )
+        return replace(self.selected_layout(), fields=fields)
 
-    def select_widget(self, widget_id: str) -> None:
-        self._editor.select(widget_id)
+    def _apply_preview(self) -> None:
+        self.stage.apply_layout(self.selected_layout())
+        self._show_sample()
+        self._place_lights()
 
+    def _show_sample(self) -> None:
+        snapshot, message_key = _sample(self._preview_status, self._preview_lanes)
+        self.stage.show_standings(snapshot, mode=RaceMode.LAPS, lane_count=self._preview_lanes)
+        self.stage.messages.message_label.setText(self._translator.translate(message_key))
 
-class HudGrid(QWidget):
-    """Alignment grid. Mouse events pass through to the elements underneath."""
+    def _fill_form(self) -> None:
+        layout = self.selected_layout()
+        self._filling = True
+        try:
+            self._layouts.blockSignals(True)
+            self._layouts.clear()
+            for item in self._config.layouts:
+                label = item.name
+                if item.id == self._config.default_id:
+                    label = f"{label} [Standard]"
+                self._layouts.addItem(label, item.id)
+            index = self._layouts.findData(self._config.selected_id)
+            self._layouts.setCurrentIndex(max(index, 0))
+            self._layouts.blockSignals(False)
+            self._name.setText(layout.name)
+            default = self._config.default_layout()
+            self._default_mark.setText(
+                self._translator.format("hud.layout.default_mark", name=default.name)
+            )
+            self._delete.setEnabled(not layout.builtin)
+            self._font.setValue(layout.font_scale)
+            alignment = self._alignment.findData(layout.alignment)
+            self._alignment.setCurrentIndex(max(alignment, 0))
+            for field_id, checkbox in self._visible.items():
+                style = layout.field(field_id)
+                checkbox.setChecked(style.visible)
+                self._scales[field_id].setValue(style.scale)
+            self._shares["clock"].setValue(layout.clock_share)
+            self._shares["status"].setValue(layout.status_share)
+            self._shares["lanes"].setValue(layout.lanes_share)
+            self._shares["ranking"].setValue(layout.ranking_share)
+            self._sync_light_spins(layout.lights)
+            self._status.setCurrentIndex(max(self._status.findData(self._preview_status), 0))
+            self._lanes.setValue(self._preview_lanes)
+        finally:
+            self._filling = False
 
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
-        self.setObjectName("hud-grid")
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    def _sync_light_spins(self, frame: LightFrame) -> None:
+        width = _percent(frame.width)
+        height = _percent(frame.height)
+        self._light_spins["width"].setRange(6, 100)
+        self._light_spins["height"].setRange(6, 100)
+        self._light_spins["width"].setValue(width)
+        self._light_spins["height"].setValue(height)
+        self._light_spins["x"].setRange(0, max(0, 100 - width))
+        self._light_spins["y"].setRange(0, max(0, 100 - height))
+        self._light_spins["x"].setValue(min(_percent(frame.x), self._light_spins["x"].maximum()))
+        self._light_spins["y"].setValue(min(_percent(frame.y), self._light_spins["y"].maximum()))
+        self._lights_visible.setChecked(frame.visible)
 
-    def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
-        painter = QPainter(self)
-        parent = self.parentWidget()
-        canvas_width = parent.width() if parent is not None else self.width()
-        canvas_height = parent.height() if parent is not None else self.height()
-        _paint_grid(
-            painter, canvas_width, canvas_height, self.x(), self.y(), self.width(), self.height()
-        )
-
-
-class HudBox(QFrame):
-    """One element in the preview. A drag moves it; the corner changes its size."""
-
-    def __init__(self, widget_id: str, title: str, preview: HudPreview) -> None:
-        super().__init__(preview)
-        self.widget_id = widget_id
-        self._preview = preview
-        self.setObjectName(f"hud-box-{widget_id}")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setMinimumSize(0, 0)
-        self.setMouseTracking(True)
-        set_role(self, "hud-box")
-        self._title = QLabel(title, self)
-        self._title.setWordWrap(True)
-        self._title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        set_role(self._title, "caption")
-        self._handle = QFrame(self)
-        self._handle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        set_role(self._handle, "hud-handle")
-        self._press: tuple[float, float] | None = None
-        self._origin: tuple[float, float, float, float] | None = None
-        self._resizing = False
-
-    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
-        super().paintEvent(event)
-        painter = QPainter(self)
-        _paint_grid(
-            painter,
-            self._preview.width(),
-            self._preview.height(),
-            self.x(),
-            self.y(),
-            self.width(),
-            self.height(),
-        )
-
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._title.setGeometry(6, 4, max(0, self.width() - 16), max(0, self.height() - 16))
-        self._handle.setGeometry(
-            max(0, self.width() - _HANDLE), max(0, self.height() - _HANDLE), 10, 10
-        )
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() != Qt.MouseButton.LeftButton:
+    def _place_lights(self, *, move_handle: bool = True) -> None:
+        stage = self.stage
+        if stage.width() <= 1 or stage.height() <= 1:
             return
-        widget = self._preview._config.widget(self.widget_id)
-        if widget is None:
+        frame = self.selected_layout().lights
+        rect = to_pixels(frame.as_config(), stage.width(), stage.height())
+        origin = stage.mapTo(self.preview, QPoint(0, 0))
+        placed = QRect(origin.x() + rect.x, origin.y() + rect.y, rect.width, rect.height)
+        if self.lights.geometry() != placed:
+            self.lights.setGeometry(placed)
+        if move_handle and not self.handle.is_dragging() and self.handle.geometry() != placed:
+            self.handle.setGeometry(placed)
+        sequence = self._cue is not None
+        if frame.visible or sequence:
+            if not sequence and self.lights.isHidden():
+                self.lights.show_lights(0)
+            self.lights.raise_()
+        elif not self.lights.isHidden():
+            self.lights.clear()
+        self.handle.raise_()
+
+    def _frame_from_handle(self, x: int, y: int, width: int, height: int) -> LightFrame:
+        stage = self.stage
+        origin = stage.mapTo(self.preview, QPoint(0, 0))
+        surface_w = max(stage.width(), 1)
+        surface_h = max(stage.height(), 1)
+        current = self.selected_layout().lights
+        return _clamped_frame(
+            LightFrame(
+                visible=current.visible,
+                x=(x - origin.x()) / surface_w,
+                y=(y - origin.y()) / surface_h,
+                width=width / surface_w,
+                height=height / surface_h,
+            )
+        )
+
+    def _on_handle(self, x: int, y: int, width: int, height: int) -> None:
+        frame = self._frame_from_handle(x, y, width, height)
+        layout = replace(self.selected_layout(), lights=frame)
+        self._config = replace_layout(replace(self._config, selected_id=layout.id), layout)
+        move_handle = not self.handle.is_dragging()
+        self._place_lights(move_handle=move_handle)
+        self._filling = True
+        try:
+            self._sync_light_spins(frame)
+        finally:
+            self._filling = False
+
+    def _on_layout(self) -> None:
+        if self._filling:
             return
-        self._preview.select_widget(self.widget_id)
-        self._press = (event.globalPosition().x(), event.globalPosition().y())
-        self._origin = (widget.x, widget.y, widget.width, widget.height)
-        local = event.position()
-        near_right = local.x() >= self.width() - _HANDLE
-        near_bottom = local.y() >= self.height() - _HANDLE
-        self._resizing = near_right and near_bottom
-        event.accept()
+        layout_id = self._layouts.currentData()
+        if isinstance(layout_id, str):
+            self.select_layout(layout_id)
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._press is None or self._origin is None:
+    def _on_name(self) -> None:
+        if self._filling:
             return
-        parent = self._preview
-        dx = (event.globalPosition().x() - self._press[0]) / max(1, parent.width())
-        dy = (event.globalPosition().y() - self._press[1]) / max(1, parent.height())
-        x, y, width, height = self._origin
-        if self._resizing:
-            self._preview.move_widget(self.widget_id, x, y, width + dx, height + dy)
-        else:
-            self._preview.move_widget(self.widget_id, x + dx, y + dy, width, height)
-        event.accept()
+        text = self._name.text().strip()
+        current = self.selected_layout()
+        if not text or text == current.name:
+            return
+        self._commit(replace(current, name=text))
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self._press = None
-        self._origin = None
-        self._resizing = False
-        event.accept()
+    def _on_new(self) -> None:
+        self.add_layout(None)
+
+    def _on_font(self, value: int) -> None:
+        if self._filling:
+            return
+        snapped = snap_scale(value)
+        if snapped != value:
+            self._font.setValue(snapped)
+            return
+        if snapped != self.selected_layout().font_scale:
+            self.set_font_scale(snapped)
+
+    def _on_alignment(self) -> None:
+        if self._filling:
+            return
+        alignment = self._alignment.currentData()
+        if isinstance(alignment, str):
+            self.set_alignment(alignment)
+
+    def _on_visible(self, field_id: str, visible: bool) -> None:
+        if self._filling or visible == self.selected_layout().field(field_id).visible:
+            return
+        self.set_field_visible(field_id, visible)
+
+    def _on_field_scale(self, field_id: str, value: int) -> None:
+        if self._filling:
+            return
+        snapped = snap_scale(value)
+        if snapped != value:
+            self._scales[field_id].setValue(snapped)
+            return
+        if snapped != self.selected_layout().field(field_id).scale:
+            self.set_field_scale(field_id, snapped)
+
+    def _on_share(self, part: str, value: int) -> None:
+        if self._filling:
+            return
+        current = getattr(self.selected_layout(), f"{part}_share")
+        if value != current:
+            self.set_share(part, value)
+
+    def _on_lights_visible(self, visible: bool) -> None:
+        if self._filling or visible == self.selected_layout().lights.visible:
+            return
+        frame = replace(self.selected_layout().lights, visible=visible)
+        self.set_light_frame(frame)
+
+    def _on_light_spin(self) -> None:
+        if self._filling:
+            return
+        current = self.selected_layout().lights
+        frame = _clamped_frame(
+            LightFrame(
+                visible=self._lights_visible.isChecked(),
+                x=self._light_spins["x"].value() / 100,
+                y=self._light_spins["y"].value() / 100,
+                width=self._light_spins["width"].value() / 100,
+                height=self._light_spins["height"].value() / 100,
+            )
+        )
+        if frame != current:
+            self.set_light_frame(frame)
+
+    def _on_preview_status(self) -> None:
+        if self._filling:
+            return
+        status = self._status.currentData()
+        if isinstance(status, str) and status != self._preview_status:
+            self._preview_status = status
+            self._show_sample()
+
+    def _on_preview_lanes(self, value: int) -> None:
+        if self._filling or value == self._preview_lanes:
+            return
+        self._preview_lanes = value
+        self._show_sample()
+
+    def _show_preview_step(self, step: object) -> None:
+        if isinstance(step, StartCueStep):
+            self.lights.show_step(step)
+            self._place_lights()
+
+    def _finish_preview_sequence(self) -> None:
+        self._cue = None
+        self._restore_idle_lights()
+
+    def _note_sequence_started(self) -> None:
+        self._sequence_started = True
+
+    def _stop_cue(self, *, restore: bool = True) -> None:
+        cue = self._cue
+        self._cue = None
+        if cue is not None:
+            cue.blockSignals(True)
+            cue.stop()
+        if restore:
+            self._restore_idle_lights()
+
+    def _restore_idle_lights(self) -> None:
+        frame = self.selected_layout().lights
+        if frame.visible:
+            self.lights.show_lights(0)
+        elif not self.lights.isHidden():
+            self.lights.clear()
+        self._place_lights()
 
 
-def _solid_button(object_name: str, text: str, role: str) -> QPushButton:
-    """Opaque button wide enough for its full label."""
+def _scale_spin(object_name: str) -> QSpinBox:
+    spin = QSpinBox()
+    spin.setObjectName(object_name)
+    spin.setRange(SCALE_MIN, SCALE_MAX)
+    spin.setSingleStep(SCALE_STEP)
+    spin.setSuffix(" %")
+    return spin
+
+
+def _button(object_name: str, text: str, slot: Callable[[], None]) -> QPushButton:
     button = QPushButton(text)
     button.setObjectName(object_name)
-    button.setAutoFillBackground(True)
-    set_role(button, role)
-    button.ensurePolished()
-    advance = button.fontMetrics().horizontalAdvance(text)
-    button.setMinimumWidth(advance + _BUTTON_CHROME + _BUTTON_SPARE)
-    button.setMinimumHeight(36)
+    button.clicked.connect(slot)
     return button
+
+
+def _row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
+    line = QHBoxLayout()
+    caption = QLabel(label)
+    line.addWidget(caption)
+    line.addWidget(widget, 1)
+    parent.addLayout(line)
+
+
+def _percent(value: float) -> int:
+    return round(value * 100)
