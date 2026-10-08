@@ -19,6 +19,7 @@ from slot_racing.modules.races.types import RaceInfo, TimeBest
 from slot_racing.modules.races.ui.formatting import participant_status_key, start_number_text
 from slot_racing.modules.races.ui.time_trial_board_view import fill_lane_table
 from slot_racing.uikit import fill_table, heading, make_table
+from slot_racing.uikit.report_view import RaceReportView
 from slot_racing.uikit.theme import configure_page, set_role
 from slot_racing.uikit.widgets import format_datetime
 
@@ -109,6 +110,7 @@ class ResultsView(QWidget):
             ],
             "time-lane-ranking",
         )
+        self.report = RaceReportView(translator)
         self.back_button = QPushButton(tr("race.results.back"))
         self.back_button.setObjectName("results-back")
         set_role(self.back_button, "ghost")
@@ -128,10 +130,12 @@ class ResultsView(QWidget):
         layout.addWidget(self.bests_table, 2)
         layout.addWidget(self.ranking_heading)
         layout.addWidget(self.ranking_table, 2)
+        layout.addWidget(self.report)
         layout.addWidget(self.back_button)
 
     def show_race(self, race_id: RaceId) -> None:
         race = self._service.require_race(race_id)
+        self.report.show_race(self._service.get_completed(race_id))
         time_trial = race.mode is RaceMode.TIME_TRIAL
         for widget in (self.table, self.laps_heading, self.laps_table):
             widget.setVisible(not time_trial)

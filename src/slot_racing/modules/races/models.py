@@ -91,6 +91,10 @@ class TimeMeasurement(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     race_id: Mapped[int] = mapped_column(ForeignKey("races.id", ondelete="CASCADE"))
     track_id: Mapped[int | None] = mapped_column(ForeignKey("tracks.id", ondelete="RESTRICT"))
+    track_layout_id: Mapped[int | None] = mapped_column(
+        ForeignKey("track_layouts.id", ondelete="SET NULL")
+    )
+    """Layout the lap was driven on. Empty for races stored before a plan was snapshotted."""
     driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="RESTRICT"))
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id", ondelete="RESTRICT"))
     lane: Mapped[int]

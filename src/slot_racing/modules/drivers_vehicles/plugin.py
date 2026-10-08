@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from slot_racing.core.catalog import DriverCatalog, VehicleCatalog
+from slot_racing.core.catalog import (
+    DriverCatalog,
+    RaceHistoryCatalog,
+    TrackCatalog,
+    TrackInfo,
+    VehicleCatalog,
+)
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
 from slot_racing.core.storage import Database
 from slot_racing.modules.drivers_vehicles.service import DriverService, VehicleService
@@ -10,6 +16,12 @@ from slot_racing.modules.drivers_vehicles.translations import TRANSLATIONS
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
+
+
+def _tracks(catalog: TrackCatalog | None) -> tuple[TrackInfo, ...]:
+    if catalog is None:
+        return ()
+    return tuple(catalog.list_tracks())
 
 
 class DriversVehiclesPlugin(Plugin):
@@ -34,12 +46,24 @@ class DriversVehiclesPlugin(Plugin):
         def drivers_page() -> QWidget:
             from slot_racing.modules.drivers_vehicles.ui.drivers_page import DriversPage
 
-            return DriversPage(translator, drivers, vehicles)
+            return DriversPage(
+                translator,
+                drivers,
+                vehicles,
+                lambda: context.find_service(RaceHistoryCatalog),
+                lambda: _tracks(context.find_service(TrackCatalog)),
+            )
 
         def vehicles_page() -> QWidget:
             from slot_racing.modules.drivers_vehicles.ui.vehicles_page import VehiclesPage
 
-            return VehiclesPage(translator, vehicles, drivers)
+            return VehiclesPage(
+                translator,
+                vehicles,
+                drivers,
+                lambda: context.find_service(RaceHistoryCatalog),
+                lambda: _tracks(context.find_service(TrackCatalog)),
+            )
 
         context.add_navigation(
             NavigationItem(

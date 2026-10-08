@@ -14,7 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 
-from slot_racing.core.domain import DriverId, RaceMode, RaceStatus, TrackId, VehicleId
+from slot_racing.core.domain import DriverId, RaceId, RaceMode, RaceStatus, TrackId, VehicleId
+from slot_racing.core.statistics import HistoryRace, LayoutRevision
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,10 @@ class TrackCatalog(ABC):
     @abstractmethod
     def get_track(self, track_id: TrackId) -> TrackInfo | None: ...
 
+    def current_layout_id(self, track_id: TrackId) -> int | None:
+        """Id of the plan the track opens today. ``None`` when the track has no plan yet."""
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class StandingLine:
@@ -165,3 +170,19 @@ class TimeMeasurementCatalog(ABC):
     @abstractmethod
     def list_for_track(self, track_id: TrackId) -> list[TimeMeasurementView]:
         """Measurements of this track, oldest first. Other tracks are not included."""
+
+
+class RaceHistoryCatalog(ABC):
+    """Ended races and the layout rows they may belong to. Statistics are computed by the reader."""
+
+    @abstractmethod
+    def list_completed(self) -> tuple[HistoryRace, ...]:
+        """Finished and aborted races. A race that is still open is not included."""
+
+    @abstractmethod
+    def get_completed(self, race_id: RaceId) -> HistoryRace | None:
+        """One ended race, or ``None`` when it is missing or still open."""
+
+    @abstractmethod
+    def list_layouts(self, track_id: TrackId) -> tuple[LayoutRevision, ...]:
+        """Every stored layout of this track, current plan first. Nothing is invented."""

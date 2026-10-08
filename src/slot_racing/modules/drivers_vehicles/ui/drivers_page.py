@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from slot_racing.core.catalog import DriverInfo
+from slot_racing.core.catalog import DriverInfo, RaceHistoryCatalog, TrackInfo
 from slot_racing.core.domain import DriverId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.drivers_vehicles.service import DriverInput, DriverService, VehicleService
 from slot_racing.modules.drivers_vehicles.ui.start_number_field import StartNumberPicker
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog
+from slot_racing.uikit.career import CareerPanel
 from slot_racing.uikit.widgets import fill_table, make_table, selected_id
 
 
@@ -53,7 +56,12 @@ class DriverDialog(FormDialog):
 
 class DriversPage(EntityPage):
     def __init__(
-        self, translator: Translator, service: DriverService, vehicles: VehicleService
+        self,
+        translator: Translator,
+        service: DriverService,
+        vehicles: VehicleService,
+        history: Callable[[], RaceHistoryCatalog | None] | None = None,
+        tracks: Callable[[], Sequence[TrackInfo]] | None = None,
     ) -> None:
         super().__init__(
             translator,
@@ -83,6 +91,16 @@ class DriversPage(EntityPage):
         layout.addWidget(self.vehicles_heading)
         layout.addWidget(self.vehicles_table)
         layout.addWidget(self.vehicles_empty)
+        self.career: CareerPanel | None = None
+        if history is not None and tracks is not None:
+            self.career = CareerPanel(
+                translator,
+                history,
+                tracks,
+                self._vehicle_choices,
+                subject="driver",
+            )
+            layout.addWidget(self.career)
         layout.addWidget(self.status)
         self.table.itemSelectionChanged.connect(self._show_owned_vehicles)
 
@@ -97,18 +115,25 @@ class DriversPage(EntityPage):
         if driver_id is None:
             fill_table(self.vehicles_table, [], keep_selection=False)
             self.vehicles_empty.setText(tr("driver.vehicles.none_selected"))
+            if self.career is not None:
+                self.career.show_subject(None)
             return
         owned = self._vehicles.list_vehicles(driver_id=DriverId(driver_id))
         if not owned:
             fill_table(self.vehicles_table, [], keep_selection=False)
             self.vehicles_empty.setText(tr("driver.vehicles.none"))
-            return
-        fill_table(
-            self.vehicles_table,
-            [(vehicle.label, vehicle.model or "") for vehicle in owned],
-            keep_selection=False,
-        )
-        self.vehicles_empty.setText("")
+        else:
+            fill_table(
+                self.vehicles_table,
+                [(vehicle.label, vehicle.model or "") for vehicle in owned],
+                keep_selection=False,
+            )
+            self.vehicles_empty.setText("")
+        if self.career is not None:
+            self.career.show_subject(driver_id)
+
+    def _vehicle_choices(self) -> list[tuple[int, str]]:
+        return [(int(vehicle.id), vehicle.label) for vehicle in self._vehicles.list_vehicles()]
 
     def load_rows(self) -> list[EntityRow]:
         tr = self.translator.translate

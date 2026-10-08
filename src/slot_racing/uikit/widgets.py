@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from slot_racing.uikit.theme import set_role, set_tone
 
 ID_ROLE = Qt.ItemDataRole.UserRole
+_SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 _NUMERIC = re.compile(r"^[\d:./,\-\s/]+$")
 _ROW_HEIGHT = 34
 
@@ -99,6 +100,37 @@ def fill_table(
         table.selectRow(list(ids).index(selected))
 
 
+class _SortItem(QTableWidgetItem):
+    """Sorts numbers by value. Text, including a missing mark, stays alphabetical."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        left = self.data(_SORT_ROLE)
+        right = other.data(_SORT_ROLE)
+        if isinstance(left, tuple) and isinstance(right, tuple):
+            return bool(left < right)
+        return super().__lt__(other)
+
+
+def fill_sortable(
+    table: QTableWidget,
+    rows: Sequence[Sequence[str]],
+    ids: Sequence[int] | None = None,
+) -> None:
+    """Replace ``table`` and allow the header to sort. Numbers sort as numbers."""
+    table.setSortingEnabled(False)
+    table.setRowCount(len(rows))
+    for row_index, cells in enumerate(rows):
+        for column, text in enumerate(cells):
+            item = _SortItem(text)
+            item.setData(_SORT_ROLE, _sort_key(text))
+            item.setTextAlignment(_alignment(text))
+            if column == 0 and ids is not None:
+                item.setData(ID_ROLE, ids[row_index])
+            table.setItem(row_index, column, item)
+    table.setSortingEnabled(True)
+    table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+
+
 def selected_id(table: QTableWidget) -> int | None:
     row = table.currentRow()
     if row < 0 or table.selectionModel() is None or not table.selectionModel().hasSelection():
@@ -112,6 +144,13 @@ def selected_id(table: QTableWidget) -> int | None:
 
 def format_datetime(value: datetime | None) -> str:
     return "-" if value is None else value.strftime("%d.%m.%Y %H:%M")
+
+
+def _sort_key(text: str) -> tuple[int, int | str]:
+    stripped = text.strip().lstrip("+")
+    if stripped.isdigit():
+        return (0, int(stripped))
+    return (1, text)
 
 
 def _alignment(text: str) -> Qt.AlignmentFlag:

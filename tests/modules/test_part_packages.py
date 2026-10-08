@@ -174,7 +174,7 @@ def test_migration_keeps_a_stored_quantity_as_physical_stock() -> None:
             f"('legacy-1', {int(track_id)}, {int(part_id)}, 10, 20, 0, 0, 0, 0)"
         )
     database.migrate()
-    assert database.schema_revision() == "0016"
+    assert database.schema_revision() == "0017"
     with database.engine.connect() as connection:
         stored = connection.execute(text("SELECT quantity FROM track_part_stock")).scalar_one()
         packages = connection.execute(

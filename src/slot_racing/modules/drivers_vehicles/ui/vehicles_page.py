@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -9,14 +11,16 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
-from slot_racing.core.catalog import VehicleInfo
+from slot_racing.core.catalog import RaceHistoryCatalog, TrackInfo, VehicleInfo
 from slot_racing.core.domain import DriverId, VehicleId
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.drivers_vehicles.service import DriverService, VehicleInput, VehicleService
 from slot_racing.uikit import EntityPage, EntityRow, FormDialog, selected_id
+from slot_racing.uikit.career import CareerPanel
 from slot_racing.uikit.theme import set_role
 
 
@@ -104,7 +108,12 @@ class VehicleDialog(FormDialog):
 
 class VehiclesPage(EntityPage):
     def __init__(
-        self, translator: Translator, vehicles: VehicleService, drivers: DriverService
+        self,
+        translator: Translator,
+        vehicles: VehicleService,
+        drivers: DriverService,
+        history: Callable[[], RaceHistoryCatalog | None] | None = None,
+        tracks: Callable[[], Sequence[TrackInfo]] | None = None,
     ) -> None:
         super().__init__(
             translator,
@@ -126,6 +135,30 @@ class VehiclesPage(EntityPage):
         set_role(self.unassign_button, "ghost")
         self.buttons.insertWidget(self.buttons.count() - 1, self.unassign_button)
         self.unassign_button.clicked.connect(lambda: self.unassign_selected())
+        self.career: CareerPanel | None = None
+        if history is not None and tracks is not None:
+            self.career = CareerPanel(
+                translator,
+                history,
+                tracks,
+                self._driver_choices,
+                subject="vehicle",
+            )
+            layout = self.layout()
+            assert isinstance(layout, QVBoxLayout)
+            layout.insertWidget(layout.count() - 1, self.career)
+            self.table.itemSelectionChanged.connect(self._show_career)
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._show_career()
+
+    def _show_career(self) -> None:
+        if self.career is not None:
+            self.career.show_subject(selected_id(self.table))
+
+    def _driver_choices(self) -> list[tuple[int, str]]:
+        return [(int(driver.id), driver.label) for driver in self._drivers.list_drivers()]
 
     def unassign_selected(self) -> None:
         vehicle_id = selected_id(self.table)
