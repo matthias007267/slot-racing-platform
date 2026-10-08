@@ -58,17 +58,25 @@ class TravelDirection(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class DetectionZone:
-    """One region that reports a single position on a single lane."""
+    """One region that reports a single position on a single lane.
+
+    ``check_direction`` compares the measured shift with ``DetectorSettings.direction``.
+    When it is off, a large enough component still counts once, until the zone is free
+    again. Older callers omit the flag and keep the check.
+    """
 
     position_id: str
     lane: int
     roi: DetectionRoi
+    check_direction: bool = True
 
     def __post_init__(self) -> None:
         require_position_id(self.position_id)
         require_range("lane", self.lane, 1)
         if not isinstance(self.roi, DetectionRoi):
             raise TypeError("roi must be a DetectionRoi")
+        if not isinstance(self.check_direction, bool):
+            raise TypeError("check_direction must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +225,7 @@ class ZoneInspection:
     reference_updates: int
     background_stable: bool
     release_candidate: bool
+    direction_check: bool
 
 
 # Quiet blocks follow the picture with this time constant. One second of real
@@ -580,6 +589,19 @@ class LaneCrossingDetector:
                 memory.background_stable = False
                 return None, None, 0, False, "released_to_background", 0
             return None, None, 0, False, "occupied", len(samples)
+
+        if not zone.check_direction:
+            # One connected presence is one crossing. The next one waits until
+            # the zone is clear again. Shift, window and sample count do not vote.
+            self._states[key] = ZoneState.OCCUPIED
+            samples.clear()
+            crossing = LaneCrossing(
+                position_id=zone.position_id,
+                lane=zone.lane,
+                timestamp_ns=timestamp_ns,
+                foreground_pixels=count,
+            )
+            return crossing, None, 0, True, "accepted_without_direction_check", 1
 
         centroid_x, centroid_y = centroid
         samples.append((timestamp_ns, centroid_x, centroid_y))
@@ -1184,6 +1206,7 @@ def _zone_inspection(
         reference_updates=memory.reference_updates,
         background_stable=memory.background_stable,
         release_candidate=memory.release_candidate,
+        direction_check=zone.check_direction,
     )
 
 

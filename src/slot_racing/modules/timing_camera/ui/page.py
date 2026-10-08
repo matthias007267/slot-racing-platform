@@ -23,6 +23,7 @@ from typing import Protocol
 from pydantic import ValidationError
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -102,6 +103,7 @@ class ZoneDraft:
     position_id: str
     lane: int
     roi: NormalizedRoi
+    check_direction: bool = True
 
 
 class CameraSetupPage(QWidget):
@@ -152,6 +154,9 @@ class CameraSetupPage(QWidget):
         self.fps.setObjectName("camera-fps")
         self.direction = QComboBox()
         self.direction.setObjectName("camera-direction")
+        self.check_direction = QCheckBox(self._tr("camera.field.check_direction"))
+        self.check_direction.setObjectName("camera-check-direction")
+        self.check_direction.setChecked(True)
         self.sensitivity = QSlider(Qt.Orientation.Horizontal)
         self.sensitivity.setObjectName("camera-sensitivity")
         self.sensitivity.setRange(0, 100)
@@ -215,6 +220,7 @@ class CameraSetupPage(QWidget):
         camera_form.addRow("", self.resolution_value)
         zone_form = QFormLayout()
         zone_form.addRow(self._tr("camera.field.position"), self.position)
+        zone_form.addRow("", self.check_direction)
 
         side = QWidget()
         side.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Expanding)
@@ -247,6 +253,7 @@ class CameraSetupPage(QWidget):
         self.resolution.currentIndexChanged.connect(self._on_camera_changed)
         self.fps.currentIndexChanged.connect(self._on_camera_changed)
         self.direction.currentIndexChanged.connect(self._note_edit)
+        self.check_direction.toggled.connect(self._on_check_direction)
         self.sensitivity.valueChanged.connect(self._note_edit)
         self.detection_resolution.valueChanged.connect(self._on_resolution)
         self.zones.currentRowChanged.connect(self._on_list)
@@ -311,7 +318,8 @@ class CameraSetupPage(QWidget):
     def _apply(self, config: CameraConfiguration, *, restart: bool) -> None:
         self._loading = True
         self._drafts = [
-            ZoneDraft(zone.position_id, zone.lane, zone.roi) for zone in config.detection.zones
+            ZoneDraft(zone.position_id, zone.lane, zone.roi, zone.check_direction)
+            for zone in config.detection.zones
         ]
         self._block_size = config.detection.block_size
         self._fill_direction(config.detection.direction)
@@ -417,13 +425,17 @@ class CameraSetupPage(QWidget):
         enabled = 0 <= index < len(self._drafts)
         self.position.setEnabled(enabled)
         self.delete_zone.setEnabled(enabled)
+        self.check_direction.setEnabled(enabled)
         previous = self._loading
         self._loading = True
         if enabled:
             self.position.setText(self._drafts[index].position_id)
+            self.check_direction.setChecked(self._drafts[index].check_direction)
         else:
             self.position.clear()
+            self.check_direction.setChecked(True)
         self._loading = previous
+        self._sync_direction_enabled()
 
     def _label(self, draft: ZoneDraft) -> str:
         if not _complete(draft.position_id):
@@ -570,6 +582,7 @@ class CameraSetupPage(QWidget):
                 draft.roi.y,
                 draft.roi.width,
                 draft.roi.height,
+                draft.check_direction,
             )
             for draft in self._drafts
         )
@@ -599,7 +612,10 @@ class CameraSetupPage(QWidget):
             detection=StoredDetection(
                 zones=tuple(
                     StoredDetectionZone(
-                        position_id=draft.position_id, lane=draft.lane, roi=draft.roi
+                        position_id=draft.position_id,
+                        lane=draft.lane,
+                        roi=draft.roi,
+                        check_direction=draft.check_direction,
                     )
                     for draft in self._drafts
                 ),
@@ -628,6 +644,21 @@ class CameraSetupPage(QWidget):
             self._start_preview()
         else:
             self._refresh_status()
+
+    def _on_check_direction(self, checked: bool) -> None:
+        if self._loading:
+            return
+        index = self.stage.selected_index()
+        if index < 0 or index >= len(self._drafts):
+            return
+        self._drafts[index].check_direction = checked
+        self._sync_direction_enabled()
+        self._note_edit()
+
+    def _sync_direction_enabled(self) -> None:
+        """The shared travel direction stays editable while any zone still checks it."""
+        required = not self._drafts or any(draft.check_direction for draft in self._drafts)
+        self.direction.setEnabled(required)
 
     def _on_list(self, row: int) -> None:
         if self._loading:

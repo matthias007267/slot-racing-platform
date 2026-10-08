@@ -284,6 +284,24 @@ def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
     assert pixels(again) == roi_to_pixels(zone.roi, *FRAME)
 
 
+def test_direction_check_is_per_zone_and_older_pages_keep_it_enabled(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    assert page.check_direction.text() == "Fahrtrichtung prüfen"
+    assert page.check_direction.isChecked()
+    assert page.direction.isEnabled()
+    page.check_direction.setChecked(False)
+    assert not page.direction.isEnabled()
+    page.save.click()
+    loaded = CameraConfigurationStore(stored).load()
+    assert loaded.detection.zones[0].check_direction is False
+    assert loaded.detection.direction is TravelDirection.LEFT_TO_RIGHT
+    again, _preview = open_page(qtbot, CameraConfigurationStore(stored))
+    assert not again.check_direction.isChecked()
+    assert not again.direction.isEnabled()
+
+
 def test_direction_and_sensitivity_are_saved_and_block_size_is_kept(qtbot: QtBot) -> None:
     stored = database()
     base = saved_configuration()

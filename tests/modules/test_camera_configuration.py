@@ -191,10 +191,16 @@ def test_an_older_document_gains_direction_and_sensitivity() -> None:
     del detection["block_size"]
     del detection["sensitivity"]
     del detection["direction"]
+    zones = detection["zones"]
+    assert isinstance(zones, list)
+    for zone in zones:
+        assert isinstance(zone, dict)
+        zone.pop("check_direction", None)
     loaded = CameraConfiguration.model_validate(payload)
     assert loaded.detection.block_size == 20
     assert loaded.detection.sensitivity == 50
     assert loaded.detection.direction is TravelDirection.LEFT_TO_RIGHT
+    assert loaded.detection.zones[0].check_direction is True
     assert loaded.detection.zones == sample().detection.zones
 
 
@@ -212,6 +218,7 @@ def test_scaling_keeps_sensitivity_direction_and_block_size() -> None:
     assert scaled.direction is TravelDirection.BOTTOM_TO_TOP
     assert scaled.debug is True
     assert scaled.zones[0].roi == DetectionRoi(20, 20, 40, 40)
+    assert scaled.zones[0].check_direction is True
     assert scale_detector_settings(settings, 100, 100, 100, 100) is settings
 
 
