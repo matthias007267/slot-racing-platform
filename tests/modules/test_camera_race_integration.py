@@ -911,8 +911,8 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         consume(device, blank())
         live.refresh()
         assert live.status_label.text().endswith("Läuft")
-        assert live.name_label.text() == "Kamera"
-        assert live.track_label.text().endswith("Ring")
+        assert runner.snapshot().name == "Kamera"
+        assert runner.snapshot().track_name.endswith("Ring")
         assert column_text(live.table, 0, "Platz") == "1"
         assert column_text(live.table, 0, "Spur") == "1"
         assert column_text(live.table, 0, "Fahrer") == "Anna"

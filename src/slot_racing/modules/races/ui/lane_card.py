@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QFont, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
@@ -17,6 +16,24 @@ from PySide6.QtWidgets import (
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud import (
+    FIELD_BASE_PX,
+    FIELD_BEST,
+    FIELD_DRIVER,
+    FIELD_LANE,
+    FIELD_LAP,
+    FIELD_LAST,
+    FIELD_POSITION,
+    FIELD_START,
+    FIELD_STATUS,
+    FIELD_TOTAL,
+    FIELD_VEHICLE,
+    FONT_FLOOR,
+    HudLayout,
+    caption_px,
+    effective_px,
+    factory_layout,
+)
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.formatting import (
     EMPTY_DISPLAY,
@@ -27,6 +44,11 @@ from slot_racing.modules.races.ui.formatting import (
 from slot_racing.uikit.theme import SPACE, set_role
 
 _FREE = "race.time_trial.free"
+_ALIGN = {
+    "left": Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+    "right": Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+    "center": Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+}
 
 
 class LaneCard(QFrame):
@@ -36,55 +58,112 @@ class LaneCard(QFrame):
         super().__init__()
         self._translator = translator
         self.lane = lane
+        self._style = factory_layout()
+        self._mode = RaceMode.LAPS
+        self._fit_factor = 1.0
+        self._fitting = False
         self.setObjectName(f"live-lane-{lane}")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(0, 180)
+        self.setMinimumSize(0, 160)
         set_role(self, "hud-panel")
 
-        self.lane_label = _label(f"live-lane-{lane}-number", 13, bold=True)
-        self.position_label = _label(f"live-lane-{lane}-position", 28, bold=True)
-        self.driver_label = _label(f"live-lane-{lane}-driver", 22, bold=True, wrap=True)
-        self.vehicle_label = _label(f"live-lane-{lane}-vehicle", 13, wrap=True)
-        self.start_label = _label(f"live-lane-{lane}-start", 13)
-        self.lap_label = _label(f"live-lane-{lane}-lap", 20, bold=True, wrap=True)
-        self.last_label = _label(f"live-lane-{lane}-last", 14, bold=True)
-        self.best_label = _label(f"live-lane-{lane}-best", 14, bold=True)
-        self.total_label = _label(f"live-lane-{lane}-total", 14, bold=True)
-        self.status_label = _label(f"live-lane-{lane}-status", 13, wrap=True)
-        set_role(self.driver_label, "page-title")
-        set_role(self.position_label, "metric")
-        set_role(self.lap_label, "telemetry")
-
-        self._last_caption = _caption(translator.translate("race.column.last_lap"))
-        self._best_caption = _caption(translator.translate("race.column.best_lap"))
-        self._total_caption = _caption(translator.translate("race.column.total_time"))
+        self.lane_label = _value(f"live-lane-{lane}-number")
+        self.position_label = _value(f"live-lane-{lane}-position")
+        self.driver_label = _value(f"live-lane-{lane}-driver", wrap=True)
+        self.vehicle_label = _value(f"live-lane-{lane}-vehicle", wrap=True)
+        self.start_label = _value(f"live-lane-{lane}-start")
+        self.lap_label = _value(f"live-lane-{lane}-lap", wrap=True)
+        self.last_label = _value(f"live-lane-{lane}-last")
+        self.best_label = _value(f"live-lane-{lane}-best")
+        self.total_label = _value(f"live-lane-{lane}-total")
+        self.status_label = _value(f"live-lane-{lane}-status", wrap=True)
         self.lane_label.setText(f"{translator.translate('race.live.lane')} {lane}")
 
-        header = QHBoxLayout()
-        header.addWidget(self.lane_label)
-        header.addStretch(1)
-        header.addWidget(self.position_label)
-        identity = QHBoxLayout()
-        identity.addWidget(self.vehicle_label, 1)
-        identity.addWidget(self.start_label)
-        times = QHBoxLayout()
-        times.setSpacing(SPACE.sm)
-        times.addWidget(_stack(self._last_caption, self.last_label), 1)
-        times.addWidget(_stack(self._best_caption, self.best_label), 1)
-        self._total_box = _stack(self._total_caption, self.total_label)
-        times.addWidget(self._total_box, 1)
+        self._lane_box = _block(self.lane_label)
+        self._position_box = _block(self.position_label)
+        self._driver_box = _block(self.driver_label)
+        self._vehicle_box = _block(self.vehicle_label)
+        tr = translator.translate
+        self._start_caption = _caption(
+            f"live-lane-{lane}-start-caption", tr("race.column.start_number")
+        )
+        self._start_box = _block(self._start_caption, self.start_label)
+        self._lap_box = _block(self.lap_label)
+        self._last_caption = _caption(f"live-lane-{lane}-last-caption", tr("race.column.last_lap"))
+        self._best_caption = _caption(f"live-lane-{lane}-best-caption", tr("race.column.best_lap"))
+        self._total_caption = _caption(
+            f"live-lane-{lane}-total-caption", tr("race.column.total_time")
+        )
+        self._last_box = _block(self._last_caption, self.last_label)
+        self._best_box = _block(self._best_caption, self.best_label)
+        self._total_box = _block(self._total_caption, self.total_label)
+        self._status_box = _block(self.status_label)
+        self._boxes = {
+            FIELD_LANE: self._lane_box,
+            FIELD_POSITION: self._position_box,
+            FIELD_DRIVER: self._driver_box,
+            FIELD_VEHICLE: self._vehicle_box,
+            FIELD_START: self._start_box,
+            FIELD_LAP: self._lap_box,
+            FIELD_LAST: self._last_box,
+            FIELD_BEST: self._best_box,
+            FIELD_TOTAL: self._total_box,
+            FIELD_STATUS: self._status_box,
+        }
+        self._values = {
+            FIELD_LANE: self.lane_label,
+            FIELD_POSITION: self.position_label,
+            FIELD_DRIVER: self.driver_label,
+            FIELD_VEHICLE: self.vehicle_label,
+            FIELD_START: self.start_label,
+            FIELD_LAP: self.lap_label,
+            FIELD_LAST: self.last_label,
+            FIELD_BEST: self.best_label,
+            FIELD_TOTAL: self.total_label,
+            FIELD_STATUS: self.status_label,
+        }
+        self._captions = {
+            FIELD_START: self._start_caption,
+            FIELD_LAST: self._last_caption,
+            FIELD_BEST: self._best_caption,
+            FIELD_TOTAL: self._total_caption,
+        }
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
-        layout.setSpacing(SPACE.xs)
-        layout.addLayout(header)
-        layout.addWidget(self.driver_label)
-        layout.addLayout(identity)
-        layout.addWidget(self.lap_label)
-        layout.addLayout(times)
-        layout.addWidget(self.status_label)
-        layout.addStretch(1)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(SPACE.xs)
+        for field_id in (
+            FIELD_LANE,
+            FIELD_POSITION,
+            FIELD_DRIVER,
+            FIELD_VEHICLE,
+            FIELD_START,
+            FIELD_LAP,
+            FIELD_LAST,
+            FIELD_BEST,
+            FIELD_TOTAL,
+            FIELD_STATUS,
+        ):
+            column.addWidget(self._boxes[field_id])
+        self._column = QWidget()
+        self._column.setObjectName(f"live-lane-{lane}-stack")
+        self._column.setMinimumWidth(0)
+        self._column.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._column.setLayout(column)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
+        outer.addStretch(1)
+        outer.addWidget(self._column)
+        outer.addStretch(1)
+        self.apply_style(self._style)
+
+    def apply_style(self, style: HudLayout) -> None:
+        """Fonts, alignment and visibility. The widgets themselves stay in place."""
+        self._style = style
+        self._fit_factor = 1.0
+        self._paint_style()
+        self._fit()
 
     def show_driver(
         self,
@@ -95,9 +174,7 @@ class LaneCard(QFrame):
         paused: bool,
         ended: bool,
     ) -> None:
-        tr = self._translator.translate
-        show_total = mode is RaceMode.LAPS
-        self._total_box.setVisible(show_total)
+        self._mode = mode
         self.position_label.setText(f"P{row.position}")
         self.driver_label.setText(row.driver_label)
         self.vehicle_label.setText(row.vehicle_label)
@@ -107,14 +184,14 @@ class LaneCard(QFrame):
         self.best_label.setText(format_duration(row.best_lap_ns))
         self.total_label.setText(format_duration(row.total_time_ns))
         self.status_label.setText(
-            tr(participant_status_key(finished=row.finished, paused=paused, ended=ended))
+            self._translator.translate(
+                participant_status_key(finished=row.finished, paused=paused, ended=ended)
+            )
         )
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 180)
+        self._paint_style()
 
     def show_free(self, free: str, *, show_total: bool = True) -> None:
-        self._total_box.setVisible(show_total)
+        self._mode = RaceMode.LAPS if show_total else RaceMode.TIME_TRIAL
         self.position_label.setText(EMPTY_DISPLAY)
         self.driver_label.setText(free)
         self.vehicle_label.setText(EMPTY_DISPLAY)
@@ -124,6 +201,84 @@ class LaneCard(QFrame):
         self.best_label.setText("-")
         self.total_label.setText("-")
         self.status_label.setText(EMPTY_DISPLAY)
+        self._paint_style()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 160)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        available = event.size().width() - SPACE.sm * 2
+        if available > 0:
+            self._column.setFixedWidth(available)
+        super().resizeEvent(event)
+        self._fit()
+        self._apply_wrap_height()
+
+    def _paint_style(self) -> None:
+        if self._fitting:
+            return
+        alignment = _ALIGN.get(self._style.alignment, _ALIGN["center"])
+        for field_id, box in self._boxes.items():
+            style = self._style.field(field_id)
+            shown = style.visible and (field_id != FIELD_TOTAL or self._mode is RaceMode.LAPS)
+            box.setVisible(shown)
+        for label in (*self._values.values(), *self._captions.values()):
+            label.setAlignment(alignment)
+        self._apply_fonts(self._fit_factor)
+
+    def _apply_fonts(self, factor: float) -> None:
+        sizes: dict[str, int] = {}
+        for field_id, label in self._values.items():
+            base = FIELD_BASE_PX[field_id]
+            style = self._style.field(field_id)
+            chosen = effective_px(base, self._style.font_scale, style.scale)
+            pixels = max(FONT_FLOOR, round(chosen * factor))
+            sizes[field_id] = pixels
+            _set_px(label, pixels, bold=True)
+        for field_id, caption in self._captions.items():
+            _set_px(caption, caption_px(sizes[field_id]), bold=False)
+
+    def _fit(self) -> None:
+        """Shrink every line together when the card is shorter than the chosen type."""
+        if self._fitting or self.height() < 40:
+            return
+        self._fitting = True
+        try:
+            self._fit_factor = 1.0
+            self._apply_fonts(1.0)
+            needed = self._stack_height() + SPACE.sm * 2
+            available = self.height()
+            if needed > available > 0:
+                self._fit_factor = max(0.45, available / needed)
+                self._apply_fonts(self._fit_factor)
+        finally:
+            self._fitting = False
+
+    def _apply_wrap_height(self) -> None:
+        """Give wrapped lines the height their current width and font actually need."""
+        if self._fitting:
+            return
+        self._fitting = True
+        changed = False
+        try:
+            for label in (*self._values.values(), *self._captions.values()):
+                if not label.wordWrap():
+                    continue
+                needed = label.heightForWidth(max(label.width(), 1))
+                if needed > 0 and label.minimumHeight() != needed:
+                    label.setMinimumHeight(needed)
+                    changed = True
+            layout = self.layout()
+            if changed and layout is not None:
+                layout.activate()
+        finally:
+            self._fitting = False
+
+    def _stack_height(self) -> int:
+        width = self._column.width()
+        if width > 0 and self._column.hasHeightForWidth():
+            return self._column.heightForWidth(width)
+        return self._column.sizeHint().height()
 
 
 class LaneCardBoard(QWidget):
@@ -137,6 +292,7 @@ class LaneCardBoard(QWidget):
         self._cards: dict[int, LaneCard] = {}
         self._lane_count = 0
         self._columns = 0
+        self._style = factory_layout()
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(SPACE.sm)
@@ -144,6 +300,11 @@ class LaneCardBoard(QWidget):
     @property
     def cards(self) -> dict[int, LaneCard]:
         return self._cards
+
+    def apply_style(self, style: HudLayout) -> None:
+        self._style = style
+        for card in self._cards.values():
+            card.apply_style(style)
 
     def show_snapshot(self, snapshot: RaceSnapshot, *, lane_count: int, mode: RaceMode) -> None:
         self._ensure(lane_count)
@@ -173,6 +334,7 @@ class LaneCardBoard(QWidget):
         for lane in range(1, lane_count + 1):
             if lane not in self._cards:
                 card = LaneCard(self._translator, lane)
+                card.apply_style(self._style)
                 self._cards[lane] = card
         self._lane_count = lane_count
         self._columns = 0
@@ -205,56 +367,45 @@ def _columns_for(lanes: int, width: int) -> int:
     return max(1, min(lanes, width // 240))
 
 
-class _ShrinkLabel(QLabel):
-    """A line that may become narrower than its text. Wrapped lines grow in height instead."""
-
-    def __init__(self, object_name: str, *, wrap: bool) -> None:
-        super().__init__()
-        self.setObjectName(object_name)
-        self.setWordWrap(wrap)
-        self.setMinimumSize(0, 0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, self.fontMetrics().lineSpacing())
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, self.fontMetrics().lineSpacing())
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return self.wordWrap()
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
-        if not self.wordWrap() or width < 1:
-            return self.fontMetrics().lineSpacing()
-        bounds = self.fontMetrics().boundingRect(
-            0, 0, width, 10_000, int(Qt.TextFlag.TextWordWrap), self.text()
-        )
-        return max(bounds.height(), self.fontMetrics().lineSpacing())
-
-
-def _label(object_name: str, pixels: int, *, bold: bool = False, wrap: bool = False) -> QLabel:
-    label = _ShrinkLabel(object_name, wrap=wrap)
-    font = QFont(label.font())
-    font.setPixelSize(pixels)
-    font.setBold(bold)
-    label.setFont(font)
+def _value(object_name: str, *, wrap: bool = False) -> QLabel:
+    label = QLabel()
+    label.setObjectName(object_name)
+    label.setWordWrap(wrap)
+    label.setMinimumSize(0, 0)
+    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     return label
 
 
-def _caption(text: str) -> QLabel:
-    label = _ShrinkLabel("live-lane-caption", wrap=True)
+def _caption(object_name: str, text: str) -> QLabel:
+    label = _value(object_name, wrap=True)
     label.setText(text)
-    set_role(label, "caption")
     return label
 
 
-def _stack(caption: QLabel, value: QLabel) -> QWidget:
+def _block(*labels: QLabel) -> QWidget:
     box = QWidget()
+    box.setMinimumWidth(0)
+    box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     layout = QVBoxLayout(box)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
-    layout.addWidget(caption)
-    layout.addWidget(value)
+    for label in labels:
+        layout.addWidget(label)
     return box
+
+
+def _set_px(label: QLabel, pixels: int, *, bold: bool) -> None:
+    current = label.font()
+    if current.pixelSize() == pixels and current.bold() == bold:
+        return
+    font = QFont(current)
+    font.setPixelSize(pixels)
+    font.setBold(bold)
+    label.setFont(font)
+    weight = 700 if bold else 500
+    label.setStyleSheet(f"font-size: {pixels}px; font-weight: {weight};")
+
+
+def card_top(card: QWidget, label: QWidget) -> int:
+    """Label top inside ``card``, so nested captions still compare in one coordinate system."""
+    return label.mapTo(card, QPoint(0, 0)).y()

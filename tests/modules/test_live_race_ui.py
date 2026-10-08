@@ -65,11 +65,11 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert not live.stage.isHidden()
     runner = live.runner
     assert runner is not None and runner.status is RaceStatus.RUNNING
-    assert live.name_label.text() == "Finale"
-    assert live.track_label.text().endswith("Heimbahn")
+    assert runner.snapshot().name == "Finale"
+    assert runner.snapshot().track_name.endswith("Heimbahn")
     assert live.status_label.text().endswith("Läuft")
-    assert live.provider_label.text().endswith("Simulation")
-    assert live.laps_label.text().endswith("2")
+    assert runner.snapshot().timing_provider == "simulation"
+    assert live.lanes.cards[1].lap_label.text().endswith("2")
     assert live.table.rowCount() == 2
     assert column_text(live.table, 0, "Fahrer") == "Zoe"
     assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
@@ -78,8 +78,8 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert column_text(live.table, 0, "Runden") == "0"
     assert column_text(live.table, 0, "Status") == "Fährt"
     assert column_text(live.table, 1, "Fahrer") == "Anna"
-    assert "Zoe" in live.detail.text()
-    assert "Bisherige Rundenzeiten: -" in live.detail.text()
+    assert live.lanes.cards[1].driver_label.text() == "Zoe"
+    assert live.lanes.cards[1].last_label.text() == "-"
 
     # One lap of the faster lane, delivered by the runner. The view redraws from the lap event
     # and does not need its timer.
@@ -96,15 +96,16 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     last_lap = column_text(live.table, 0, "Letzte Runde")
     assert last_lap != "-"
     assert last_lap == column_text(live.table, 0, "Beste Runde")
-    assert last_lap in live.detail.text()
+    assert live.lanes.cards[1].last_label.text() == last_lap
     assert format_duration(runner.snapshot().rows[0].lap_times_ns[0]) == last_lap
     standings = [row.driver_label for row in runner.snapshot().rows]
     assert [column_text(live.table, index, "Fahrer") for index in range(2)] == standings
 
     live.table.selectRow(1)
-    assert "Anna" in live.detail.text()
-    assert "Startnummer: 3" in live.detail.text()
-    assert "Platz: 2" in live.detail.text()
+    assert live.lanes.cards[2].driver_label.text() == "Anna"
+    assert live.lanes.cards[2].start_label.text() == "3"
+    assert live.lanes.cards[2].position_label.text() == "P2"
+    assert live.lanes.cards[1].lane == 1
 
     runner.pause()
     assert live.status_label.text().endswith("Pausiert")

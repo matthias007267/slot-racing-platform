@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
@@ -13,8 +14,16 @@ from pytestqt.qtbot import QtBot
 from slot_racing.app.main_window import MainWindow
 from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
+from slot_racing.modules.races.hud import (
+    FIELD_BASE_PX,
+    FIELD_DRIVER,
+    FIELD_IDS,
+    FieldStyle,
+    effective_px,
+    factory_layout,
+)
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
-from slot_racing.modules.races.ui.lane_card import LaneCardBoard
+from slot_racing.modules.races.ui.lane_card import LaneCard, LaneCardBoard, card_top
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
@@ -69,6 +78,53 @@ def test_lane_cards_show_every_lane_for_both_modes(qtbot: QtBot) -> None:
     assert set(board.cards) == {1, 2}
 
 
+def test_lane_information_is_stacked_centered_and_scaled(qtbot: QtBot) -> None:
+    card = LaneCard(_translator(), 1)
+    qtbot.addWidget(card)
+    card.resize(480, 1200)
+    card.show()
+    QApplication.processEvents()
+    fields = tuple((field_id, FieldStyle()) for field_id in FIELD_IDS)
+    card.apply_style(replace(factory_layout(), fields=fields))
+    QApplication.processEvents()
+    expected = {field_id: FIELD_BASE_PX[field_id] for field_id in FIELD_IDS}
+    values = {
+        "lane": card.lane_label,
+        "position": card.position_label,
+        "driver": card.driver_label,
+        "vehicle": card.vehicle_label,
+        "start": card.start_label,
+        "lap": card.lap_label,
+        "last": card.last_label,
+        "best": card.best_label,
+        "total": card.total_label,
+        "status": card.status_label,
+    }
+    for field_id, label in values.items():
+        assert label.font().pixelSize() == expected[field_id]
+        assert label.alignment() & Qt.AlignmentFlag.AlignHCenter
+    caption = card.findChild(QLabel, "live-lane-1-last-caption")
+    assert caption is not None
+    assert caption.font().pixelSize() < card.last_label.font().pixelSize()
+    tops = [card_top(card, label) for label in values.values()]
+    assert tops == sorted(tops)
+    stack = card.findChild(QWidget, "live-lane-1-stack")
+    assert stack is not None
+    assert stack.width() >= card.width() - 20
+    assert abs(stack.y() - (card.height() - stack.height()) / 2) <= 8
+
+    scaled = tuple(
+        (field_id, FieldStyle(True, 150 if field_id == FIELD_DRIVER else 100))
+        for field_id in FIELD_IDS
+    )
+    card.apply_style(replace(factory_layout(), font_scale=150, fields=scaled))
+    QApplication.processEvents()
+    assert card.driver_label.font().pixelSize() == effective_px(36, 150, 150)
+    assert card.lap_label.font().pixelSize() == effective_px(32, 150, 100)
+    assert card.driver_label.font().pixelSize() > card.lap_label.font().pixelSize()
+    assert card.vehicle_label.font().pixelSize() > card.status_label.font().pixelSize()
+
+
 @pytest.mark.parametrize("attempt", [1, 2])
 def test_two_lanes_stay_side_by_side_at_several_sizes(qtbot: QtBot, env: Env, attempt: int) -> None:
     del attempt
@@ -80,8 +136,15 @@ def test_two_lanes_stay_side_by_side_at_several_sizes(qtbot: QtBot, env: Env, at
     assert left.last_label.text() == "-"
     assert left.best_label.text() == "-"
     assert left.total_label.isVisibleTo(left)
-    assert left.position_label.font().pixelSize() >= left.driver_label.font().pixelSize()
+    assert left.driver_label.font().pixelSize() >= left.lap_label.font().pixelSize()
+    assert left.lap_label.font().pixelSize() >= left.position_label.font().pixelSize()
+    assert left.position_label.font().pixelSize() == left.lane_label.font().pixelSize()
     assert left.driver_label.font().pixelSize() > left.vehicle_label.font().pixelSize()
+    assert left.driver_label.alignment() & Qt.AlignmentFlag.AlignHCenter
+    assert left.driver_label.font().pixelSize() == right.driver_label.font().pixelSize()
+    stack = left.findChild(QWidget, "live-lane-1-stack")
+    assert stack is not None
+    assert abs(stack.y() - (left.height() - stack.height()) / 2) <= 12
     identities = {lane: id(card) for lane, card in live.lanes.cards.items()}
     for width, height in ((640, 420), (1600, 900), (900, 520)):
         window.resize(width, height)
@@ -205,8 +268,12 @@ def test_long_names_remain_fully_readable(qtbot: QtBot, env: Env) -> None:
     assert card.vehicle_label.text().startswith(_LONG_VEHICLE)
     _assert_wrapped(card.driver_label)
     _assert_wrapped(card.vehicle_label)
-    assert card.driver_label.geometry().right() <= card.width() + 1
-    assert card.vehicle_label.geometry().right() <= card.width() + 1
+    for label in (card.driver_label, card.vehicle_label):
+        origin = label.mapTo(card, QPoint(0, 0))
+        assert origin.x() >= -1
+        assert origin.x() + label.width() <= card.width() + 1
+        assert origin.y() >= -1
+        assert origin.y() + label.height() <= card.height() + 1
 
 
 def test_an_empty_lane_stays_in_place(qtbot: QtBot, env: Env) -> None:
@@ -241,7 +308,7 @@ def test_a_time_trial_keeps_its_board_and_controls(qtbot: QtBot, env: Env) -> No
     race = env.races.create_time_trial("Heute", track.id)
     env.races.add_participant(race.id, max_driver.id, porsche.id, 1)
     env.races.add_participant(race.id, anna.id, ferrari.id, 2)
-    _, page = open_page(qtbot, env, "races")
+    window, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)
     page.refresh()
     page.table.selectRow(0)
@@ -249,8 +316,22 @@ def test_a_time_trial_keeps_its_board_and_controls(qtbot: QtBot, env: Env) -> No
     live = page.live
     assert isinstance(live, LiveRaceView)
     release_start_lights(live)
+    window.resize(1400, 860)
+    window.show()
+    QApplication.processEvents()
     assert live.stage.isHidden()
     assert not live.board.isHidden()
+    board = live.board.geometry()
+    live.start_lights.show_lights(3)
+    live.refresh()
+    QApplication.processEvents()
+    assert live.start_lights.isVisible()
+    assert live.board.geometry() == board
+    live.start_lights.clear()
+    live.refresh()
+    QApplication.processEvents()
+    assert live.start_lights.isHidden()
+    assert live.board.geometry() == board
     assert not live.lanes.cards[1].total_label.isVisibleTo(live.lanes.cards[1])
     assert live.lanes.cards[1].driver_label.text() == "Max"
     assert live.lanes.cards[2].driver_label.text() == "Anna"
@@ -279,6 +360,8 @@ def test_abort_results_and_back_still_use_the_race_controls(qtbot: QtBot, env: E
     assert runner.snapshot().status is RaceStatus.FINISHED
     assert live.status_label.text() == "● Abgebrochen"
     assert live.status_label.property("tone") == "error"
+    assert live.lanes.cards[1].status_label.text() == "Ausgeschieden"
+    assert live.lanes.cards[2].status_label.text() == "Ausgeschieden"
     assert live.results_button.isEnabled()
     live.results_button.click()
     assert isinstance(page.current_view(), ResultsView)
@@ -318,11 +401,17 @@ def _shown(
 
 
 def _assert_frame(live: LiveRaceView) -> None:
-    assert live.header.isHidden()
-    assert live.progress.isHidden()
-    assert live.highlight.isHidden()
-    assert live.last_lap.isHidden()
-    assert live.best_lap.isHidden()
+    for name in (
+        "header",
+        "progress",
+        "highlight",
+        "last_lap",
+        "best_lap",
+        "laps_label",
+        "detail",
+        "name_label",
+    ):
+        assert not hasattr(live, name)
     assert not live.stage.isHidden()
     assert abs(live.clock.y() - live.status.y()) <= 4
     assert live.clock.x() < live.status.x()

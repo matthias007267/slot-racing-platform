@@ -517,10 +517,12 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     live = page.live
     release_start_lights(live)
     assert live.status_label.text().endswith("Läuft")
-    assert live.name_label.text() == "Finale"
-    assert live.track_label.text().endswith("Heimbahn")
-    assert live.provider_label.text().endswith("Simulation")
-    assert live.laps_label.text().endswith("2")
+    runner = live.runner
+    assert runner is not None
+    assert runner.snapshot().name == "Finale"
+    assert runner.snapshot().track_name.endswith("Heimbahn")
+    assert runner.snapshot().timing_provider == "simulation"
+    assert live.lanes.cards[1].lap_label.text().endswith("2")
     assert live.table.rowCount() == 2
     assert column_text(live.table, 0, "Fahrer") == "Anna"
     assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"

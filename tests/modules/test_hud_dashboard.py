@@ -329,21 +329,18 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     runner = live.runner
     assert runner is not None and runner.status is RaceStatus.RUNNING
     assert live.status_label.text() == "● Läuft"
-    assert live.header.participants_label.text() == "2 Teilnehmer"
-    assert live.header.header_status.text().endswith("Läuft")
     assert live.messages.message_label.text() == "Rennen gestartet"
     assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
-    assert live.laps_label.text() == "1 / 2"
+    assert live.lanes.cards[1].lap_label.text() == "1 / 2"
     assert live.pause_button.isEnabled()
     assert not live.resume_button.isEnabled()
     assert live.stop_button.isEnabled()
     assert not live.results_button.isEnabled()
     assert live.back_button.isEnabled()
-    assert live.highlight.position_label.text() == "P1"
-    assert live.highlight.name_label.text() == "ZOE"
-    assert "PORSCHE" in live.highlight.vehicle_label.text()
-    assert "Zoe" in live.detail.text()
-    assert EMPTY_DISPLAY in live.highlight.last_label.text()
+    assert live.lanes.cards[1].position_label.text() == "P1"
+    assert live.lanes.cards[1].driver_label.text() == "Zoe"
+    assert "Porsche" in live.lanes.cards[1].vehicle_label.text()
+    assert live.lanes.cards[1].last_label.text() == "-"
 
     env.clock.advance(3 * NANOS_PER_SECOND)
     live.refresh()
@@ -360,15 +357,12 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     ]
     assert column_text(live.table, 0, "Platz") == "1"
     assert column_text(live.table, 0, "Runden") == "1"
-    assert live.laps_label.text() == "2 / 2"
-    assert live.progress.progress.value() == 1
+    assert live.lanes.cards[1].lap_label.text() == "2 / 2"
     last = column_text(live.table, 0, "Letzte Runde")
     assert last == format_duration(runner.snapshot().rows[0].last_lap_ns)
-    assert last in live.last_lap.value_label.text()
-    assert "Zoe" in live.last_lap.value_label.text()
-    assert last in live.best_lap.value_label.text()
-    assert last in live.highlight.last_label.text()
-    assert last in live.highlight.best_label.text()
+    assert live.lanes.cards[1].last_label.text() == last
+    assert live.lanes.cards[1].driver_label.text() == "Zoe"
+    assert live.lanes.cards[1].best_label.text() == last
     assert live.messages.message_label.text() == "Fahrer Zoe hat Runde 1 abgeschlossen"
     leader = live.table.item(0, 0)
     assert leader is not None and leader.data(LEADER_ROLE) is True
@@ -422,8 +416,9 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
         row.driver_label for row in runner.snapshot().rows
     ]
     assert column_text(live.table, 0, "Platz") == "1"
-    assert "Zoe" in live.best_lap.value_label.text()
-    assert live.last_lap.value_label.text() != EMPTY_DISPLAY
+    assert live.lanes.cards[1].driver_label.text() == "Zoe"
+    assert live.lanes.cards[1].best_label.text() != "-"
+    assert live.lanes.cards[1].last_label.text() != "-"
     env.clock.advance(5 * NANOS_PER_SECOND)
     live.refresh()
     assert live.time_label.text() == finished_at
