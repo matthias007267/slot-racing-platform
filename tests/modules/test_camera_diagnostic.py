@@ -1157,3 +1157,31 @@ def test_export_button_uses_the_dialog_string_and_reports_a_failed_write(
     assert '"kind":"summary"' in written[2].read_text(encoding="utf-8")
     assert journal.read_bytes() == journal_before
     dialog.close()
+
+
+def test_configured_fps_driver_fps_and_measured_gaps_stay_distinct(tmp_path: Path) -> None:
+    session = _session(settings(1), WIDTH, HEIGHT, journal_path=tmp_path / "fps.jsonl")
+    try:
+        session.start()
+        for index, stamp in enumerate((0, 33_000_000, 200_000_000), start=1):
+            session.submit(
+                TimedFrame(blank(), stamp),
+                CaptureCounters(captured=index, reported_fps=30),
+            )
+            assert session.wait_idle()
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.requested_fps == 30
+        assert report.reported_fps == 30.0
+        assert report.frame_gaps == 1
+        assert report.camera_fps is not None
+        assert report.camera_fps != report.requested_fps
+        summary = session.export_summary()
+        assert "Angeforderte Bildrate: 30" in summary
+        assert "Vom Treiber gemeldete Bildrate: 30.00" in summary
+        assert "Tatsächliche Bildrate:" in summary
+        assert "Bildaussetzer: 1" in summary
+        assert "frame_gaps=1" in session.text()
+    finally:
+        session.close()

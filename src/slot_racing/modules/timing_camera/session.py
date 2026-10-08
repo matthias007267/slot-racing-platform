@@ -209,11 +209,11 @@ class CameraSession:
         self._lock = threading.RLock()
         self._source: CameraFrameSource | None = None
         self._config: CameraConfig | None = None
-        self._identity: tuple[int, int, int, int] | None = None
+        self._identity: tuple[int, int, int, int, str] | None = None
         self._slots: dict[str, LatestFrameBuffer] = {}
         self._events: list[LifecycleEvent] = []
         self._error: BaseException | None = None
-        self._failed_identity: tuple[int, int, int, int] | None = None
+        self._failed_identity: tuple[int, int, int, int, str] | None = None
         self._open_count = 0
         self._close_count = 0
         self._thread_starts = 0
@@ -502,8 +502,8 @@ class CameraSession:
         )
 
 
-def _identity(config: CameraConfig) -> tuple[int, int, int, int]:
-    return (config.device_index, config.width, config.height, config.fps)
+def _identity(config: CameraConfig) -> tuple[int, int, int, int, str]:
+    return (config.device_index, config.width, config.height, config.fps, config.backend)
 
 
 def _reason(reason: str) -> None:

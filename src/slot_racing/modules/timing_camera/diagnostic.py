@@ -133,6 +133,7 @@ class CaptureCounters:
     capture_dt_ns: int | None = None
     preview_frames: int | None = None
     preview_replaced: int | None = None
+    reported_fps: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,6 +564,8 @@ class DiagnosticSession:
         self._dt_max: int | None = None
         self._dt_sum = 0
         self._dt_count = 0
+        self._frame_gaps = 0
+        self._reported_fps: float | None = None
         self._ended_at = ""
 
     @property
@@ -858,6 +861,11 @@ class DiagnosticSession:
                     self._dt_min = dt
                 if self._dt_max is None or dt > self._dt_max:
                     self._dt_max = dt
+                limit = _gap_limit_ns(self._config.requested_fps)
+                if limit is not None and dt > limit:
+                    self._frame_gaps += 1
+            if capture is not None and capture.reported_fps is not None:
+                self._reported_fps = capture.reported_fps
             self._note_capture_locked(capture, delivered.timestamp_ns)
             self._actual = (frame.width, frame.height)
             if not self._actual_logged:
@@ -952,6 +960,8 @@ class DiagnosticSession:
         self._dt_max = None
         self._dt_sum = 0
         self._dt_count = 0
+        self._frame_gaps = 0
+        self._reported_fps = None
         self._ended_at = ""
 
     def _append_locked(self, line: str) -> None:
@@ -1220,6 +1230,8 @@ class DiagnosticSession:
                 f"capture_read_attempts={_or_waiting(performance.read_attempts)}",
                 f"capture_read_failures={_or_waiting(performance.read_failures)}",
                 f"capture_dt_ms={_ms(performance.last_capture_dt_ns)}",
+                f"reported_fps={_fps(self._reported_fps)}",
+                f"frame_gaps={self._frame_gaps}",
                 "PIPELINE",
                 f"source_overwrites={_or_waiting(performance.source_overwrites)}",
                 f"preview_frames={_or_waiting(performance.preview_frames)}",
@@ -1515,6 +1527,8 @@ class DiagnosticSession:
                 (zone.position_id, zone.lane, zone.check_direction) for zone in self._config.zones
             ),
             journal_path="" if journal is None else str(journal.path),
+            reported_fps=self._reported_fps,
+            frame_gaps=self._frame_gaps,
         )
 
     def _zone_reports_locked(self) -> tuple[ZoneReport, ...]:
@@ -1613,6 +1627,13 @@ def _publish_texts(files: tuple[tuple[Path, str], ...]) -> None:
             with suppress(OSError):
                 temporary.unlink(missing_ok=True)
         raise
+
+
+def _gap_limit_ns(requested_fps: int) -> int | None:
+    """A gap longer than this is a dropout, not ordinary frame jitter."""
+    if isinstance(requested_fps, bool) or not isinstance(requested_fps, int) or requested_fps < 1:
+        return None
+    return int(2.5 * 1_000_000_000 / requested_fps)
 
 
 def _direction_mode(zones: tuple[ZoneFacts, ...]) -> str:

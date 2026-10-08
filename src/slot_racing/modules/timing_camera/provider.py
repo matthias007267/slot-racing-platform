@@ -533,7 +533,9 @@ class CameraTimingFactory(TimingSourceFactory):
         self._configurations = configurations
         self._lease = lease
         self._session = session
-        self._probe_cache: tuple[tuple[int, int, int, int], int, ProviderAvailability] | None = None
+        self._probe_cache: (
+            tuple[tuple[int, int, int, int, str], int, ProviderAvailability] | None
+        ) = None
 
     @property
     def provider_id(self) -> str:
@@ -563,7 +565,7 @@ class CameraTimingFactory(TimingSourceFactory):
                     "error.timing_provider.camera_not_connected"
                 )
             return ProviderAvailability.ok()
-        key = (camera.device_index, camera.width, camera.height, camera.fps)
+        key = (camera.device_index, camera.width, camera.height, camera.fps, camera.backend)
         cached = self._probe_cache
         now = time.monotonic_ns()
         if cached is not None and cached[0] == key and now - cached[1] < _PROBE_TTL_NS:

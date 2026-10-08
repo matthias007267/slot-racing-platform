@@ -222,6 +222,7 @@ class CameraFrameSource(FrameSource):
         self.last_open_ns = 0
         self.last_close_ns = 0
         self.last_join_ns = 0
+        self.reported_fps: float | None = None
 
     @property
     def queued(self) -> int:
@@ -304,6 +305,7 @@ class CameraFrameSource(FrameSource):
         self._last_read_ns = 0
         self._last_capture_dt_ns = 0
         self._last_publish_ns = 0
+        self.reported_fps = None
         if self._lease is not None and not self._lease.try_acquire(self._lease_owner):
             raise CameraBusyError("camera is in use")
         self._holding_lease = self._lease is not None
@@ -316,6 +318,7 @@ class CameraFrameSource(FrameSource):
             self._release_lease()
             raise
         self.last_open_ns = time.perf_counter_ns() - opened
+        self.reported_fps = _reported_fps(getattr(self._device, "actual_fps", None))
         self._running = True
         self._thread = threading.Thread(target=self._run, name="slot-racing-camera", daemon=True)
         self._thread.start()
@@ -493,6 +496,13 @@ class CameraFrameSource(FrameSource):
 
 # A crop delivery has no full picture. The carrier is not scanned.
 _CROP_CARRIER = GrayFrame(1, 1, b"\x00")
+
+
+def _reported_fps(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    fps = float(value)
+    return fps if fps > 0 else None
 
 
 def _timed(
