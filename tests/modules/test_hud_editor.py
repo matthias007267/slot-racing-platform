@@ -22,6 +22,7 @@ from slot_racing.core.storage import Database, Setting
 from slot_racing.modules.races.hud import (
     FIELD_DRIVER,
     HUD_CONFIGURATION_KEY,
+    HudConfiguration,
     HudConfigurationStore,
     LightFrame,
     to_pixels,
@@ -436,7 +437,7 @@ def test_a_failed_save_keeps_the_editor_open(qtbot: QtBot, env: Env) -> None:
     editor = editor_window.editor
     editor.set_font_scale(125)
 
-    def broken(configuration: object) -> object:
+    def broken(configuration: HudConfiguration) -> HudConfiguration:
         del configuration
         raise OSError("disk full")
 

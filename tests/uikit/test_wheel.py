@@ -61,15 +61,15 @@ def test_the_wheel_scrolls_the_page_and_leaves_inputs_unchanged(qtbot: QtBot) ->
     assert bar.value() > before
 
     spin.setFocus()
-    qtbot.keyClick(spin, Qt.Key.Key_Up)
+    qtbot.keyClick(spin, Qt.Key.Key_Up)  # type: ignore[no-untyped-call]
     assert spin.value() == 11
     edit = spin.lineEdit()
     assert edit is not None
     edit.setText("40")
-    qtbot.keyClick(edit, Qt.Key.Key_Enter)
+    qtbot.keyClick(edit, Qt.Key.Key_Enter)  # type: ignore[no-untyped-call]
     assert spin.value() == 40
     combo.setFocus()
-    qtbot.keyClick(combo, Qt.Key.Key_Down)
+    qtbot.keyClick(combo, Qt.Key.Key_Down)  # type: ignore[no-untyped-call]
     assert combo.currentIndex() == 1
 
 
