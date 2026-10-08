@@ -15,6 +15,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLayout, QStyle, QWidget
 
+from slot_racing.uikit.wheel import install_wheel_guard
+
 
 @dataclass(frozen=True, slots=True)
 class Color:
@@ -115,6 +117,7 @@ def apply_theme(app: QApplication) -> None:
     An application that already shows this exact theme is left untouched. A different
     theme, stylesheet, palette, or base style still applies the full theme.
     """
+    install_wheel_guard(app)
     assets = _theme_assets()
     if (
         _APPLIED_STYLE.get(id(app)) is app.style()
