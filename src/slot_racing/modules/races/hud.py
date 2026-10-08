@@ -21,6 +21,7 @@ from slot_racing.core.storage import Database, Setting
 logger = logging.getLogger(__name__)
 
 HUD_CONFIGURATION_KEY = "ui.race_hud.configuration"
+HUD_WINDOW_KEY = "ui.race_hud.window"
 HUD_VERSION = 2
 MIN_SPAN = 0.06
 """Smallest width or height, as a fraction of the display, so a frame stays usable."""
@@ -33,6 +34,18 @@ FONT_CEILING = 96
 SHARE_MIN = 1
 SHARE_MAX = 6
 STANDARD_LAYOUT_ID = "standard"
+
+
+@dataclass(frozen=True, slots=True)
+class HudWindowPlacement:
+    """Editor-window chrome. Stored apart from the layout document."""
+
+    x: int | None = None
+    y: int | None = None
+    width: int | None = None
+    height: int | None = None
+    maximized: bool = False
+    match_live: bool = True
 
 FIELD_DRIVER = "driver"
 FIELD_LAP = "lap"
@@ -287,6 +300,27 @@ def mark_default(document: HudConfiguration, layout_id: str) -> HudConfiguration
     return replace(document, default_id=layout_id, selected_id=layout_id)
 
 
+def window_placement(payload: object) -> HudWindowPlacement:
+    """Read a stored editor window. A broken value becomes the default placement."""
+    if not isinstance(payload, dict):
+        return HudWindowPlacement()
+    match_live = payload.get("match_live")
+    return HudWindowPlacement(
+        x=_optional_int(payload.get("x")),
+        y=_optional_int(payload.get("y")),
+        width=_optional_int(payload.get("width")),
+        height=_optional_int(payload.get("height")),
+        maximized=payload.get("maximized") is True,
+        match_live=True if match_live is None else bool(match_live),
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def to_document(config: HudConfiguration) -> dict[str, Any]:
     return {
         "version": config.version,
@@ -385,6 +419,33 @@ class HudConfigurationStore:
     def reset(self) -> HudConfiguration:
         """Replace the saved document with the factory layout."""
         return self.save(default_hud_configuration())
+
+    def load_window(self) -> HudWindowPlacement:
+        """The last editor-window size, or the defaults when nothing usable is stored."""
+        with self._database.session() as session:
+            row = session.get(Setting, HUD_WINDOW_KEY)
+            payload = None if row is None else row.value
+        return window_placement(payload)
+
+    def save_window(self, placement: HudWindowPlacement) -> None:
+        """Remember the editor window. The layout document stays untouched."""
+        if not isinstance(placement, HudWindowPlacement):
+            raise TypeError("placement must be a HudWindowPlacement")
+        document = {
+            "x": placement.x,
+            "y": placement.y,
+            "width": placement.width,
+            "height": placement.height,
+            "maximized": placement.maximized,
+            "match_live": placement.match_live,
+        }
+        with self._database.session() as session:
+            row = session.get(Setting, HUD_WINDOW_KEY)
+            if row is None:
+                session.add(Setting(key=HUD_WINDOW_KEY, value=document))
+            else:
+                row.value = document
+                flag_modified(row, "value")
 
     def _notify(self, configuration: HudConfiguration) -> None:
         for listener in list(self._listeners):

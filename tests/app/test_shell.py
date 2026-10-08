@@ -271,6 +271,9 @@ def test_quit_saves_the_open_hud_and_closes(
     window = make_window(qtbot, runtime)
     window.show()
     window.select("settings")
+    opener = window.findChild(QPushButton, "hud-open-editor")
+    assert opener is not None
+    opener.click()
     editor = window.findChild(HudEditor)
     assert editor is not None
     editor.set_font_scale(130)

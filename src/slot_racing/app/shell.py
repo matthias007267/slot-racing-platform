@@ -21,6 +21,10 @@ from slot_racing.uikit.providers import provider_label
 from slot_racing.uikit.theme import SPACE, set_role
 from slot_racing.uikit.widgets import StatusPill
 
+# The live HUD sits beside this column. The HUD editor uses the same width so a maximized
+# editor shows the stage at the same size as the maximized main window.
+NAVIGATION_WIDTH = 228
+
 
 class Sidebar(QWidget):
     """Vertical navigation. ``footer_id`` stays pinned; the id order itself does not change."""
@@ -30,7 +34,7 @@ class Sidebar(QWidget):
     def __init__(self, brand: str) -> None:
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(228)
+        self.setFixedWidth(NAVIGATION_WIDTH)
         self._buttons: dict[str, QPushButton] = {}
         self._order: list[str] = []
         self._current: str | None = None
