@@ -98,7 +98,7 @@ def test_the_ranking_scrolls_vertically_and_keeps_the_given_order(qtbot: QtBot) 
             for index, name in enumerate(names)
         ],
     )
-    ranking.resize(340, 150)
+    ranking.resize(260, 150)
     ranking.show()
     QApplication.processEvents()
     ranking.present()
@@ -440,8 +440,6 @@ def test_panels_keep_their_content_inside_at_several_sizes(qtbot: QtBot, env: En
     for width, height in sizes:
         window.resize(width, height)
         QApplication.processEvents()
-        live.stage.relayout()
-        QApplication.processEvents()
         assert window.width() == width
         assert window.height() == height
         runner = live.runner
@@ -450,14 +448,11 @@ def test_panels_keep_their_content_inside_at_several_sizes(qtbot: QtBot, env: En
         _assert_two_rows(live.controls)
         policy = live.ranking.table.horizontalScrollBarPolicy()
         assert policy == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert live.stage.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         for panel in (
-            live.header,
             live.clock,
-            live.progress,
             live.ranking,
-            live.highlight,
-            live.last_lap,
-            live.best_lap,
+            live.lanes,
             live.status,
             live.messages,
             live.controls,

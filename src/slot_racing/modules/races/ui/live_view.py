@@ -5,9 +5,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QHideEvent
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QMessageBox,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from slot_racing.core.clock import format_duration
 from slot_racing.core.config import AppConfig
@@ -42,7 +50,6 @@ from slot_racing.modules.races.ui.formatting import (
     start_number_text,
 )
 from slot_racing.modules.races.ui.heat_gate import HeatGate
-from slot_racing.modules.races.ui.hud_stage import HudStage
 from slot_racing.modules.races.ui.hud_widgets import (
     BestLapWidget,
     DriverHighlightWidget,
@@ -55,7 +62,7 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceMessageWidget,
     RaceStatusWidget,
 )
-from slot_racing.modules.races.ui.lane_board import LiveLaneBoard
+from slot_racing.modules.races.ui.lane_card import LaneCardBoard
 from slot_racing.modules.races.ui.race_audio import RaceAudio
 from slot_racing.modules.races.ui.start_cue import (
     StartCue,
@@ -149,21 +156,16 @@ class LiveRaceView(QWidget):
         self.results_button = self.controls.results_button
         self.back_button = self.controls.back_button
 
-        self.stage = HudStage()
-        self.stage.bind(self.header.widget_id, self.header)
-        self.stage.bind(self.clock.widget_id, self.clock)
-        self.stage.bind(self.progress.widget_id, self.progress)
-        self.stage.bind(self.ranking.widget_id, self.ranking)
-        self.stage.bind(self.highlight.widget_id, self.highlight)
-        self.stage.bind(self.last_lap.widget_id, self.last_lap)
-        self.stage.bind(self.best_lap.widget_id, self.best_lap)
-        self.stage.bind(self.status.widget_id, self.status)
-        self.stage.bind(self.messages.widget_id, self.messages)
-        self.stage.bind(self.controls.widget_id, self.controls)
+        self.lanes = LaneCardBoard(translator)
+        self.stage = _stage(
+            self.clock, self.status, self.lanes, self.ranking, self.messages, self.controls
+        )
+        for retired in (self.header, self.progress, self.highlight, self.last_lap, self.best_lap):
+            retired.setParent(self)
+            retired.hide()
 
         self.board = TimeTrialBoardView(translator)
         self.board.hide()
-        self.lane_board = LiveLaneBoard(translator)
         self.heat_gate = HeatGate(translator)
 
         self.start_lights = StartLightWidget()
@@ -172,7 +174,6 @@ class LiveRaceView(QWidget):
         configure_page(layout)
         layout.setSpacing(0)
         layout.addWidget(self.start_lights)
-        layout.addWidget(self.lane_board)
         layout.addWidget(self.heat_gate)
         layout.addWidget(self.stage, 1)
         layout.addWidget(self.board, 1)
@@ -207,8 +208,8 @@ class LiveRaceView(QWidget):
         return self._runner
 
     def apply_configuration(self, configuration: HudConfiguration) -> None:
-        """Move the panels. Hidden panels stay up to date and simply are not shown."""
-        self.stage.apply(configuration)
+        """The live layout is fixed. A saved HUD document no longer moves these panels."""
+        del configuration
 
     def show_runner(self, runner: RaceRunner) -> None:
         self._cancel_cue()
@@ -456,9 +457,7 @@ class LiveRaceView(QWidget):
         self.board.setVisible(time_trial)
         if time_trial:
             self._show_time_trial(runner, snapshot, status_text, tone)
-        self.lane_board.show_snapshot(
-            snapshot, lane_count=runner.race.lane_count, mode=runner.race.mode
-        )
+        self.lanes.show_snapshot(snapshot, lane_count=runner.race.lane_count, mode=runner.race.mode)
         self._update_buttons()
         if snapshot.status is not RaceStatus.FINISHED:
             self.heat_gate.hide()
@@ -760,3 +759,57 @@ def _name_on_lane(snapshot: RaceSnapshot, lane: int) -> str:
 
 def _shown_time(value: int | None) -> str:
     return EMPTY_DISPLAY if value is None else format_duration(value)
+
+
+_SPACE_GAP = 8
+
+
+def _stage(
+    clock: QWidget,
+    status: QWidget,
+    lanes: QWidget,
+    ranking: QWidget,
+    messages: QWidget,
+    controls: QWidget,
+) -> QScrollArea:
+    """Clock and status on top, lane cards beside a compact ranking, controls along the bottom."""
+    for widget in (clock, status):
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        widget.setMinimumSize(80, 96)
+    lanes.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+    lanes.setMinimumHeight(180)
+    ranking.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+    ranking.setMinimumSize(200, 120)
+    ranking.setMaximumWidth(420)
+    for widget in (messages, controls):
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        widget.setMinimumHeight(120)
+    top = QHBoxLayout()
+    top.setSpacing(_SPACE_GAP)
+    top.addWidget(clock, 1)
+    top.addWidget(status, 1)
+    middle = QHBoxLayout()
+    middle.setSpacing(_SPACE_GAP)
+    middle.addWidget(lanes, 3)
+    middle.addWidget(ranking, 1)
+    bottom = QHBoxLayout()
+    bottom.setSpacing(_SPACE_GAP)
+    bottom.addWidget(messages, 1)
+    bottom.addWidget(controls, 1)
+    content = QWidget()
+    content.setObjectName("live-layout")
+    content.setMinimumSize(0, 0)
+    body = QVBoxLayout(content)
+    body.setContentsMargins(0, 0, 0, 0)
+    body.setSpacing(_SPACE_GAP)
+    body.addLayout(top, 1)
+    body.addLayout(middle, 4)
+    body.addLayout(bottom, 1)
+    scroll = QScrollArea()
+    scroll.setObjectName("live-scroll")
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(content)
+    scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    return scroll
