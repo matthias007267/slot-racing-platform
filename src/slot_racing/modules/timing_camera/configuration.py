@@ -165,6 +165,7 @@ class StoredCamera(BaseModel):
     width: int = 640
     height: int = 480
     fps: int = 30
+    backend: str = ""
 
     @field_validator("device_index", mode="before")
     @classmethod
@@ -175,6 +176,13 @@ class StoredCamera(BaseModel):
     @classmethod
     def _positive(cls, value: object, info: ValidationInfo) -> int:
         return _strict_int(info.field_name or "value", value, 1)
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _backend(cls, value: object) -> str:
+        if not isinstance(value, str) or value not in {"", "any", "dshow", "msmf"}:
+            raise ValueError("backend must be empty, any, dshow or msmf")
+        return value
 
 
 class CameraConfiguration(BaseModel):
@@ -203,6 +211,7 @@ def to_camera_config(configuration: CameraConfiguration) -> CameraConfig:
         width=camera.width,
         height=camera.height,
         fps=camera.fps,
+        backend=camera.backend,
     )
 
 

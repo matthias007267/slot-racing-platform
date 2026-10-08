@@ -540,6 +540,9 @@ class _FakeCv2:
     CAP_PROP_FRAME_HEIGHT = 4
     CAP_PROP_FPS = 5
     COLOR_BGR2GRAY = 6
+    CAP_DSHOW = 700
+    CAP_MSMF = 1400
+    CAP_ANY = 0
 
     def __init__(
         self, *, opened: bool = True, actual: tuple[float, float, float] = (320, 240, 15)
@@ -550,9 +553,10 @@ class _FakeCv2:
         self.converted = False
         self.converted_shapes: list[tuple[int, ...]] = []
         self.image: _Image | None = _Image([[1, 2], [3, 4]])
+        self.raise_props: set[int] = set()
 
-    def VideoCapture(self, index: int) -> _FakeCap:  # noqa: N802
-        capture = _FakeCap(self, index)
+    def VideoCapture(self, index: int, api: int | None = None) -> _FakeCap:  # noqa: N802
+        capture = _FakeCap(self, index, api)
         self.instances.append(capture)
         return capture
 
@@ -564,16 +568,20 @@ class _FakeCv2:
 
 
 class _FakeCap:
-    def __init__(self, api: _FakeCv2, index: int) -> None:
+    def __init__(self, api: _FakeCv2, index: int, backend: int | None = None) -> None:
         self.api = api
         self.index = index
+        self.backend = backend
         self.released = False
+        self.force_closed = False
         self.props: dict[int, float] = {}
 
     def isOpened(self) -> bool:  # noqa: N802
-        return self.api.opened and not self.released
+        return self.api.opened and not self.released and not self.force_closed
 
     def set(self, prop: int, value: float) -> bool:
+        if prop in self.api.raise_props:
+            raise OSError("camera rejected the setting")
         self.props[prop] = value
         return True
 
@@ -754,6 +762,95 @@ def test_opencv_missing_device_is_released(monkeypatch: pytest.MonkeyPatch) -> N
     assert api.instances[0].index == 4
     assert api.instances[0].released
     device.close()
+
+
+def test_windows_uses_directshow_before_media_foundation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slot_racing.modules.timing_camera import opencv_device
+
+    api = _FakeCv2()
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    monkeypatch.setattr(opencv_device, "_windows", lambda: True)
+    monkeypatch.setattr(
+        opencv_device,
+        "_capture_names",
+        lambda: {("dshow", 1): "iVCam", ("msmf", 1): "Laptop"},
+    )
+    device = OpenCVCapture(CameraConfig(device_index=1, width=640, height=480, fps=25))
+    device.open()
+    try:
+        assert device.backend == "dshow"
+        assert device.device_name == "iVCam"
+        assert api.instances[0].backend == 700
+        assert api.instances[0].props[api.CAP_PROP_FPS] == 25
+    finally:
+        device.close()
+    assert api.instances[0].released
+
+
+def test_a_rejected_camera_setting_does_not_block_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeCv2()
+    api.raise_props.add(api.CAP_PROP_FPS)
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    device = OpenCVCapture(CameraConfig(width=320, height=240, fps=30))
+    device.open()
+    try:
+        assert device.actual_width == 320
+        assert api.CAP_PROP_FRAME_WIDTH in api.instances[0].props
+        assert api.CAP_PROP_FPS not in api.instances[0].props
+    finally:
+        device.close()
+
+
+def test_an_explicit_backend_is_not_replaced_when_it_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeCv2(opened=False)
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    device = OpenCVCapture(CameraConfig(backend="dshow"))
+    with pytest.raises(CameraOpenError):
+        device.open()
+    assert [capture.backend for capture in api.instances] == [700]
+    assert all(capture.released for capture in api.instances)
+
+
+def test_virtual_cameras_are_listed_with_their_backend_and_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slot_racing.modules.timing_camera import opencv_device
+    from slot_racing.modules.timing_camera.opencv_device import probe_cameras
+
+    class _SplitApi(_FakeCv2):
+        def VideoCapture(self, index: int, api: int | None = None) -> _FakeCap:  # noqa: N802
+            capture = _FakeCap(self, index, api)
+            self.instances.append(capture)
+            capture.force_closed = not (
+                api == self.CAP_DSHOW or (api == self.CAP_MSMF and index == 1)
+            )
+            return capture
+
+    api = _SplitApi()
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    monkeypatch.setattr(opencv_device, "_windows", lambda: True)
+    monkeypatch.setattr(opencv_device, "_capture_names", lambda: {("dshow", 0): "iVCam"})
+    choices = probe_cameras(limit=2)
+    assert [(choice.index, choice.name, choice.backend) for choice in choices] == [
+        (0, "iVCam", "dshow"),
+        (1, "", "dshow"),
+        (1, "", "msmf"),
+    ]
+    assert all(capture.released for capture in api.instances)
+
+
+def test_directshow_names_are_absent_off_windows() -> None:
+    from slot_racing.modules.timing_camera.opencv_device import _directshow_names
+
+    if sys.platform == "win32":
+        return
+    assert _directshow_names() == ()
 
 
 def test_opencv_reports_nothing_when_the_driver_returns_zero(

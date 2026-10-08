@@ -64,6 +64,10 @@ class CameraTimingPlugin(Plugin):
                 "Eingestellte Bildrate: {fps} FPS. Zeit zwischen Bildern: ca. {interval} ms."
             ),
             "camera.device": "Kamera {index}",
+            "camera.device_backend": "Kamera {index} · {backend}",
+            "camera.backend.dshow": "DirectShow",
+            "camera.backend.msmf": "Media Foundation",
+            "camera.backend.any": "Standard",
             "camera.resolution": "{width} × {height}",  # noqa: RUF001
             "camera.fps": "{fps}",
             "camera.action.add": "+ Zone hinzufügen",

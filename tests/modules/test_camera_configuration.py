@@ -184,6 +184,18 @@ def test_invalid_values_are_rejected() -> None:
         StoredDetection.model_validate({"direction": "sideways"})
 
 
+def test_an_older_camera_document_has_no_backend_and_still_opens() -> None:
+    payload = sample().model_dump(mode="json")
+    camera = payload["camera"]
+    assert isinstance(camera, dict)
+    del camera["backend"]
+    loaded = CameraConfiguration.model_validate(payload)
+    assert loaded.camera.backend == ""
+    assert to_camera_config(loaded).backend == ""
+    with pytest.raises(ValidationError):
+        StoredCamera(backend="ivcam")
+
+
 def test_an_older_document_gains_direction_and_sensitivity() -> None:
     payload = sample().model_dump(mode="json")
     detection = payload["detection"]

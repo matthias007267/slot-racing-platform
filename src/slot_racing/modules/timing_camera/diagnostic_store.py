@@ -172,6 +172,8 @@ class DiagnosticReport:
     direction_check: str = "enabled"
     zone_checks: tuple[tuple[str, int, bool], ...] = ()
     journal_path: str = ""
+    reported_fps: float | None = None
+    frame_gaps: int = 0
 
     @property
     def events_complete(self) -> bool:
@@ -199,6 +201,7 @@ def format_summary(report: DiagnosticReport) -> str:
         f"Angeforderte Auflösung: {report.requested_width} x {report.requested_height}",
         f"Tatsächliche Auflösung: {_resolution(report.actual_width, report.actual_height)}",
         f"Angeforderte Bildrate: {report.requested_fps}",
+        f"Vom Treiber gemeldete Bildrate: {_fps(report.reported_fps)}",
         f"Tatsächliche Bildrate: {_fps(report.camera_fps)}",
         f"Analyse-Bildrate: {_fps(report.analysis_fps)}",
         f"Erkennungsauflösung: Block {report.block_size} px",
@@ -220,6 +223,8 @@ def format_summary(report: DiagnosticReport) -> str:
         f"dt_min_ms={_ms(report.dt_min_ns)}",
         f"dt_average_ms={_ms(report.dt_average_ns)}",
         f"dt_max_ms={_ms(report.dt_max_ns)}",
+        f"Bildaussetzer: {report.frame_gaps}",
+        "Ein Bildaussetzer ist ein Frame-Abstand über dem 2,5-fachen der angeforderten Bildzeit.",
         f"analysis_min_ms={_ms(report.analysis_min_ns)}",
         f"analysis_average_ms={_ms(report.analysis_average_ns)}",
         f"analysis_p95_ms={_ms(report.analysis_p95_ns)}",

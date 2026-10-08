@@ -6,9 +6,11 @@ after opening are stored separately and are not treated as the request.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 from typing import Any
 
-from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, CameraReadError
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
@@ -25,6 +27,8 @@ class OpenCVCapture:
         self.actual_width: int | None = None
         self.actual_height: int | None = None
         self.actual_fps: float | None = None
+        self.backend: str = ""
+        self.device_name: str = ""
         self._regions: tuple[DetectionRoi, ...] = ()
 
     def set_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
@@ -60,23 +64,39 @@ class OpenCVCapture:
 
     def open(self) -> None:
         cv2 = _cv2()
-        capture = cv2.VideoCapture(self._config.device_index)
+        opened: Any = None
+        chosen = ""
+        for backend_id, token in _open_backends(cv2, self._config.backend):
+            capture = _open_capture(cv2, self._config.device_index, backend_id)
+            if capture is None:
+                continue
+            try:
+                if not bool(capture.isOpened()):
+                    capture.release()
+                    continue
+            except Exception:
+                _release(capture)
+                continue
+            opened = capture
+            chosen = token
+            break
+        if opened is None:
+            raise CameraOpenError(f"camera device {self._config.device_index} could not be opened")
         try:
-            if not capture.isOpened():
-                raise CameraOpenError(
-                    f"camera device {self._config.device_index} could not be opened"
-                )
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self._config.width))
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self._config.height))
-            capture.set(cv2.CAP_PROP_FPS, float(self._config.fps))
+            # A virtual camera may reject a size or rate. That must not close it.
+            _request(opened, cv2.CAP_PROP_FRAME_WIDTH, float(self._config.width))
+            _request(opened, cv2.CAP_PROP_FRAME_HEIGHT, float(self._config.height))
+            _request(opened, cv2.CAP_PROP_FPS, float(self._config.fps))
             # One buffered picture. A deeper driver queue would hand us stale frames.
-            capture.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
-            self.actual_width = _reported_size(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.actual_height = _reported_size(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.actual_fps = _reported_fps(capture.get(cv2.CAP_PROP_FPS))
-            self._capture = capture
+            _request(opened, getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
+            self.actual_width = _reported_size(opened.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.actual_height = _reported_size(opened.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.actual_fps = _reported_fps(opened.get(cv2.CAP_PROP_FPS))
+            self.backend = chosen
+            self.device_name = _capture_names().get((chosen, self._config.device_index), "")
+            self._capture = opened
         except Exception:
-            capture.release()
+            _release(opened)
             raise
 
     def read(self) -> GrayFrame:
@@ -97,28 +117,235 @@ class OpenCVCapture:
 
 
 def probe_device_indices(limit: int = 5) -> tuple[int, ...]:
-    """Open each index briefly and close it again. Nothing is left running.
+    """Indices that opened on any backend. The first successful backend wins."""
+    seen: list[int] = []
+    for choice in probe_cameras(limit):
+        if choice.index not in seen:
+            seen.append(choice.index)
+    return tuple(seen)
 
-    A failure to open one index is skipped. The probe itself must not take the
-    application down when no camera is attached.
+
+def probe_cameras(limit: int = 5) -> tuple[CameraChoice, ...]:
+    """Open each index on each relevant backend and close it again.
+
+    On Windows, DirectShow is listed first because iVCam, Camo and DroidCam
+    register there. Media Foundation is listed as well when it opens the same
+    index: the two backends can point at different devices. A failure to open
+    one index is skipped.
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be >= 1")
     cv2 = _cv2()
-    found: list[int] = []
-    for index in range(limit):
-        try:
-            capture = cv2.VideoCapture(index)
-        except Exception:
-            continue
-        try:
-            if bool(capture.isOpened()):
-                found.append(index)
-        except Exception:
-            continue
-        finally:
-            capture.release()
+    names = _capture_names()
+    found: list[CameraChoice] = []
+    seen: set[tuple[str, int]] = set()
+    for backend_id, token in _probe_backends(cv2):
+        for index in range(limit):
+            capture = _open_capture(cv2, index, backend_id)
+            if capture is None:
+                continue
+            try:
+                if not bool(capture.isOpened()):
+                    continue
+            except Exception:
+                continue
+            finally:
+                _release(capture)
+            key = (token, index)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(CameraChoice(index, names.get(key, ""), token))
     return tuple(found)
+
+
+def _open_backends(cv2: Any, backend: str) -> tuple[tuple[int, str], ...]:
+    """Backends to try, in order. An explicit choice is not replaced."""
+    if backend == "dshow":
+        return ((_backend_id(cv2, "CAP_DSHOW", 700), "dshow"),)
+    if backend == "msmf":
+        return ((_backend_id(cv2, "CAP_MSMF", 1400), "msmf"),)
+    if backend == "any":
+        return ((_backend_id(cv2, "CAP_ANY", 0), "any"),)
+    if _windows():
+        return (
+            (_backend_id(cv2, "CAP_DSHOW", 700), "dshow"),
+            (_backend_id(cv2, "CAP_MSMF", 1400), "msmf"),
+            (_backend_id(cv2, "CAP_ANY", 0), "any"),
+        )
+    return ((_backend_id(cv2, "CAP_ANY", 0), "any"),)
+
+
+def _probe_backends(cv2: Any) -> tuple[tuple[int, str], ...]:
+    if _windows():
+        return (
+            (_backend_id(cv2, "CAP_DSHOW", 700), "dshow"),
+            (_backend_id(cv2, "CAP_MSMF", 1400), "msmf"),
+        )
+    return ((_backend_id(cv2, "CAP_ANY", 0), "any"),)
+
+
+def _backend_id(cv2: Any, name: str, fallback: int) -> int:
+    value = getattr(cv2, name, fallback)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return fallback
+    return value
+
+
+def _windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _open_capture(cv2: Any, index: int, backend: int) -> Any | None:
+    try:
+        return cv2.VideoCapture(index, backend)
+    except Exception:
+        return None
+
+
+def _request(capture: Any, prop: int, value: float) -> None:
+    """Ask for one setting. A refusal or an exception leaves the camera open."""
+    try:
+        capture.set(prop, value)
+    except Exception:
+        return
+
+
+def _release(capture: Any) -> None:
+    try:
+        capture.release()
+    except Exception:
+        return
+
+
+def _capture_names() -> dict[tuple[str, int], str]:
+    """DirectShow friendly names, keyed by backend token and index."""
+    if not _windows():
+        return {}
+    try:
+        listed = _directshow_names()
+    except Exception:
+        return {}
+    return {("dshow", index): name for index, name in enumerate(listed) if name.strip()}
+
+
+def _directshow_names() -> tuple[str, ...]:
+    """Friendly names in the same order OpenCV's DirectShow backend uses.
+
+    Returns nothing when the platform is not Windows or the enumerator fails.
+    """
+    if sys.platform != "win32":
+        return ()
+    from ctypes import POINTER, byref, c_long, c_ulong, c_void_p
+
+    hresult = c_long
+
+    ole32 = ctypes.WinDLL("ole32")
+    oleaut32 = ctypes.WinDLL("oleaut32")
+    coinit = ole32.CoInitializeEx(None, 2)
+    # 0x80010106: COM is already initialized on this thread.
+    if coinit not in (0, 1, -2147417850):
+        return ()
+    dev_enum = c_void_p()
+    enumerator = c_void_p()
+    try:
+        system = _guid(ole32, "{62BE5D10-60EB-11d0-BD3B-00A0C911CE86}")
+        create_id = _guid(ole32, "{29840822-5B84-11D0-BD3B-00A0C911CE86}")
+        category = _guid(ole32, "{860BB310-5D01-11d0-BD3B-00A0C911CE86}")
+        bag_id = _guid(ole32, "{55272A00-42CB-11CE-8135-00AA004BB851}")
+        hr = ole32.CoCreateInstance(byref(system), None, 1, byref(create_id), byref(dev_enum))
+        if hr != 0 or not dev_enum:
+            return ()
+        create = _method(dev_enum, 3, hresult, POINTER(_GUID), POINTER(c_void_p), c_ulong)
+        if create(dev_enum, byref(category), byref(enumerator), 0) != 0 or not enumerator:
+            return ()
+        names: list[str] = []
+        nxt = _method(enumerator, 3, hresult, c_ulong, POINTER(c_void_p), POINTER(c_ulong))
+        while True:
+            moniker = c_void_p()
+            fetched = c_ulong()
+            if nxt(enumerator, 1, byref(moniker), byref(fetched)) != 0 or not moniker:
+                break
+            bag = c_void_p()
+            try:
+                bind = _method(
+                    moniker, 9, hresult, c_void_p, c_void_p, POINTER(_GUID), POINTER(c_void_p)
+                )
+                if bind(moniker, None, None, byref(bag_id), byref(bag)) != 0 or not bag:
+                    names.append("")
+                    continue
+                names.append(_friendly_name(oleaut32, bag))
+            finally:
+                _release_com(bag)
+                _release_com(moniker)
+        return tuple(names)
+    finally:
+        _release_com(enumerator)
+        _release_com(dev_enum)
+        if coinit in (0, 1):
+            ole32.CoUninitialize()
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = (
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    )
+
+
+class _Variant(ctypes.Structure):
+    class _Value(ctypes.Union):
+        _fields_ = (("bstr", ctypes.c_void_p),)
+
+    _fields_ = (
+        ("vt", ctypes.c_ushort),
+        ("wReserved1", ctypes.c_ushort),
+        ("wReserved2", ctypes.c_ushort),
+        ("wReserved3", ctypes.c_ushort),
+        ("value", _Value),
+    )
+
+
+def _guid(ole32: Any, text: str) -> _GUID:
+    import ctypes
+
+    value = _GUID()
+    if ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(value)) != 0:
+        raise OSError("could not parse a COM identifier")
+    return value
+
+
+def _method(unknown: Any, index: int, restype: Any, *argtypes: Any) -> Any:
+    table = ctypes.cast(unknown, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    function = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+    return function(restype, ctypes.c_void_p, *argtypes)(table[index])
+
+
+def _release_com(unknown: Any) -> None:
+    if not unknown:
+        return
+    function = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+    release = function(ctypes.c_ulong, ctypes.c_void_p)(
+        ctypes.cast(unknown, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents[2]
+    )
+    release(unknown)
+
+
+def _friendly_name(oleaut32: Any, bag: Any) -> str:
+    import ctypes
+
+    variant = _Variant()
+    read = _method(
+        bag, 3, ctypes.c_long, ctypes.c_wchar_p, ctypes.POINTER(_Variant), ctypes.c_void_p
+    )
+    if read(bag, "FriendlyName", ctypes.byref(variant), None) != 0 or variant.vt != 8:
+        oleaut32.VariantClear(ctypes.byref(variant))
+        return ""
+    text = ctypes.wstring_at(variant.value.bstr) if variant.value.bstr else ""
+    oleaut32.VariantClear(ctypes.byref(variant))
+    return text
 
 
 def _cv2() -> Any:

@@ -9,7 +9,7 @@ from pytestqt.qtbot import QtBot
 
 from slot_racing.core.i18n import Translator
 from slot_racing.core.storage import Setting
-from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
@@ -260,6 +260,39 @@ def test_deleting_a_zone_is_kept_only_after_save(qtbot: QtBot) -> None:
     assert CameraConfigurationStore(stored).load().detection.zones == ()
     reopened, _preview = open_page(qtbot, CameraConfigurationStore(stored))
     assert reopened.stage.zones() == ()
+
+
+def test_a_virtual_camera_is_listed_by_name_and_backend(qtbot: QtBot) -> None:
+    class NamedOpener(FakeOpener):
+        def device_choices(self) -> tuple[CameraChoice, ...]:
+            return (
+                CameraChoice(0, "Integrated Camera", "dshow"),
+                CameraChoice(1, "iVCam", "dshow"),
+                CameraChoice(1, "", "msmf"),
+            )
+
+        def probe_choices(self) -> tuple[CameraChoice, ...]:
+            return self.device_choices()
+
+    stored = database()
+    page, opener = open_page(qtbot, CameraConfigurationStore(stored), NamedOpener())
+    labels = [page.device.itemText(index) for index in range(page.device.count())]
+    assert labels == [
+        "Integrated Camera · DirectShow",
+        "iVCam · DirectShow",
+        "Kamera 1 · Media Foundation",
+    ]
+    page.device.setCurrentIndex(page.device.findData("1|dshow"))
+    draw_sample(qtbot, page)
+    assert opener.opened[-1].device_index == 1
+    assert opener.opened[-1].backend == "dshow"
+    page.save.click()
+    loaded = CameraConfigurationStore(stored).load()
+    assert loaded.camera.device_index == 1
+    assert loaded.camera.backend == "dshow"
+    again, _preview = open_page(qtbot, CameraConfigurationStore(stored), NamedOpener())
+    assert again.device.currentData() == "1|dshow"
+    assert again.device.currentText() == "iVCam · DirectShow"
 
 
 def test_25_fps_can_be_chosen_and_is_saved(qtbot: QtBot) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import (
     CameraFrameSource,
     CaptureDevice,
@@ -57,19 +57,23 @@ class CameraPreview:
         A session reports only the camera it already holds. Listing devices
         must not open and close every index while the user is navigating.
         """
+        return _indices(self.device_choices())
+
+    def device_choices(self) -> tuple[CameraChoice, ...]:
+        """Cameras for the setup list. A live session is not probed again."""
         if self._session is not None:
-            return self._session.known_indices()
-        if self._lease.holder() is not None:
-            return ()
-        return self._probe_now()
+            return _saved_choices(self._session.known_indices())
+        return self._choices_now()
 
     def probe_indices(self) -> tuple[int, ...]:
         """Enumerate devices. Skipped while a session is already capturing."""
+        return _indices(self.probe_choices())
+
+    def probe_choices(self) -> tuple[CameraChoice, ...]:
+        """Enumerate cameras, including a second Windows backend."""
         if self._session is not None and self._session.is_open:
-            return self._session.known_indices()
-        if self._lease.holder() is not None:
-            return ()
-        return self._probe_now()
+            return _saved_choices(self._session.known_indices())
+        return self._choices_now()
 
     def pipeline(self) -> PipelineSnapshot | None:
         if self._session is None:
@@ -97,16 +101,30 @@ class CameraPreview:
         source.start()
         return source
 
-    def _probe_now(self) -> tuple[int, ...]:
-        if self._probe is not None:
-            return self._probe()
-        from slot_racing.modules.timing_camera.opencv_device import probe_device_indices
-
-        return probe_device_indices()
-
     def _device(self, config: CameraConfig) -> CaptureDevice:
         if self._devices is not None:
             return self._devices(config)
         from slot_racing.modules.timing_camera.opencv_device import OpenCVCapture
 
         return OpenCVCapture(config)
+
+    def _choices_now(self) -> tuple[CameraChoice, ...]:
+        if self._lease.holder() is not None:
+            return ()
+        if self._probe is not None:
+            return _saved_choices(self._probe())
+        from slot_racing.modules.timing_camera.opencv_device import probe_cameras
+
+        return probe_cameras()
+
+
+def _saved_choices(indices: tuple[int, ...]) -> tuple[CameraChoice, ...]:
+    return tuple(CameraChoice(index, "", "") for index in indices)
+
+
+def _indices(choices: tuple[CameraChoice, ...]) -> tuple[int, ...]:
+    seen: list[int] = []
+    for choice in choices:
+        if choice.index not in seen:
+            seen.append(choice.index)
+    return tuple(seen)

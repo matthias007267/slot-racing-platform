@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.timing_camera.camera_config import CameraConfig
+from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, LatestFrameBuffer
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
@@ -325,7 +325,11 @@ class CameraSetupPage(QWidget):
         self._fill_direction(config.detection.direction)
         self.sensitivity.setValue(config.detection.sensitivity)
         self._show_resolution_control()
-        self._fill_devices(self._probe(), config.camera.device_index)
+        self._fill_devices(
+            self._device_choices(refresh=False),
+            config.camera.device_index,
+            config.camera.backend,
+        )
         self._fill_choices(
             self.resolution,
             self._resolution_items(config.camera.width, config.camera.height),
@@ -353,12 +357,74 @@ class CameraSetupPage(QWidget):
             indices.append(item)
         return tuple(dict.fromkeys(indices))
 
-    def _fill_devices(self, found: tuple[int, ...], selected: int) -> None:
-        indices = tuple(sorted(set(found) | {selected}))
-        items = [
-            (self._translator.format("camera.device", index=index), index) for index in indices
+    def _device_choices(self, *, refresh: bool) -> tuple[CameraChoice, ...]:
+        method_name = "probe_choices" if refresh else "device_choices"
+        listed = getattr(self._preview, method_name, None)
+        if not callable(listed):
+            listed = getattr(self._preview, "device_choices", None)
+        if callable(listed):
+            try:
+                found = listed()
+            except Exception:
+                logger.exception("Could not list cameras")
+                found = ()
+            return self._clean_choices(found)
+        return tuple(CameraChoice(index, "", "") for index in self._probe())
+
+    def _clean_choices(self, found: object) -> tuple[CameraChoice, ...]:
+        if isinstance(found, bool) or not isinstance(found, tuple):
+            return ()
+        choices: list[CameraChoice] = []
+        seen: set[tuple[int, str]] = set()
+        for item in found:
+            if not isinstance(item, CameraChoice):
+                continue
+            if item.backend not in {"", "any", "dshow", "msmf"}:
+                continue
+            key = (item.index, item.backend)
+            if key in seen:
+                continue
+            seen.add(key)
+            choices.append(item)
+        return tuple(choices)
+
+    def _fill_devices(self, found: tuple[CameraChoice, ...], selected: int, backend: str) -> None:
+        choices = list(found)
+        exact = [
+            choice for choice in choices if choice.index == selected and choice.backend == backend
         ]
-        self._fill_choices(self.device, items, selected)
+        if not exact:
+            same_index = [choice for choice in choices if choice.index == selected]
+            if backend == "" and same_index:
+                exact = same_index[:1]
+            else:
+                placeholder = CameraChoice(selected, "", backend)
+                choices.append(placeholder)
+                exact = [placeholder]
+        items = [
+            (self._device_label(choice), _device_token(choice.index, choice.backend))
+            for choice in choices
+        ]
+        chosen = exact[0]
+        self._fill_choices(self.device, items, _device_token(chosen.index, chosen.backend))
+
+    def _device_label(self, choice: CameraChoice) -> str:
+        backend = self._backend_name(choice.backend)
+        name = choice.name.strip()
+        if name and backend:
+            return f"{name} · {backend}"
+        if name:
+            return name
+        if backend:
+            return self._translator.format(
+                "camera.device_backend", index=choice.index, backend=backend
+            )
+        return self._translator.format("camera.device", index=choice.index)
+
+    def _backend_name(self, backend: str) -> str:
+        if backend not in {"dshow", "msmf", "any"}:
+            return ""
+        return self._tr(f"camera.backend.{backend}")
 
     def _resolution_items(self, width: int, height: int) -> list[tuple[str, str]]:
         sizes = list(_RESOLUTIONS)
@@ -449,10 +515,16 @@ class CameraSetupPage(QWidget):
         return f"{number}: {self._label(self._drafts[index])}"
 
     def _device_index(self) -> int:
-        value = self.device.currentData()
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        return 0
+        parsed = _parse_device(self.device.currentData())
+        if parsed is None:
+            return 0
+        return parsed[0]
+
+    def _device_backend(self) -> str:
+        parsed = _parse_device(self.device.currentData())
+        if parsed is None:
+            return ""
+        return parsed[1]
 
     def _resolution(self) -> tuple[int, int]:
         value = self.resolution.currentData()
@@ -475,6 +547,7 @@ class CameraSetupPage(QWidget):
             width=width,
             height=height,
             fps=self._frame_rate(),
+            backend=self._device_backend(),
         )
 
     def _show_resolution_control(self) -> None:
@@ -588,6 +661,7 @@ class CameraSetupPage(QWidget):
         )
         return (
             self._device_index(),
+            self._device_backend(),
             width,
             height,
             self._frame_rate(),
@@ -608,6 +682,7 @@ class CameraSetupPage(QWidget):
                 width=width,
                 height=height,
                 fps=self._frame_rate(),
+                backend=self._device_backend(),
             ),
             detection=StoredDetection(
                 zones=tuple(
@@ -723,8 +798,9 @@ class CameraSetupPage(QWidget):
 
     def _on_refresh(self) -> None:
         selected = self._device_index()
+        backend = self._device_backend()
         self._loading = True
-        self._fill_devices(self._listed_indices(), selected)
+        self._fill_devices(self._device_choices(refresh=True), selected, backend)
         self._loading = False
         if self.isVisible():
             self._start_preview()
@@ -908,27 +984,6 @@ class CameraSetupPage(QWidget):
         except Exception:
             logger.exception("Camera preview did not stop")
 
-    def _listed_indices(self) -> tuple[int, ...]:
-        listed = getattr(self._preview, "probe_indices", None)
-        if not callable(listed):
-            return self._probe()
-        try:
-            found = listed()
-        except Exception:
-            logger.exception("Could not list cameras")
-            return ()
-        return self._clean_indices(found)
-
-    def _clean_indices(self, found: object) -> tuple[int, ...]:
-        if isinstance(found, bool) or not isinstance(found, tuple):
-            return ()
-        indices: list[int] = []
-        for item in found:
-            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
-                continue
-            indices.append(item)
-        return tuple(dict.fromkeys(indices))
-
     def _start_diagnostic_feed(self) -> None:
         if self._feed_thread is not None:
             return
@@ -1002,6 +1057,7 @@ class CameraSetupPage(QWidget):
                     if isinstance(preview_replaced, int) and not isinstance(preview_replaced, bool)
                     else None
                 ),
+                reported_fps=_positive_fps(getattr(preview, "reported_fps", None)),
             )
         return CaptureCounters(
             captured=snapshot.capture_frames,
@@ -1017,6 +1073,7 @@ class CameraSetupPage(QWidget):
                 if isinstance(preview_replaced, int) and not isinstance(preview_replaced, bool)
                 else None
             ),
+            reported_fps=_positive_fps(getattr(preview, "reported_fps", None)),
         )
 
     def _refresh_status(self) -> None:
@@ -1064,7 +1121,32 @@ def _capture_counters(source: FrameSource) -> CaptureCounters:
     return CaptureCounters(
         captured if isinstance(captured, int) and not isinstance(captured, bool) else None,
         dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else None,
+        reported_fps=_positive_fps(getattr(source, "reported_fps", None)),
     )
+
+
+def _positive_fps(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    fps = float(value)
+    return fps if fps > 0 else None
+
+
+def _device_token(index: int, backend: str) -> int | str:
+    if backend == "":
+        return index
+    return f"{index}|{backend}"
+
+
+def _parse_device(value: object) -> tuple[int, str] | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value, ""
+    if not isinstance(value, str) or "|" not in value:
+        return None
+    index_text, _, backend = value.partition("|")
+    if not index_text.isdigit() or backend not in {"", "any", "dshow", "msmf"}:
+        return None
+    return int(index_text), backend
 
 
 def _section(text: str) -> QLabel:
