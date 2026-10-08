@@ -160,17 +160,17 @@ def test_a_saved_light_scale_roundtrips_and_old_rectangles_become_one_scale() ->
 
 
 def test_a_short_surface_limits_the_scale_and_keeps_the_aspect() -> None:
-    low, high = light_scale_limits(1200, 180)
+    low, high = light_scale_limits(1600, 120)
     assert low == LIGHT_SCALE_MIN
     assert high < 100
     frame = light_frame(x=0.4, y=0.8, scale=180)
     assert frame.scale == 180
-    assert effective_light_scale(180, 1200, 180) == high
-    pixels = light_pixels(frame, 1200, 180)
-    assert pixels.width <= 1200
-    assert pixels.height <= 180
-    assert pixels.x + pixels.width <= 1200
-    assert pixels.y + pixels.height <= 180
+    assert effective_light_scale(180, 1600, 120) == high
+    pixels = light_pixels(frame, 1600, 120)
+    assert pixels.width <= 1600
+    assert pixels.height <= 120
+    assert pixels.x + pixels.width <= 1600
+    assert pixels.y + pixels.height <= 120
     assert abs(pixels.width / pixels.height - LIGHT_ASPECT) < 0.05
     wide = light_pixels(frame, 2560, 1440)
     small = light_pixels(frame, 640, 360)

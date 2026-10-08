@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QCheckBox, QLabel
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.catalog import DriverInfo
-from slot_racing.core.domain import ParticipantResult, RaceId, TrackId
-from slot_racing.core.statistics import TimeScope, career_summary, track_records
+from slot_racing.core.domain import ParticipantResult, RaceId, RaceMode, RaceStatus, TrackId
+from slot_racing.core.statistics import (
+    HistoryLap,
+    HistoryParticipant,
+    HistoryRace,
+    TimeScope,
+    career_summary,
+    track_records,
+)
 from slot_racing.core.storage import Database
 from slot_racing.modules.drivers_vehicles.ui.drivers_page import DriversPage
 from slot_racing.modules.drivers_vehicles.ui.vehicles_page import VehiclesPage
@@ -19,7 +26,8 @@ from slot_racing.modules.statistics.ui.page import RecordDialog, StatisticsPage
 from slot_racing.modules.track_planner.document import STRAIGHT_H, add_piece
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.uikit.career import MISSING
-from slot_racing.uikit.chart import ChartPoint, ChartSeries, LineChart
+from slot_racing.uikit.chart import ChartPoint, ChartSeries, LineChart, driver_color
+from slot_racing.uikit.report_view import RaceReportView
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import cells, open_page
 
@@ -232,6 +240,61 @@ def test_a_chart_with_many_laps_still_draws(qtbot: QtBot) -> None:
     image = chart.grab()
     assert not image.isNull()
     assert image.width() == 240
+
+
+def test_a_drivers_chart_color_stays_when_other_drivers_are_hidden(qtbot: QtBot, env: Env) -> None:
+    people = ((3, "Chris"), (1, "Anna"), (2, "Ben"))
+    race = HistoryRace(
+        race_id=1,
+        name="Farben",
+        track_id=1,
+        track_name="Ring",
+        layout_id=None,
+        status=RaceStatus.FINISHED,
+        mode=RaceMode.LAPS,
+        finished_at=None,
+        participants=tuple(
+            HistoryParticipant(
+                participant_id=participant_id,
+                driver_id=participant_id,
+                driver_label=name,
+                vehicle_id=None,
+                vehicle_label="Car",
+                lane=participant_id,
+                position=index + 1,
+                finished=True,
+                disqualified=False,
+                total_time_ns=4_000_000_000,
+            )
+            for index, (participant_id, name) in enumerate(people)
+        ),
+        laps=tuple(
+            HistoryLap(participant_id, 1, 4_000_000_000 + participant_id, participant_id)
+            for participant_id, _name in people
+        ),
+    )
+    view = RaceReportView(env.runtime.translator)
+    qtbot.addWidget(view)
+    view.show_race(race)
+    shown = [item.color for item in view.chart.series]
+    assert shown == [driver_color(3), driver_color(1), driver_color(2)]
+    assert shown[0] != driver_color(1)
+    for participant_id, _name in people:
+        box = view.findChild(QCheckBox, f"race-report-series-{participant_id}")
+        assert box is not None
+        assert driver_color(participant_id) in box.styleSheet()
+        assert box.isChecked()
+    chris = view.findChild(QCheckBox, "race-report-series-3")
+    anna = view.findChild(QCheckBox, "race-report-series-1")
+    assert chris is not None and anna is not None
+    chris.setChecked(False)
+    anna.setChecked(False)
+    assert len(view.chart.series) == 1
+    assert view.chart.series[0].name == "Ben"
+    assert view.chart.series[0].color == driver_color(2)
+    ben = view.findChild(QCheckBox, "race-report-series-2")
+    assert ben is not None
+    assert driver_color(2) in ben.styleSheet()
 
 
 def _finish(

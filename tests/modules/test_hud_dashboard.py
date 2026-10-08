@@ -347,27 +347,35 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     assert live.time_label.text() == "0:03.000"
     assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
 
-    env.clock.advance(2 * NANOS_PER_SECOND)
-    live.refresh()
-    assert live.time_label.text() == "0:05.000"
-    assert column_text(live.table, 0, "Fahrer") == "Zoe"
-    assert column_text(live.table, 1, "Fahrer") == "Anna"
+    for _ in range(80):
+        if any(row.laps_completed >= 1 for row in runner.snapshot().rows):
+            break
+        env.clock.advance(100_000_000)
+        live.refresh()
+    snapshot = runner.snapshot()
+    leader_row = snapshot.rows[0]
+    assert leader_row.laps_completed >= 1
     assert [column_text(live.table, index, "Fahrer") for index in range(2)] == [
-        row.driver_label for row in runner.snapshot().rows
+        row.driver_label for row in snapshot.rows
     ]
     assert column_text(live.table, 0, "Platz") == "1"
-    assert column_text(live.table, 0, "Runden") == "1"
-    assert live.lanes.cards[1].lap_label.text() == "2 / 2"
+    assert column_text(live.table, 0, "Runden") == str(leader_row.laps_completed)
+    card = live.lanes.cards[leader_row.lane]
     last = column_text(live.table, 0, "Letzte Runde")
-    assert last == format_duration(runner.snapshot().rows[0].last_lap_ns)
-    assert live.lanes.cards[1].last_label.text() == last
-    assert live.lanes.cards[1].driver_label.text() == "Zoe"
-    assert live.lanes.cards[1].best_label.text() == last
-    assert live.messages.message_label.text() == "Fahrer Zoe hat Runde 1 abgeschlossen"
+    assert last == format_duration(leader_row.last_lap_ns)
+    assert card.last_label.text() == last
+    assert card.driver_label.text() == leader_row.driver_label
+    assert card.best_label.text() == last
+    assert card.lap_label.text() == f"{leader_row.current_lap} / {snapshot.laps}"
+    finished_names = {row.driver_label for row in snapshot.rows if row.laps_completed >= 1}
+    assert live.messages.message_label.text() in {
+        f"Fahrer {name} hat Runde 1 abgeschlossen" for name in finished_names
+    }
     leader = live.table.item(0, 0)
     assert leader is not None and leader.data(LEADER_ROLE) is True
 
     frozen = live.time_label.text()
+    frozen_laps = [column_text(live.table, index, "Runden") for index in range(2)]
     live.pause_button.click()
     assert runner.snapshot().status is RaceStatus.PAUSED
     assert live.status_label.text() == "● Pausiert"
@@ -378,10 +386,11 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     env.clock.advance(5 * NANOS_PER_SECOND)
     live.refresh()
     assert live.time_label.text() == frozen
-    assert column_text(live.table, 0, "Runden") == "1"
+    assert [column_text(live.table, index, "Runden") for index in range(2)] == frozen_laps
 
     live.pause_button.click()
     assert runner.snapshot().status is RaceStatus.PAUSED
+    elapsed = runner.snapshot().elapsed_ns
     live.resume_button.click()
     assert runner.snapshot().status is RaceStatus.RUNNING
     assert live.status_label.text() == "● Läuft"
@@ -390,7 +399,7 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     assert not live.resume_button.isEnabled()
     env.clock.advance(NANOS_PER_SECOND)
     live.refresh()
-    assert live.time_label.text() == "0:06.000"
+    assert live.time_label.text() == format_duration(elapsed + NANOS_PER_SECOND)
     assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
 
     seen_second_lap = False
@@ -425,7 +434,8 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     assert not live._timer.isActive()
     live.results_button.click()
     assert isinstance(page.current_view(), ResultsView)
-    assert column_text(page.results.table, 0, "Fahrer") == "Zoe"
+    stored = env.races.get_results(runner.race.id)
+    assert column_text(page.results.table, 0, "Fahrer") == stored[0].driver_label
 
 
 def test_panels_keep_their_content_inside_at_several_sizes(qtbot: QtBot, env: Env) -> None:

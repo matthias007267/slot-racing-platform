@@ -8,10 +8,11 @@ that have become due.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from slot_racing.core.clock import NANOS_PER_SECOND, Clock, ManualClock
+from slot_racing.core.clock import Clock, ManualClock
 from slot_racing.core.domain import TimingSetup
 from slot_racing.core.errors import ProviderConfigurationError
 from slot_racing.core.events import SensorTriggered
@@ -210,21 +211,21 @@ class SimulationTimingProvider(TimingSource, ManuallyTriggerable):
 
 
 PROVIDER_ID = "simulation"
+SIM_LAP_MIN_MS = 3_000
+SIM_LAP_MAX_MS = 5_000
+"""Inclusive millisecond bounds for one simulated lap."""
 
 
 class SimulationTimingFactory(TimingSourceFactory):
-    """Creates a simulation for a race: every lane drives at its own, slightly varying pace."""
+    """Creates a simulation for a race: every lap draws its own time."""
 
-    def __init__(
-        self,
-        clock: Clock,
-        *,
-        base_lap_time_ns: int = 5 * NANOS_PER_SECOND,
-        lane_step_ns: int = 400_000_000,
-    ) -> None:
+    def __init__(self, clock: Clock, *, rng: random.Random | None = None) -> None:
         self._clock = clock
-        self._base_lap_time_ns = base_lap_time_ns
-        self._lane_step_ns = lane_step_ns
+        self._rng = rng if rng is not None else random.Random()
+
+    def bind_rng(self, rng: random.Random) -> None:
+        """Replace the random source. Tests pass a seeded generator."""
+        self._rng = rng
 
     @property
     def provider_id(self) -> str:
@@ -251,6 +252,6 @@ class SimulationTimingFactory(TimingSourceFactory):
         return SimulationTimingProvider(self._clock, spec.setup, lanes, spec.laps)
 
     def _lap_time(self, lane: int, index: int, lap: int) -> int:
-        # Deterministic jitter of -100..+100 ms so laps differ but runs are reproducible.
-        jitter_ms = ((lap * 7 + lane * 3) % 5 - 2) * 50
-        return self._base_lap_time_ns + index * self._lane_step_ns + jitter_ms * 1_000_000
+        """One draw per driver and lap. The arguments only document the call site."""
+        del lane, index, lap
+        return self._rng.randint(SIM_LAP_MIN_MS, SIM_LAP_MAX_MS) * 1_000_000

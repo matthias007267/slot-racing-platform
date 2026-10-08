@@ -50,6 +50,13 @@ class Space:
 
 COLORS = Color()
 SPACE = Space()
+# Informational type in the race assistant. Buttons keep the stylesheet size.
+FONT_STEP = 22
+FONT_CAPTION = 16
+FONT_VALUE = 20
+FONT_HEAT = 34
+FONT_LANE = 28
+FONT_HINT = 16
 # The live HUD sits beside the main navigation. The HUD editor uses the same width.
 NAVIGATION_WIDTH = 228
 

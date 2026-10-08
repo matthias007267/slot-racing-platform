@@ -194,8 +194,11 @@ def test_cards_follow_the_race_without_being_rebuilt(qtbot: QtBot, env: Env) -> 
     assert zoe.status_label.text() == "Fährt"
     assert zoe.last_label.text() == "-"
 
-    env.clock.advance(5 * NANOS_PER_SECOND)
-    live.refresh()
+    for _ in range(80):
+        if any(row.laps_completed >= 1 for row in runner.snapshot().rows):
+            break
+        env.clock.advance(100_000_000)
+        live.refresh()
     assert {lane: id(card) for lane, card in live.lanes.cards.items()} == identities
     snapshot = runner.snapshot()
     for row in snapshot.rows:
@@ -205,9 +208,11 @@ def test_cards_follow_the_race_without_being_rebuilt(qtbot: QtBot, env: Env) -> 
         assert card.last_label.text() == format_duration(row.last_lap_ns)
         assert card.best_label.text() == format_duration(row.best_lap_ns)
         assert card.total_label.text() == format_duration(row.total_time_ns)
-    assert zoe.last_label.text() != "-"
+    leader = snapshot.rows[0]
+    assert leader.laps_completed >= 1
+    assert live.lanes.cards[leader.lane].last_label.text() != "-"
     assert column_text(live.table, 0, "Platz") == "1"
-    assert column_text(live.table, 0, "Fahrer") == snapshot.rows[0].driver_label
+    assert column_text(live.table, 0, "Fahrer") == leader.driver_label
     assert not live.table.isColumnHidden(1)
     assert not live.table.isColumnHidden(5)
 

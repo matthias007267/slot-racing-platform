@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -25,6 +26,11 @@ from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.service import MAX_LAPS, RaceService, parse_duration_minutes
 from slot_racing.modules.races.types import RaceInfo
+from slot_racing.modules.races.ui.race_briefing import (
+    BriefingBoard,
+    OverviewBoard,
+    apply_text_size,
+)
 from slot_racing.uikit import (
     StatusLabel,
     availability_text,
@@ -37,7 +43,7 @@ from slot_racing.uikit import (
     selected_id,
 )
 from slot_racing.uikit.errors import is_expected
-from slot_racing.uikit.theme import SPACE, configure_page, set_role
+from slot_racing.uikit.theme import FONT_CAPTION, FONT_STEP, SPACE, configure_page, set_role
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +72,7 @@ class RaceWizard(QWidget):
         providers: TimingProviderRegistry,
     ) -> None:
         super().__init__()
+        self.setObjectName("race-wizard")
         self.translator = translator
         self._service = service
         self._drivers = drivers
@@ -79,6 +86,8 @@ class RaceWizard(QWidget):
         self.title_label = heading(tr("race.wizard.title"))
         self.step_label = QLabel()
         self.step_label.setObjectName("wizard-step")
+        self.step_label.setWordWrap(True)
+        set_role(self.step_label, "wizard-step")
         self.stack = QStackedWidget()
         self.status = StatusLabel("wizard-status")
 
@@ -90,18 +99,21 @@ class RaceWizard(QWidget):
         self.provider_combo.setObjectName("race-provider")
         self.provider_status = QLabel()
         self.provider_status.setObjectName("race-provider-status")
+        self.provider_status.setWordWrap(True)
         self.mode_combo = QComboBox()
         self.mode_combo.setObjectName("race-mode")
         self.mode_combo.addItem(tr("race.wizard.mode.laps"), RaceMode.LAPS.value)
         self.mode_combo.addItem(tr("race.wizard.mode.time_trial"), RaceMode.TIME_TRIAL.value)
         self.laps_caption = QLabel(tr("race.wizard.laps"))
         self.laps_caption.setObjectName("race-laps-label")
+        self.laps_caption.setWordWrap(True)
         self.laps_spin = QSpinBox()
         self.laps_spin.setObjectName("race-laps")
         self.laps_spin.setRange(1, MAX_LAPS)
         self.laps_spin.setValue(5)
         self.duration_caption = QLabel(tr("race.wizard.duration"))
         self.duration_caption.setObjectName("race-duration-label")
+        self.duration_caption.setWordWrap(True)
         self.duration_edit = QLineEdit("5")
         self.duration_edit.setObjectName("race-duration")
         self.duration_unit = QLabel(tr("race.wizard.minutes"))
@@ -128,8 +140,12 @@ class RaceWizard(QWidget):
         )
         self.overview_label = QLabel()
         self.overview_label.setObjectName("race-overview")
+        self.overview_label.hide()
+        self.overview_board = OverviewBoard()
         self.ready_label = QLabel(tr("race.wizard.ready"))
         self.ready_label.setWordWrap(True)
+        self.ready_label.hide()
+        self.briefing_board = BriefingBoard()
         self.heat_driver = QComboBox()
         self.heat_driver.setObjectName("wizard-heat-driver")
         self.postpone_button = QPushButton(tr("race.heat.postpone"))
@@ -250,16 +266,16 @@ class RaceWizard(QWidget):
             layout = QVBoxLayout(page)
             layout.addWidget(heading(tr(f"race.wizard.step.{key}")))
             if index == NAME:
-                layout.addWidget(QLabel(tr("race.wizard.name")))
+                layout.addWidget(_caption(tr("race.wizard.name")))
                 layout.addWidget(self.name_edit)
             elif index == TRACK:
-                layout.addWidget(QLabel(tr("race.wizard.track")))
+                layout.addWidget(_caption(tr("race.wizard.track")))
                 layout.addWidget(self.track_combo)
-                layout.addWidget(QLabel(tr("race.wizard.provider")))
+                layout.addWidget(_caption(tr("race.wizard.provider")))
                 layout.addWidget(self.provider_combo)
                 layout.addWidget(self.provider_status)
             elif index == MODE:
-                layout.addWidget(QLabel(tr("race.wizard.mode")))
+                layout.addWidget(_caption(tr("race.wizard.mode")))
                 layout.addWidget(self.mode_combo)
                 layout.addWidget(self.laps_caption)
                 layout.addWidget(self.laps_spin)
@@ -275,7 +291,7 @@ class RaceWizard(QWidget):
                     ("race.wizard.vehicle", self.vehicle_combo),
                 ):
                     column = QVBoxLayout()
-                    column.addWidget(QLabel(tr(label)))
+                    column.addWidget(_caption(tr(label)))
                     column.addWidget(combo)
                     row.addLayout(column, 1)
                 layout.addLayout(row)
@@ -287,15 +303,17 @@ class RaceWizard(QWidget):
                 layout.addLayout(actions)
                 layout.addWidget(self.participant_table, 1)
             elif index == OVERVIEW:
-                layout.addWidget(self.overview_label)
+                layout.addWidget(_scroll(self.overview_board), 1)
             else:
+                layout.addWidget(_scroll(self.briefing_board), 1)
                 layout.addWidget(self.ready_label)
                 layout.addWidget(self.heat_driver)
                 layout.addWidget(self.postpone_button)
                 layout.addWidget(self.disqualify_button)
                 layout.addWidget(self.start_button)
             self.lane_combo.hide()
-            layout.addStretch(1)
+            if index not in (OVERVIEW, START):
+                layout.addStretch(1)
             self.stack.addWidget(page)
 
     def _reload_providers(self, keep: str | None = None) -> None:
@@ -382,12 +400,14 @@ class RaceWizard(QWidget):
                 title=tr(f"race.wizard.step.{STEP_KEYS[step]}"),
             )
         )
+        self._fit_step_label()
         self.back_button.setEnabled(step > NAME)
         self.next_button.setEnabled(step < START)
         if step == TRACK:
             self._reload_providers()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
+            self._show_overview_board()
         if step == START:
             self._show_start_briefing()
 
@@ -584,13 +604,38 @@ class RaceWizard(QWidget):
                 lines.append(fmt("race.overview.heat", sequence=heat.sequence, seats=seated))
         return "\n".join(lines)
 
+    def _show_overview_board(self) -> None:
+        race = self._race
+        if race is None:
+            return
+        self.overview_board.show_race(
+            race,
+            tuple(self._service.heat_plan(race.id)),
+            self.translator,
+            provider_label(self.translator, race.timing_provider),
+        )
+
+    def _fit_step_label(self) -> None:
+        apply_text_size(self.step_label, FONT_STEP, max(self.width(), 640), bold=True)
+        apply_text_size(self.laps_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.duration_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.duration_unit, FONT_CAPTION, max(self.width(), 640), bold=False)
+        apply_text_size(self.provider_status, FONT_CAPTION, max(self.width(), 640), bold=False)
+
+    def resizeEvent(self, event: object) -> None:  # noqa: N802
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        self._fit_step_label()
+
     def _show_start_briefing(self) -> None:
         race = self._race
         if race is None:
             return
         briefing = self._service.heat_briefing(race.id)
         if briefing is None:
-            self.ready_label.setText(self.translator.translate("race.wizard.ready"))
+            ready = self.translator.translate("race.wizard.ready")
+            self.ready_label.setText(ready)
+            self.briefing_board.show_message(ready)
+            self.briefing_board.show()
             self.heat_driver.hide()
             self.postpone_button.hide()
             self.disqualify_button.hide()
@@ -602,6 +647,8 @@ class RaceWizard(QWidget):
             lines.append(fmt("race.heat.seat", lane=seat.lane, driver=seat.driver_label or free))
         lines.extend(["", self.translator.translate("race.heat.ready_hint")])
         self.ready_label.setText("\n".join(lines))
+        self.briefing_board.show()
+        self.briefing_board.show_briefing(briefing, self.translator)
         self.heat_driver.show()
         self.postpone_button.show()
         self.disqualify_button.show()
@@ -637,3 +684,19 @@ class RaceWizard(QWidget):
             self.status.show_error(describe_error(self.translator, error))
             return False
         return True
+
+
+def _caption(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    set_role(label, "wizard-caption")
+    apply_text_size(label, FONT_CAPTION, 960, bold=True)
+    return label
+
+
+def _scroll(widget: QWidget) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setWidget(widget)
+    return scroll

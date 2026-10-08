@@ -81,40 +81,44 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert live.lanes.cards[1].driver_label.text() == "Zoe"
     assert live.lanes.cards[1].last_label.text() == "-"
 
-    # One lap of the faster lane, delivered by the runner. The view redraws from the lap event
-    # and does not need its timer.
-    env.clock.advance(5 * NANOS_PER_SECOND)
-    runner.tick()
-    assert column_text(live.table, 0, "Fahrer") == "Zoe"
-    assert column_text(live.table, 1, "Fahrer") == "Anna"
+    # The first completed lap redraws the view from the runner. Which driver leads depends
+    # on that lap, so the table is checked against the snapshot.
+    for _ in range(80):
+        if any(row.laps_completed >= 1 for row in runner.snapshot().rows):
+            break
+        env.clock.advance(100_000_000)
+        runner.tick()
+    snapshot = runner.snapshot()
+    leader = snapshot.rows[0]
+    assert leader.laps_completed >= 1
+    assert column_text(live.table, 0, "Fahrer") == leader.driver_label
     assert column_text(live.table, 0, "Platz") == "1"
-    assert column_text(live.table, 0, "Runden") == "1"
-    assert column_text(live.table, 0, "Aktuelle Runde") == "2/2"
-    assert column_text(live.table, 0, "Fortschritt") == "1/2"
-    assert column_text(live.table, 1, "Runden") == "0"
-    assert column_text(live.table, 1, "Fortschritt") == "0/2"
+    assert column_text(live.table, 0, "Runden") == str(leader.laps_completed)
+    assert column_text(live.table, 0, "Aktuelle Runde") == f"{leader.current_lap}/{snapshot.laps}"
+    assert column_text(live.table, 0, "Fortschritt") == f"{leader.laps_completed}/{snapshot.laps}"
     last_lap = column_text(live.table, 0, "Letzte Runde")
     assert last_lap != "-"
     assert last_lap == column_text(live.table, 0, "Beste Runde")
-    assert live.lanes.cards[1].last_label.text() == last_lap
-    assert format_duration(runner.snapshot().rows[0].lap_times_ns[0]) == last_lap
-    standings = [row.driver_label for row in runner.snapshot().rows]
+    assert live.lanes.cards[leader.lane].last_label.text() == last_lap
+    assert format_duration(leader.lap_times_ns[0]) == last_lap
+    standings = [row.driver_label for row in snapshot.rows]
     assert [column_text(live.table, index, "Fahrer") for index in range(2)] == standings
 
     live.table.selectRow(1)
+    anna = next(row for row in runner.snapshot().rows if row.lane == 2)
     assert live.lanes.cards[2].driver_label.text() == "Anna"
     assert live.lanes.cards[2].start_label.text() == "3"
-    assert live.lanes.cards[2].position_label.text() == "P2"
+    assert live.lanes.cards[2].position_label.text() == f"P{anna.position}"
     assert live.lanes.cards[1].lane == 1
 
+    frozen_laps = [column_text(live.table, index, "Runden") for index in range(2)]
     runner.pause()
     assert live.status_label.text().endswith("Pausiert")
     assert column_text(live.table, 0, "Status") == "Wartet"
     assert column_text(live.table, 1, "Status") == "Wartet"
     env.clock.advance(10 * NANOS_PER_SECOND)
     runner.tick()
-    assert column_text(live.table, 0, "Runden") == "1"
-    assert column_text(live.table, 1, "Runden") == "0"
+    assert [column_text(live.table, index, "Runden") for index in range(2)] == frozen_laps
 
     assert not live.pause_button.isEnabled()
     assert live.resume_button.isEnabled()
@@ -137,18 +141,22 @@ def test_simulated_race_updates_the_live_view_and_opens_results(qtbot: QtBot, en
     assert isinstance(page.current_view(), ResultsView)
     results = page.results
     stored = env.races.get_results(runner.race.id)
-    assert [row.start_number for row in stored] == [7, 3]
     assert results.table.rowCount() == 2
+    assert [column_text(results.table, index, "Fahrer") for index in range(2)] == [
+        row.driver_label for row in stored
+    ]
+    assert [column_text(results.table, index, "Startnummer") for index in range(2)] == [
+        str(row.start_number) for row in stored
+    ]
     assert column_text(results.table, 0, "Platz") == "1"
-    assert column_text(results.table, 0, "Fahrer") == "Zoe"
-    assert column_text(results.table, 0, "Fahrzeug") == "Porsche 911"
-    assert column_text(results.table, 0, "Startnummer") == "7"
+    winner = stored[0]
+    assert column_text(results.table, 0, "Fahrzeug") == winner.vehicle_label
     assert column_text(results.table, 0, "Runden") == "2"
     assert column_text(results.table, 0, "Status") == "Fertig"
     assert column_text(results.table, 0, "Gesamtzeit") != "-"
     assert column_text(results.table, 0, "Beste Runde") != "-"
-    assert column_text(results.table, 1, "Fahrer") == "Anna"
-    assert column_text(results.table, 1, "Startnummer") == "3"
+    assert {row.driver_label for row in stored} == {"Zoe", "Anna"}
+    assert {row.start_number for row in stored} == {7, 3}
     assert [column_text(results.table, index, "Platz") for index in range(2)] == [
         str(row.position) for row in stored
     ]

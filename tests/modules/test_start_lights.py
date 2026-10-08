@@ -82,6 +82,7 @@ def test_an_overlay_grows_past_the_old_lamp_cap(qtbot: QtBot) -> None:
     lights.show_lights(2)
     lamps = lights.lamp_rects()
     assert lamps[0].width() > 92
+    assert lamps[0].bottom() > height * 0.7
     for lamp in lamps:
         assert abs(lamp.width() - lamp.height()) < 0.6
         assert lamp.right() <= width + 0.5
@@ -97,6 +98,10 @@ def test_go_puts_every_lamp_out_and_then_the_gantry_can_leave(qtbot: QtBot) -> N
     assert lights.showing_go
     assert lights.isVisible()
     assert _redness(lights, 0.13) < 140
+    assert len(lights.lamp_rects()) == 5
+    lamps = lights.lamp_rects()
+    assert lamps[0].bottom() > lights.height() * 0.7
+    assert lights.height() - lamps[0].bottom() < lamps[0].height() * 0.6
     lights.clear()
     assert lights.isHidden()
     assert lights.lit_lights == 0

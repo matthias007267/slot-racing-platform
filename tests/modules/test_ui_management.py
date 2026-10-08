@@ -527,11 +527,17 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert column_text(live.table, 0, "Fahrer") == "Anna"
     assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
 
-    for _ in range(60):
+    for _ in range(80):
+        if column_text(live.table, 0, "Runden") != "0":
+            break
         env.clock.advance(100_000_000)
         live.refresh()
-    assert column_text(live.table, 0, "Aktuelle Runde") == "2/2"
-    assert column_text(live.table, 0, "Runden") == "1"
+    snapshot = runner.snapshot()
+    leader = snapshot.rows[0]
+    assert leader.laps_completed >= 1
+    assert column_text(live.table, 0, "Fahrer") == leader.driver_label
+    assert column_text(live.table, 0, "Aktuelle Runde") == f"{leader.current_lap}/{snapshot.laps}"
+    assert column_text(live.table, 0, "Runden") == str(leader.laps_completed)
     assert column_text(live.table, 0, "Letzte Runde") != "-"
 
     live.confirm = lambda _text: False
