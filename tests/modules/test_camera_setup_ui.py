@@ -262,6 +262,22 @@ def test_deleting_a_zone_is_kept_only_after_save(qtbot: QtBot) -> None:
     assert reopened.stage.zones() == ()
 
 
+def test_25_fps_can_be_chosen_and_is_saved(qtbot: QtBot) -> None:
+    stored = database()
+    page, opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
+    rates = [page.fps.itemData(index) for index in range(page.fps.count())]
+    assert rates == [15, 25, 30, 60]
+    draw_sample(qtbot, page)
+    page.fps.setCurrentIndex(page.fps.findData(25))
+    assert opener.opened[-1].fps == 25
+    page.save.click()
+    assert "Konfiguration gespeichert." in page.message.text()
+    assert CameraConfigurationStore(stored).load().camera.fps == 25
+    again, _preview = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
+    assert again.fps.currentData() == 25
+    assert [again.fps.itemData(index) for index in range(again.fps.count())] == [15, 25, 30, 60]
+
+
 def test_save_reloads_from_a_new_store(qtbot: QtBot) -> None:
     stored = database()
     page, _opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))

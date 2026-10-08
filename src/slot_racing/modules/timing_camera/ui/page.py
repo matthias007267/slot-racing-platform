@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 _PREVIEW_INTERVAL_MS = 50
 _DEFAULT_POSITION = "start_finish"
 _RESOLUTIONS = ((320, 240), (640, 480), (800, 600), (1280, 720), (1920, 1080))
-_FRAME_RATES = (15, 30, 60)
+_FRAME_RATES = (15, 25, 30, 60)
 _State = tuple[object, ...]
 
 
