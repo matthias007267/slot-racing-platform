@@ -102,9 +102,9 @@ class RacesPlugin(Plugin):
             )
 
         def hud_settings() -> QWidget:
-            from slot_racing.modules.races.ui.hud_editor import HudEditor
+            from slot_racing.modules.races.ui.hud_editor import HudEditorLauncher
 
-            return HudEditor(translator, hud_store)
+            return HudEditorLauncher(translator, hud_store)
 
         def audio_settings() -> QWidget:
             from slot_racing.modules.races.ui.audio_settings import AudioSettings

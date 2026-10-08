@@ -1,18 +1,37 @@
-"""Settings editor for the live HUD. The preview is the same surface as a race."""
+"""Settings editor for the live HUD. The preview is the same surface as a race.
+
+The settings page only launches a window. That window keeps the navigation column of the
+live shell on the left and the real ``LiveHudStage`` on the right.
+"""
 
 from __future__ import annotations
 
+import logging
+import weakref
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import ClassVar
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QResizeEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -35,6 +54,7 @@ from slot_racing.modules.races.hud import (
     HudConfigurationStore,
     HudLayout,
     HudWidgetConfig,
+    HudWindowPlacement,
     LightFrame,
     add_layout,
     clamp_widget,
@@ -45,13 +65,23 @@ from slot_racing.modules.races.hud import (
     snap_alignment,
     snap_scale,
     snap_share,
+    to_document,
     to_pixels,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
-from slot_racing.uikit.theme import SPACE, configure_page
+from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
+from slot_racing.uikit.widgets import StatusPill
+
+logger = logging.getLogger(__name__)
+
+_MIN_WINDOW_WIDTH = 640
+_MIN_WINDOW_HEIGHT = 400
+_MAX_WINDOW_EXTENT = 10000
+_DIALOG_TEXT_SPARE = 12
+_BUTTON_CHROME = 14 * 2 + 2
 
 _HANDLE = 14
 _PREVIEW_STATUSES: tuple[tuple[str, str], ...] = (
@@ -75,6 +105,97 @@ def _clamped_frame(frame: LightFrame) -> LightFrame:
         width=clamped.width,
         height=clamped.height,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class LiveHudInsets:
+    """Pixels the shell spends around the live stage."""
+
+    navigation_width: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
+def live_hud_insets(host: QWidget | None = None) -> LiveHudInsets:
+    """Read the live HUD frame from the shell that is actually on screen.
+
+    A standalone editor falls back to the same navigation width and content margins the
+    shell uses, plus the header's size hint, so the numbers are not a second guess.
+    """
+    shell = _shell_window(host)
+    if shell is not None:
+        sidebar = shell.findChild(QWidget, "sidebar")
+        header = shell.findChild(QWidget, "shell-header")
+        content = shell.findChild(QWidget, "shell-content")
+        layout = None if content is None else content.layout()
+        if sidebar is not None and header is not None and layout is not None:
+            margins = layout.contentsMargins()
+            spacing = max(layout.spacing(), 0)
+            return LiveHudInsets(
+                navigation_width=_span(sidebar, horizontal=True),
+                left=margins.left(),
+                top=margins.top() + _span(header, horizontal=False) + spacing,
+                right=margins.right(),
+                bottom=margins.bottom(),
+            )
+    return _fallback_insets()
+
+
+def _shell_window(host: QWidget | None) -> QWidget | None:
+    current = host
+    while current is not None:
+        sidebar = current.findChild(QWidget, "sidebar")
+        content = current.findChild(QWidget, "shell-content")
+        if sidebar is not None and content is not None:
+            return current
+        current = current.parentWidget()
+    return None
+
+
+def _span(widget: QWidget, *, horizontal: bool) -> int:
+    value = widget.width() if horizontal else widget.height()
+    if value > 0:
+        return value
+    hint = widget.sizeHint()
+    hinted = hint.width() if horizontal else hint.height()
+    minimum = widget.minimumWidth() if horizontal else widget.minimumHeight()
+    return max(hinted, minimum, 1)
+
+
+_FALLBACK_TOP: int | None = None
+
+
+def _fallback_insets() -> LiveHudInsets:
+    return LiveHudInsets(
+        navigation_width=NAVIGATION_WIDTH,
+        left=SPACE.lg,
+        top=_fallback_top(),
+        right=SPACE.lg,
+        bottom=SPACE.lg,
+    )
+
+
+def _fallback_top() -> int:
+    global _FALLBACK_TOP
+    if _FALLBACK_TOP is not None:
+        return _FALLBACK_TOP
+    header = QWidget()
+    title = QLabel("Rennen")
+    set_role(title, "page-title")
+    status = StatusPill("shell-status")
+    status.set_status("Simulation", "ok")
+    row = QHBoxLayout(header)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(SPACE.md)
+    row.addWidget(title, 1)
+    row.addWidget(status, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    header.ensurePolished()
+    top = SPACE.md + max(header.sizeHint().height(), 1) + SPACE.md
+    header.deleteLater()
+    _FALLBACK_TOP = top
+    return top
 
 
 def _fresh_id(document: HudConfiguration) -> str:
@@ -343,6 +464,39 @@ class HudEditor(QWidget):
         self._apply_preview()
         self._fill_form()
 
+    def is_dirty(self) -> bool:
+        """True when the layout on screen differs from the stored document.
+
+        The simulated status and the lane count are preview-only and stay out of this check.
+        """
+        return to_document(self._config) != to_document(self._store.load())
+
+    def match_live(self) -> bool:
+        return self._match.isChecked()
+
+    def set_match_live(self, enabled: bool) -> None:
+        self._match.setChecked(enabled)
+        self.sync_chrome()
+
+    def sync_chrome(self) -> None:
+        """Keep the sidebar in the navigation column and the stage inside the live frame."""
+        insets = live_hud_insets(self)
+        self._scroll.setFixedWidth(insets.navigation_width)
+        if self.match_live():
+            self._canvas_layout.setContentsMargins(
+                insets.left, insets.top, insets.right, insets.bottom
+            )
+        else:
+            self._canvas_layout.setContentsMargins(0, 0, 0, 0)
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        self._place_lights()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.sync_chrome()
+
     def preview_start_sequence(self) -> None:
         """Play the existing start cue in the preview. It does not start a race."""
         self._stop_cue()
@@ -363,9 +517,18 @@ class HudEditor(QWidget):
         form = QWidget()
         form.setObjectName("hud-editor-form")
         column = QVBoxLayout(form)
-        column.setContentsMargins(0, 0, SPACE.sm, 0)
+        column.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
         column.setSpacing(SPACE.sm)
 
+        _heading(column, tr("hud.group.surface"))
+        self._match = QCheckBox(tr("hud.match_live"))
+        self._match.setObjectName("hud-match-live")
+        self._match.setToolTip(tr("hud.match_live.hint"))
+        self._match.setChecked(True)
+        self._match.toggled.connect(self._on_match)
+        column.addWidget(self._match)
+
+        _heading(column, tr("hud.group.layout"))
         self._layouts = QComboBox()
         self._layouts.setObjectName("hud-layout")
         self._layouts.currentIndexChanged.connect(self._on_layout)
@@ -374,19 +537,18 @@ class HudEditor(QWidget):
         self._name.editingFinished.connect(self._on_name)
         self._default_mark = QLabel()
         self._default_mark.setObjectName("hud-default-mark")
+        self._default_mark.setWordWrap(True)
         column.addWidget(self._layouts)
         column.addWidget(self._name)
         column.addWidget(self._default_mark)
-
-        actions = QHBoxLayout()
         self._new = _button("hud-layout-new", tr("hud.layout.new"), self._on_new)
         self._delete = _button("hud-layout-delete", tr("hud.layout.delete"), self.delete_selected)
         self._default = _button("hud-set-default", tr("hud.layout.default"), self.mark_default)
-        actions.addWidget(self._new)
-        actions.addWidget(self._delete)
-        column.addLayout(actions)
+        column.addWidget(self._new)
+        column.addWidget(self._delete)
         column.addWidget(self._default)
 
+        _heading(column, tr("hud.group.text"))
         self._font = _scale_spin("hud-font-scale")
         self._font.valueChanged.connect(self._on_font)
         _row(column, tr("hud.font_scale"), self._font)
@@ -397,6 +559,7 @@ class HudEditor(QWidget):
         self._alignment.currentIndexChanged.connect(self._on_alignment)
         _row(column, tr("hud.alignment"), self._alignment)
 
+        _heading(column, tr("hud.group.fields"))
         self._visible: dict[str, QCheckBox] = {}
         self._scales: dict[str, QSpinBox] = {}
         for field_id in FIELD_IDS:
@@ -409,13 +572,12 @@ class HudEditor(QWidget):
             scale.valueChanged.connect(
                 lambda value, field=field_id: self._on_field_scale(field, value)
             )
-            line = QHBoxLayout()
-            line.addWidget(checkbox, 1)
-            line.addWidget(scale)
-            column.addLayout(line)
+            column.addWidget(checkbox)
+            column.addWidget(scale)
             self._visible[field_id] = checkbox
             self._scales[field_id] = scale
 
+        _heading(column, tr("hud.group.shares"))
         self._shares: dict[str, QSpinBox] = {}
         for part in ("clock", "status", "lanes", "ranking"):
             spin = QSpinBox()
@@ -425,6 +587,7 @@ class HudEditor(QWidget):
             self._shares[part] = spin
             _row(column, tr(f"hud.share.{part}"), spin)
 
+        _heading(column, tr("hud.group.lights"))
         self._lights_visible = QCheckBox(tr("hud.lights.visible"))
         self._lights_visible.setObjectName("hud-lights-visible")
         self._lights_visible.toggled.connect(self._on_lights_visible)
@@ -438,15 +601,12 @@ class HudEditor(QWidget):
             spin.valueChanged.connect(self._on_light_spin)
             self._light_spins[axis] = spin
             _row(column, tr(f"hud.lights.{axis}"), spin)
-        light_actions = QHBoxLayout()
-        light_actions.addWidget(
-            _button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights)
-        )
-        light_actions.addWidget(
+        column.addWidget(_button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights))
+        column.addWidget(
             _button("hud-lights-preview", tr("hud.lights.preview"), self.preview_start_sequence)
         )
-        column.addLayout(light_actions)
 
+        _heading(column, tr("hud.group.preview"))
         self._status = QComboBox()
         self._status.setObjectName("hud-preview-status")
         for key, label_key in _PREVIEW_STATUSES:
@@ -459,26 +619,33 @@ class HudEditor(QWidget):
         self._lanes.valueChanged.connect(self._on_preview_lanes)
         _row(column, tr("hud.preview.lanes"), self._lanes)
 
-        store_actions = QHBoxLayout()
-        store_actions.addWidget(
-            _button("hud-standard", tr("hud.standard"), self.apply_standard_layout)
-        )
-        store_actions.addWidget(_button("hud-save", tr("hud.save"), self.save_persistent))
-        store_actions.addWidget(_button("hud-revert", tr("hud.revert"), self.revert))
-        column.addLayout(store_actions)
+        column.addWidget(_button("hud-standard", tr("hud.standard"), self.apply_standard_layout))
+        column.addWidget(_button("hud-save", tr("hud.save"), self.save_persistent))
+        column.addWidget(_button("hud-revert", tr("hud.revert"), self.revert))
         column.addStretch(1)
 
         scroll = QScrollArea()
+        scroll.setObjectName("hud-editor-sidebar")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(form)
-        scroll.setMinimumWidth(340)
-        scroll.setMaximumWidth(460)
+        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._scroll = scroll
+
+        canvas = QWidget()
+        canvas.setObjectName("hud-live-canvas")
+        canvas_layout = QVBoxLayout(canvas)
+        canvas_layout.setSpacing(0)
+        canvas_layout.addWidget(self.preview, 1)
+        self._canvas_layout = canvas_layout
 
         layout = QHBoxLayout(self)
-        configure_page(layout)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(scroll)
-        layout.addWidget(self.preview, 1)
+        layout.addWidget(canvas, 1)
+        self.sync_chrome()
 
     def _commit(self, layout: HudLayout) -> None:
         self._config = replace_layout(replace(self._config, selected_id=layout.id), layout)
@@ -681,6 +848,9 @@ class HudEditor(QWidget):
         if frame != current:
             self.set_light_frame(frame)
 
+    def _on_match(self, _checked: bool) -> None:
+        self.sync_chrome()
+
     def _on_preview_status(self) -> None:
         if self._filling:
             return
@@ -737,8 +907,16 @@ def _scale_spin(object_name: str) -> QSpinBox:
 def _button(object_name: str, text: str, slot: Callable[[], None]) -> QPushButton:
     button = QPushButton(text)
     button.setObjectName(object_name)
+    button.setProperty("compact", True)
+    button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     button.clicked.connect(slot)
     return button
+
+
+def _heading(parent: QVBoxLayout, text: str) -> None:
+    label = QLabel(text)
+    set_role(label, "section")
+    parent.addWidget(label)
 
 
 def _row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
@@ -751,3 +929,228 @@ def _row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
 
 def _percent(value: float) -> int:
     return round(value * 100)
+
+
+class HudEditorWindow(QMainWindow):
+    """One maximizable editor. Closing it leaves the main window running."""
+
+    _open: ClassVar[dict[int, weakref.ReferenceType[HudEditorWindow]]] = {}
+
+    def __init__(
+        self, parent: QWidget, translator: Translator, store: HudConfigurationStore
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+        self.setWindowTitle(translator.translate("hud.window.title"))
+        self._translator = translator
+        self._store = store
+        self._forced_close = False
+        self._want_maximized = False
+        self.editor = HudEditor(translator, store)
+        self.setCentralWidget(self.editor)
+        placement = store.load_window()
+        self.editor.set_match_live(placement.match_live)
+        self._restore_geometry(placement)
+        if parent is not None:
+            parent.installEventFilter(self)
+
+    @classmethod
+    def present(
+        cls, parent: QWidget, translator: Translator, store: HudConfigurationStore
+    ) -> HudEditorWindow:
+        """Show the editor for this store. A second call raises the window that is already open."""
+        key = id(store)
+        current = cls._current(key)
+        if current is None:
+            current = cls(parent, translator, store)
+            cls._open[key] = weakref.ref(current)
+        elif not current.isVisible() and not current.editor.is_dirty():
+            current.editor.revert()
+        if current.isMinimized():
+            current.showNormal()
+        current.show()
+        current.raise_()
+        current.activateWindow()
+        return current
+
+    @classmethod
+    def _current(cls, key: int) -> HudEditorWindow | None:
+        ref = cls._open.get(key)
+        current = None if ref is None else ref()
+        if current is None:
+            cls._open.pop(key, None)
+        return current
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if self._forced_close:
+            return super().eventFilter(watched, event)
+        if watched is self.parentWidget() and event.type() == QEvent.Type.Hide:
+            self._forced_close = True
+            try:
+                self.close()
+            finally:
+                self._forced_close = False
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self._forced_close and self.editor.is_dirty():
+            choice = self._ask_unsaved()
+            if choice is None:
+                event.ignore()
+                return
+            if choice == "save":
+                self.editor.save()
+            else:
+                self.editor.revert()
+        self.editor._stop_cue()
+        self._remember_geometry()
+        super().closeEvent(event)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._want_maximized:
+            self._want_maximized = False
+            self.showMaximized()
+
+    def _ask_unsaved(self) -> str | None:
+        tr = self._translator.translate
+        box = QMessageBox(self)
+        box.setObjectName("hud-close-dialog")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr("hud.window.title"))
+        box.setText(tr("hud.close.unsaved"))
+        save = box.addButton(tr("hud.close.save"), QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton(tr("hud.close.discard"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(tr("hud.close.cancel"), QMessageBox.ButtonRole.RejectRole)
+        save.setObjectName("hud-close-save")
+        discard.setObjectName("hud-close-discard")
+        cancel.setObjectName("hud-close-cancel")
+        box.setDefaultButton(cancel)
+        _keep_dialog_text_visible(box)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save:
+            return "save"
+        if clicked is discard:
+            return "discard"
+        return None
+
+    def _restore_geometry(self, placement: HudWindowPlacement) -> None:
+        self._want_maximized = placement.maximized
+        width = placement.width
+        height = placement.height
+        if (
+            isinstance(width, int)
+            and isinstance(height, int)
+            and _usable_window_size(width, height)
+        ):
+            self.resize(width, height)
+        else:
+            self._apply_default_size()
+        x = placement.x
+        y = placement.y
+        if isinstance(x, int) and isinstance(y, int) and _usable_window_position(x, y):
+            self.move(x, y)
+
+    def _apply_default_size(self) -> None:
+        parent = self.parentWidget()
+        if (
+            isinstance(parent, QWidget)
+            and parent.isVisible()
+            and parent.width() >= _MIN_WINDOW_WIDTH
+            and parent.height() >= _MIN_WINDOW_HEIGHT
+        ):
+            self.resize(parent.size())
+            self.move(parent.pos())
+            return
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1400, 900)
+            return
+        available = screen.availableGeometry()
+        width = min(max(int(available.width() * 0.92), _MIN_WINDOW_WIDTH), available.width())
+        height = min(max(int(available.height() * 0.92), _MIN_WINDOW_HEIGHT), available.height())
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+
+    def _remember_geometry(self) -> None:
+        maximized = bool(self.windowState() & Qt.WindowState.WindowMaximized)
+        geo = self.normalGeometry() if maximized else self.geometry()
+        if not _usable_window_size(geo.width(), geo.height()):
+            geo = self.geometry()
+        width = geo.width() if _usable_window_size(geo.width(), geo.height()) else None
+        height = geo.height() if width is not None else None
+        x = geo.x() if _usable_window_position(geo.x(), geo.y()) else None
+        y = geo.y() if x is not None else None
+        try:
+            self._store.save_window(
+                HudWindowPlacement(
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    maximized=maximized,
+                    match_live=self.editor.match_live(),
+                )
+            )
+        except Exception:
+            logger.exception("Could not store the HUD editor window")
+
+
+class HudEditorLauncher(QWidget):
+    """Settings entry. The editor itself lives in its own window."""
+
+    def __init__(self, translator: Translator, store: HudConfigurationStore) -> None:
+        super().__init__()
+        self.setObjectName("race-hud-settings")
+        self._translator = translator
+        self._store = store
+        button = QPushButton(translator.translate("hud.open_editor"))
+        button.setObjectName("hud-open-editor")
+        button.clicked.connect(self.open_editor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(button)
+
+    def open_editor(self) -> HudEditorWindow:
+        return HudEditorWindow.present(self.window(), self._translator, self._store)
+
+
+def _usable_window_size(width: int | None, height: int | None) -> bool:
+    return (
+        isinstance(width, int)
+        and isinstance(height, int)
+        and _MIN_WINDOW_WIDTH <= width <= _MAX_WINDOW_EXTENT
+        and _MIN_WINDOW_HEIGHT <= height <= _MAX_WINDOW_EXTENT
+    )
+
+
+def _usable_window_position(x: int | None, y: int | None) -> bool:
+    return (
+        isinstance(x, int)
+        and isinstance(y, int)
+        and abs(x) <= _MAX_WINDOW_EXTENT
+        and abs(y) <= _MAX_WINDOW_EXTENT
+    )
+
+
+def _keep_dialog_text_visible(box: QMessageBox) -> None:
+    """Widen the message and its buttons so the last letter is not clipped."""
+    label = box.findChild(QLabel, "qt_msgbox_label")
+    if label is not None and label.text():
+        label.ensurePolished()
+        widest = max(
+            label.fontMetrics().horizontalAdvance(line) for line in label.text().splitlines()
+        )
+        label.setMinimumWidth(widest + _DIALOG_TEXT_SPARE)
+    for button in box.buttons():
+        if not isinstance(button, QPushButton) or not button.text():
+            continue
+        button.ensurePolished()
+        advance = button.fontMetrics().horizontalAdvance(button.text())
+        button.setMinimumWidth(
+            max(button.sizeHint().width(), advance + _BUTTON_CHROME) + _DIALOG_TEXT_SPARE
+        )

@@ -11,12 +11,14 @@ from slot_racing.core.storage import Database, Setting
 from slot_racing.modules.races.hud import (
     HUD_CONFIGURATION_KEY,
     HUD_VERSION,
+    HUD_WINDOW_KEY,
     MIN_SPAN,
     STANDARD_LAYOUT_ID,
     FieldStyle,
     HudConfiguration,
     HudConfigurationStore,
     HudWidgetConfig,
+    HudWindowPlacement,
     LightFrame,
     add_layout,
     clamp_widget,
@@ -30,6 +32,7 @@ from slot_racing.modules.races.hud import (
     snap_scale,
     to_document,
     to_pixels,
+    window_placement,
 )
 
 
@@ -224,6 +227,39 @@ def test_a_stored_document_with_the_wrong_version_uses_the_factory_layout() -> N
         assert row is not None
         row.value = "not-an-object"
     assert store.load().default_layout() == default_hud_configuration().default_layout()
+
+
+def test_the_editor_window_is_stored_apart_from_the_layout_document() -> None:
+    database = _database()
+    store = HudConfigurationStore(database)
+    assert store.load_window() == HudWindowPlacement()
+    store.save_window(
+        HudWindowPlacement(x=20, y=40, width=1280, height=800, maximized=True, match_live=False)
+    )
+    assert store.load_window() == HudWindowPlacement(
+        x=20, y=40, width=1280, height=800, maximized=True, match_live=False
+    )
+    assert store.load().version == HUD_VERSION
+    with database.session() as session:
+        layout = session.get(Setting, HUD_CONFIGURATION_KEY)
+        window = session.get(Setting, HUD_WINDOW_KEY)
+        assert layout is None
+        assert window is not None
+        assert window.value["maximized"] is True
+        assert "layouts" not in window.value
+
+
+def test_a_broken_editor_window_falls_back_to_the_default_placement() -> None:
+    assert window_placement(None) == HudWindowPlacement()
+    assert window_placement({"width": "wide", "match_live": False}) == HudWindowPlacement(
+        match_live=False
+    )
+    assert window_placement({}).match_live is True
+    database = _database()
+    store = HudConfigurationStore(database)
+    with database.session() as session:
+        session.add(Setting(key=HUD_WINDOW_KEY, value=["nope"]))
+    assert store.load_window() == HudWindowPlacement()
 
 
 def _database() -> Database:

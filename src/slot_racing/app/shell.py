@@ -18,7 +18,7 @@ from slot_racing.app.runtime import Runtime
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.uikit.icons import nav_icon
 from slot_racing.uikit.providers import provider_label
-from slot_racing.uikit.theme import SPACE, set_role
+from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
 from slot_racing.uikit.widgets import StatusPill
 
 
@@ -30,7 +30,7 @@ class Sidebar(QWidget):
     def __init__(self, brand: str) -> None:
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(228)
+        self.setFixedWidth(NAVIGATION_WIDTH)
         self._buttons: dict[str, QPushButton] = {}
         self._order: list[str] = []
         self._current: str | None = None
