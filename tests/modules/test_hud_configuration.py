@@ -12,6 +12,9 @@ from slot_racing.modules.races.hud import (
     HUD_CONFIGURATION_KEY,
     HUD_VERSION,
     HUD_WINDOW_KEY,
+    LIGHT_ASPECT,
+    LIGHT_SCALE_MIN,
+    LIGHT_STANDARD_WIDTH,
     MIN_SPAN,
     STANDARD_LAYOUT_ID,
     FieldStyle,
@@ -25,8 +28,13 @@ from slot_racing.modules.races.hud import (
     coerce,
     default_hud_configuration,
     delete_layout,
+    effective_light_scale,
     effective_px,
     factory_layout,
+    light_frame,
+    light_frame_from_box,
+    light_pixels,
+    light_scale_limits,
     mark_default,
     replace_layout,
     snap_scale,
@@ -110,6 +118,76 @@ def test_normalized_coordinates_become_pixels_for_each_window_size() -> None:
         assert rect.height >= 1
 
 
+def test_a_saved_light_scale_roundtrips_and_old_rectangles_become_one_scale() -> None:
+    stored = light_frame(x=0.12, y=0.18, scale=160, visible=True)
+    document = replace_layout(
+        default_hud_configuration(),
+        replace(factory_layout(), lights=stored),
+    )
+    loaded = coerce(to_document(document))
+    assert loaded.selected().lights.scale == 160
+    assert loaded.selected().lights.width == pytest.approx(LIGHT_STANDARD_WIDTH * 1.6)
+    assert loaded.selected().font_scale == 100
+
+    legacy = coerce(
+        {
+            "version": 2,
+            "selected_id": "standard",
+            "default_id": "standard",
+            "layouts": [
+                {
+                    "id": "standard",
+                    "name": "Standard",
+                    "builtin": True,
+                    "lights": {"visible": True, "x": 0.2, "y": 0.1, "width": 0.4, "height": 0.9},
+                }
+            ],
+        }
+    )
+    lights = legacy.selected().lights
+    assert lights.scale == 80
+    wide = light_pixels(lights, 1600, 900)
+    tall = light_pixels(lights, 900, 1600)
+    assert abs(wide.width / wide.height - LIGHT_ASPECT) < 0.02
+    assert abs(tall.width / tall.height - LIGHT_ASPECT) < 0.02
+    low, high = light_scale_limits(1600, 900)
+    assert low == LIGHT_SCALE_MIN
+    assert high == 200
+    filled = light_pixels(light_frame(scale=high), 1600, 900)
+    assert filled.width >= 1600 - 2
+    assert filled.x + filled.width <= 1600
+    assert filled.y + filled.height <= 900
+
+
+def test_a_short_surface_limits_the_scale_and_keeps_the_aspect() -> None:
+    low, high = light_scale_limits(1200, 180)
+    assert low == LIGHT_SCALE_MIN
+    assert high < 100
+    frame = light_frame(x=0.4, y=0.8, scale=180)
+    assert frame.scale == 180
+    assert effective_light_scale(180, 1200, 180) == high
+    pixels = light_pixels(frame, 1200, 180)
+    assert pixels.width <= 1200
+    assert pixels.height <= 180
+    assert pixels.x + pixels.width <= 1200
+    assert pixels.y + pixels.height <= 180
+    assert abs(pixels.width / pixels.height - LIGHT_ASPECT) < 0.05
+    wide = light_pixels(frame, 2560, 1440)
+    small = light_pixels(frame, 640, 360)
+    assert abs(wide.width / 2560 - small.width / 640) < 0.02
+    dragged = light_frame_from_box(30, 40, 900, 40, 1600, 900, visible=True)
+    placed = light_pixels(dragged, 1600, 900)
+    assert dragged.scale == 112
+    assert placed.height > 40
+    assert abs(placed.width / placed.height - LIGHT_ASPECT) < 0.02
+    filled = light_frame_from_box(0, 0, 4000, 80, 1600, 900, visible=True)
+    assert filled.scale == light_scale_limits(1600, 900)[1]
+    box = light_pixels(filled, 1600, 900)
+    assert box.width > 92 * 7.6
+    assert box.x + box.width <= 1600
+    assert box.y + box.height <= 900
+
+
 def test_a_version_one_document_becomes_the_factory_layout() -> None:
     parsed = coerce(
         {
@@ -170,7 +248,8 @@ def test_a_partial_document_keeps_known_fields_and_the_factory_layout() -> None:
     assert custom.field("driver") == FieldStyle(False, 150)
     assert custom.field("lap") == FieldStyle()
     assert custom.lights.visible is False
-    assert custom.lights.width == MIN_SPAN
+    assert custom.lights.scale == LIGHT_SCALE_MIN
+    assert custom.lights.width == pytest.approx(LIGHT_STANDARD_WIDTH * LIGHT_SCALE_MIN / 100)
     assert custom.lights.x + custom.lights.width <= 1
 
 

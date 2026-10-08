@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
@@ -11,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSlider,
     QSpinBox,
     QWidget,
 )
@@ -22,10 +26,14 @@ from slot_racing.core.storage import Database, Setting
 from slot_racing.modules.races.hud import (
     FIELD_DRIVER,
     HUD_CONFIGURATION_KEY,
+    LIGHT_ASPECT,
     HudConfiguration,
     HudConfigurationStore,
     LightFrame,
-    to_pixels,
+    effective_light_scale,
+    light_frame,
+    light_pixels,
+    light_scale_limits,
 )
 from slot_racing.modules.races.translations import TRANSLATIONS
 from slot_racing.modules.races.ui.hud_editor import HudEditor, HudEditorWindow
@@ -451,6 +459,138 @@ def test_a_failed_save_keeps_the_editor_open(qtbot: QtBot, env: Env) -> None:
     assert editor.selected_layout().font_scale == 125
 
 
+def test_one_slider_and_the_grip_scale_the_gantry_together(qtbot: QtBot) -> None:
+    editor = _shown(qtbot)
+    assert editor.findChild(QSpinBox, "hud-lights-width") is None
+    assert editor.findChild(QSpinBox, "hud-lights-height") is None
+    assert editor.findChild(QSpinBox, "hud-lights-x") is not None
+    assert editor.findChild(QSpinBox, "hud-lights-y") is not None
+    slider = editor.findChild(QSlider, "hud-lights-scale")
+    readout = editor.findChild(QLabel, "hud-lights-scale-readout")
+    assert isinstance(slider, QSlider)
+    assert isinstance(readout, QLabel)
+    assert readout.text() == "100 %"
+    assert any(label.text() == "Ampelgröße" for label in editor.findChildren(QLabel))
+    low, high = light_scale_limits(editor.stage.width(), editor.stage.height())
+    assert slider.minimum() == low
+    assert slider.maximum() == high
+    assert high > 100
+
+    surface = _surface(editor)
+    cards = _card_boxes(editor)
+    others = editor.selected_layout()
+    before = editor.lights.width()
+    slider.setValue(high)
+    QApplication.processEvents()
+    grown = editor.selected_layout().lights
+    assert grown.scale == high
+    assert readout.text() == f"{high} %"
+    assert slider.value() == high
+    assert editor.lights.width() > before
+    assert editor.lights.lamp_rects()[0].width() > 92
+    _assert_locked_aspect(editor)
+    _assert_placed(editor)
+    assert _surface(editor) == surface
+    assert _card_boxes(editor) == cards
+    assert editor.selected_layout().font_scale == others.font_scale
+    assert editor.selected_layout().fields == others.fields
+    assert editor.selected_layout().lanes_share == others.lanes_share
+
+    handle = editor.handle
+    corner = (handle.width() - 2, handle.height() - 2)
+    _mouse(handle, QEvent.Type.MouseButtonPress, corner, (500, 400))
+    _mouse(handle, QEvent.Type.MouseMove, corner, (380, 400))
+    _mouse(handle, QEvent.Type.MouseButtonRelease, corner, (380, 400))
+    QApplication.processEvents()
+    shrunk = editor.selected_layout().lights
+    assert shrunk.scale < grown.scale
+    assert slider.value() == effective_light_scale(
+        shrunk.scale, editor.stage.width(), editor.stage.height()
+    )
+    assert readout.text() == f"{slider.value()} %"
+    assert abs(shrunk.width / shrunk.height - grown.width / grown.height) < 0.02
+    _assert_locked_aspect(editor)
+    _assert_placed(editor)
+    assert _surface(editor) == surface
+    assert _card_boxes(editor) == cards
+
+    slider.setValue(shrunk.scale)
+    QApplication.processEvents()
+    assert editor.selected_layout().lights.scale == shrunk.scale
+    assert editor.handle.geometry() == editor.lights.geometry()
+
+    stored = editor.selected_layout().lights.scale
+    for width, height in ((960, 640), (1280, 800), (1680, 980)):
+        editor.resize(width, height)
+        QApplication.processEvents()
+        qtbot.waitUntil(lambda: editor.stage.width() > 200 and editor.stage.height() > 120)
+        assert editor.selected_layout().lights.scale == stored
+        shown = effective_light_scale(stored, editor.stage.width(), editor.stage.height())
+        assert slider.value() == shown
+        assert (
+            slider.maximum() == light_scale_limits(editor.stage.width(), editor.stage.height())[1]
+        )
+        _assert_locked_aspect(editor)
+        _assert_placed(editor)
+        assert editor.lights.width() <= editor.stage.width()
+        assert editor.lights.height() <= editor.stage.height()
+
+    hidden = _surface(editor)
+    hidden_cards = _card_boxes(editor)
+    editor.set_light_frame(replace(editor.selected_layout().lights, visible=False))
+    QApplication.processEvents()
+    assert editor.lights.isHidden()
+    assert _surface(editor) == hidden
+    assert _card_boxes(editor) == hidden_cards
+
+
+def test_a_saved_light_scale_reloads_and_matches_the_live_view(qtbot: QtBot, env: Env) -> None:
+    store = env.runtime.services.get(HudConfigurationStore)
+    assert isinstance(store, HudConfigurationStore)
+    editor = _shown(qtbot, store)
+    editor.set_light_frame(light_frame(visible=True, x=0.08, y=0.12, scale=170))
+    QApplication.processEvents()
+    _assert_locked_aspect(editor)
+    _assert_placed(editor)
+    button = editor.findChild(QPushButton, "hud-set-default")
+    assert button is not None
+    button.click()
+    close = editor.findChild(QPushButton, "hud-save-close")
+    assert close is not None and close.text() == "Speichern und Schließen"
+    editor.save_and_close()
+    loaded = store.load()
+    assert loaded.default_layout().lights.scale == 170
+    assert loaded.default_layout().font_scale == 100
+    assert loaded.default_layout().lights.width == pytest.approx(0.50 * 1.70)
+
+    live = LiveRaceView(
+        env.runtime.translator, env.controller, store, env.races, env.runtime.config
+    )
+    qtbot.addWidget(live)
+    live.resize(1500, 900)
+    live.show()
+    live.start_lights.show_lights(3)
+    qtbot.waitUntil(lambda: live.stage.width() > 200 and live.start_lights.width() > 40)
+    assert live.bound_layout().lights.scale == 170
+    assert live.start_lights.lit_lights == 3
+    editor_box = _stage_box(editor.lights, editor.stage, editor.preview)
+    live_box = _stage_box(live.start_lights, live.stage, live)
+    assert abs(editor_box[2] - live_box[2]) < 0.02
+    assert abs(editor_box[0] - live_box[0]) < 0.02
+    assert abs(editor_box[1] - live_box[1]) < 0.03
+    assert abs(editor_box[3] - LIGHT_ASPECT) < 0.04
+    assert abs(live_box[3] - LIGHT_ASPECT) < 0.04
+    surface = (
+        live.clock.geometry(),
+        live.lanes.geometry(),
+        live.ranking.geometry(),
+    )
+    live.start_lights.clear()
+    QApplication.processEvents()
+    assert live.start_lights.isHidden()
+    assert (live.clock.geometry(), live.lanes.geometry(), live.ranking.geometry()) == surface
+
+
 def test_the_light_overlay_stays_on_the_editor_stage(qtbot: QtBot, env: Env) -> None:
     window = _main(qtbot, env)
     editor_window = _open_editor(window)
@@ -575,9 +715,30 @@ def _surface(editor: HudEditor) -> tuple[QRect, ...]:
     )
 
 
+def _assert_locked_aspect(editor: HudEditor) -> None:
+    lights = editor.lights
+    assert lights.height() == max(1, round(lights.width() / LIGHT_ASPECT))
+    lamps = lights.lamp_rects()
+    assert len(lamps) == 5
+    for lamp in lamps:
+        assert abs(lamp.width() - lamp.height()) < 0.6
+        assert lamp.left() >= -0.5
+        assert lamp.right() <= lights.width() + 0.5
+
+
+def _stage_box(widget: QWidget, stage: QWidget, host: QWidget) -> tuple[float, float, float, float]:
+    origin = stage.mapTo(host, QPoint(0, 0))
+    return (
+        (widget.x() - origin.x()) / stage.width(),
+        (widget.y() - origin.y()) / stage.height(),
+        widget.width() / stage.width(),
+        widget.width() / widget.height(),
+    )
+
+
 def _assert_placed(editor: HudEditor) -> None:
     frame = editor.selected_layout().lights
-    rect = to_pixels(frame.as_config(), editor.stage.width(), editor.stage.height())
+    rect = light_pixels(frame, editor.stage.width(), editor.stage.height())
     origin = editor.stage.mapTo(editor.preview, QPoint(0, 0))
     placed = QRect(origin.x() + rect.x, origin.y() + rect.y, rect.width, rect.height)
     assert editor.lights.geometry() == placed

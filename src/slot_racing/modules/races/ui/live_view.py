@@ -30,7 +30,7 @@ from slot_racing.modules.races.hud import (
     HudLayout,
     LightFrame,
     default_hud_configuration,
-    to_pixels,
+    light_pixels,
 )
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
@@ -248,7 +248,7 @@ class LiveRaceView(QWidget):
         target = self.board if self.stage.isHidden() and not self.board.isHidden() else self.stage
         if target.width() <= 1 or target.height() <= 1:
             return
-        rect = to_pixels(self._light_frame.as_config(), target.width(), target.height())
+        rect = light_pixels(self._light_frame, target.width(), target.height())
         origin = target.mapTo(self, QPoint(0, 0))
         placed = QRect(origin.x() + rect.x, origin.y() + rect.y, rect.width, rect.height)
         if self.start_lights.geometry() != placed:

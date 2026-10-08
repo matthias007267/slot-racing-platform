@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -44,6 +45,7 @@ from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
     FIELD_IDS,
+    LIGHT_ASPECT,
     SCALE_MAX,
     SCALE_MIN,
     SCALE_STEP,
@@ -53,20 +55,23 @@ from slot_racing.modules.races.hud import (
     HudConfiguration,
     HudConfigurationStore,
     HudLayout,
-    HudWidgetConfig,
     HudWindowPlacement,
     LightFrame,
     add_layout,
-    clamp_widget,
     delete_layout,
+    effective_light_scale,
     factory_layout,
+    light_frame,
+    light_frame_from_box,
+    light_pixels,
+    light_scale_limits,
     mark_default,
+    normalize_light,
     replace_layout,
     snap_alignment,
     snap_scale,
     snap_share,
     to_document,
-    to_pixels,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
@@ -93,19 +98,6 @@ _PREVIEW_STATUSES: tuple[tuple[str, str], ...] = (
 )
 _DRIVERS = ("Zoe", "Anna", "Ben", "Mia")
 _VEHICLES = ("Porsche 911", "Ferrari 488", "Audi R8", "BMW M4")
-
-
-def _clamped_frame(frame: LightFrame) -> LightFrame:
-    clamped = clamp_widget(
-        HudWidgetConfig("start_lights", frame.visible, frame.x, frame.y, frame.width, frame.height)
-    )
-    return LightFrame(
-        visible=frame.visible,
-        x=clamped.x,
-        y=clamped.y,
-        width=clamped.width,
-        height=clamped.height,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,8 +290,9 @@ class LightHandle(QWidget):
         if mode == "move":
             rect.translate(delta)
         else:
-            rect.setWidth(max(_HANDLE * 2, origin.width() + delta.x()))
-            rect.setHeight(max(_HANDLE * 2, origin.height() + delta.y()))
+            width = max(_HANDLE * 2, origin.width() + delta.x())
+            rect.setWidth(width)
+            rect.setHeight(max(_HANDLE * 2, round(width / LIGHT_ASPECT)))
         self.setGeometry(rect)
         self.moved.emit(rect.x(), rect.y(), rect.width(), rect.height())
         event.accept()
@@ -434,7 +427,7 @@ class HudEditor(QWidget):
             self._commit(updated)
 
     def set_light_frame(self, frame: LightFrame) -> None:
-        self._commit(replace(self.selected_layout(), lights=_clamped_frame(frame)))
+        self._commit(replace(self.selected_layout(), lights=normalize_light(frame)))
 
     def reset_lights(self) -> None:
         self._commit(replace(self.selected_layout(), lights=LightFrame()))
@@ -621,7 +614,7 @@ class HudEditor(QWidget):
         self._lights_visible.toggled.connect(self._on_lights_visible)
         column.addWidget(self._lights_visible)
         self._light_spins: dict[str, QSpinBox] = {}
-        for axis in ("x", "y", "width", "height"):
+        for axis in ("x", "y"):
             spin = QSpinBox()
             spin.setObjectName(f"hud-lights-{axis}")
             spin.setSuffix(" %")
@@ -629,6 +622,18 @@ class HudEditor(QWidget):
             spin.valueChanged.connect(self._on_light_spin)
             self._light_spins[axis] = spin
             _row(column, tr(f"hud.lights.{axis}"), spin)
+        self._light_scale = QSlider(Qt.Orientation.Horizontal)
+        self._light_scale.setObjectName("hud-lights-scale")
+        self._light_scale.setRange(20, 200)
+        self._light_scale.valueChanged.connect(self._on_light_scale)
+        self._light_readout = QLabel("100 %")
+        self._light_readout.setObjectName("hud-lights-scale-readout")
+        scale_row = QWidget()
+        scale_line = QHBoxLayout(scale_row)
+        scale_line.setContentsMargins(0, 0, 0, 0)
+        scale_line.addWidget(self._light_scale, 1)
+        scale_line.addWidget(self._light_readout)
+        _row(column, tr("hud.lights.scale"), scale_row)
         column.addWidget(_button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights))
         column.addWidget(
             _button("hud-lights-preview", tr("hud.lights.preview"), self.preview_start_sequence)
@@ -728,36 +733,58 @@ class HudEditor(QWidget):
             self._shares["status"].setValue(layout.status_share)
             self._shares["lanes"].setValue(layout.lanes_share)
             self._shares["ranking"].setValue(layout.ranking_share)
-            self._sync_light_spins(layout.lights)
+            self._sync_light_controls(layout.lights)
             self._status.setCurrentIndex(max(self._status.findData(self._preview_status), 0))
             self._lanes.setValue(self._preview_lanes)
         finally:
             self._filling = False
 
-    def _sync_light_spins(self, frame: LightFrame) -> None:
-        width = _percent(frame.width)
-        height = _percent(frame.height)
-        self._light_spins["width"].setRange(6, 100)
-        self._light_spins["height"].setRange(6, 100)
-        self._light_spins["width"].setValue(width)
-        self._light_spins["height"].setValue(height)
-        self._light_spins["x"].setRange(0, max(0, 100 - width))
-        self._light_spins["y"].setRange(0, max(0, 100 - height))
-        self._light_spins["x"].setValue(min(_percent(frame.x), self._light_spins["x"].maximum()))
-        self._light_spins["y"].setValue(min(_percent(frame.y), self._light_spins["y"].maximum()))
-        self._lights_visible.setChecked(frame.visible)
+    def _sync_light_controls(self, frame: LightFrame) -> None:
+        stage_w = self.stage.width()
+        stage_h = self.stage.height()
+        low, high = light_scale_limits(stage_w, stage_h)
+        shown = effective_light_scale(frame.scale, stage_w, stage_h)
+        pixels = light_pixels(frame, stage_w, stage_h)
+        width_pct = 0 if stage_w <= 1 else round(pixels.width / stage_w * 100)
+        height_pct = 0 if stage_h <= 1 else round(pixels.height / stage_h * 100)
+        controls = (
+            self._light_scale,
+            self._light_spins["x"],
+            self._light_spins["y"],
+            self._lights_visible,
+        )
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            self._light_scale.setRange(low, high)
+            self._light_scale.setValue(shown)
+            self._light_readout.setText(f"{shown} %")
+            self._light_spins["x"].setRange(0, max(0, 100 - width_pct))
+            self._light_spins["y"].setRange(0, max(0, 100 - height_pct))
+            if stage_w > 1:
+                self._light_spins["x"].setValue(
+                    min(round(pixels.x / stage_w * 100), self._light_spins["x"].maximum())
+                )
+            if stage_h > 1:
+                self._light_spins["y"].setValue(
+                    min(round(pixels.y / stage_h * 100), self._light_spins["y"].maximum())
+                )
+            self._lights_visible.setChecked(frame.visible)
+        finally:
+            for control in controls:
+                control.blockSignals(False)
 
     def _place_lights(self, *, move_handle: bool = True) -> None:
         stage = self.stage
         if stage.width() <= 1 or stage.height() <= 1:
             return
         frame = self.selected_layout().lights
-        rect = to_pixels(frame.as_config(), stage.width(), stage.height())
+        rect = light_pixels(frame, stage.width(), stage.height())
         origin = stage.mapTo(self.preview, QPoint(0, 0))
         placed = QRect(origin.x() + rect.x, origin.y() + rect.y, rect.width, rect.height)
         if self.lights.geometry() != placed:
             self.lights.setGeometry(placed)
-        if move_handle and not self.handle.is_dragging() and self.handle.geometry() != placed:
+        if move_handle and self.handle.geometry() != placed:
             self.handle.setGeometry(placed)
         sequence = self._cue is not None
         if frame.visible or sequence:
@@ -767,34 +794,27 @@ class HudEditor(QWidget):
         elif not self.lights.isHidden():
             self.lights.clear()
         self.handle.raise_()
+        self._sync_light_controls(frame)
 
     def _frame_from_handle(self, x: int, y: int, width: int, height: int) -> LightFrame:
         stage = self.stage
         origin = stage.mapTo(self.preview, QPoint(0, 0))
-        surface_w = max(stage.width(), 1)
-        surface_h = max(stage.height(), 1)
         current = self.selected_layout().lights
-        return _clamped_frame(
-            LightFrame(
-                visible=current.visible,
-                x=(x - origin.x()) / surface_w,
-                y=(y - origin.y()) / surface_h,
-                width=width / surface_w,
-                height=height / surface_h,
-            )
+        return light_frame_from_box(
+            x - origin.x(),
+            y - origin.y(),
+            width,
+            height,
+            max(stage.width(), 1),
+            max(stage.height(), 1),
+            visible=current.visible,
         )
 
     def _on_handle(self, x: int, y: int, width: int, height: int) -> None:
         frame = self._frame_from_handle(x, y, width, height)
         layout = replace(self.selected_layout(), lights=frame)
         self._config = replace_layout(replace(self._config, selected_id=layout.id), layout)
-        move_handle = not self.handle.is_dragging()
-        self._place_lights(move_handle=move_handle)
-        self._filling = True
-        try:
-            self._sync_light_spins(frame)
-        finally:
-            self._filling = False
+        self._place_lights()
 
     def _on_layout(self) -> None:
         if self._filling:
@@ -864,16 +884,26 @@ class HudEditor(QWidget):
         if self._filling:
             return
         current = self.selected_layout().lights
-        frame = _clamped_frame(
-            LightFrame(
-                visible=self._lights_visible.isChecked(),
-                x=self._light_spins["x"].value() / 100,
-                y=self._light_spins["y"].value() / 100,
-                width=self._light_spins["width"].value() / 100,
-                height=self._light_spins["height"].value() / 100,
-            )
+        frame = light_frame(
+            visible=self._lights_visible.isChecked(),
+            x=self._light_spins["x"].value() / 100,
+            y=self._light_spins["y"].value() / 100,
+            scale=current.scale,
         )
         if frame != current:
+            self.set_light_frame(frame)
+
+    def _on_light_scale(self, value: int) -> None:
+        if self._filling:
+            return
+        current = self.selected_layout().lights
+        frame = light_frame(
+            visible=self._lights_visible.isChecked(),
+            x=current.x,
+            y=current.y,
+            scale=value,
+        )
+        if frame.scale != current.scale:
             self.set_light_frame(frame)
 
     def _on_match(self, _checked: bool) -> None:
@@ -953,10 +983,6 @@ def _row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
     line.addWidget(caption)
     line.addWidget(widget, 1)
     parent.addLayout(line)
-
-
-def _percent(value: float) -> int:
-    return round(value * 100)
 
 
 class HudEditorWindow(QMainWindow):
