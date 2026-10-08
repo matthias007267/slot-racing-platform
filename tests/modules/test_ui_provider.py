@@ -159,26 +159,42 @@ def test_a_valid_camera_provider_starts_the_race(qtbot: QtBot, env: Env) -> None
     register(env, FakeTimingFactory("camera"))
     anna = env.driver("Anna")
     env.vehicle("Porsche", driver_id=anna.id)
-    page, wizard = wizard_at_track_step(qtbot, env)
+    window, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    window.show()
+    page.refresh()
+    env.track("Heimbahn")
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Finale")
+    assert wizard.go_next() and wizard.step == TRACK
     wizard.provider_combo.setCurrentIndex(wizard.provider_combo.findData("camera"))
     assert wizard.go_next() and wizard.go_next()
     wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(anna.id))
     wizard.lane_combo.setCurrentIndex(wizard.lane_combo.findData(1))
     assert wizard.add_participant()
     assert wizard.go_next() and wizard.go_next()
-    page.live.cue_interval_ms = 20
+    # Hold the automatic lamp timer. The steps below are the start, so a short
+    # interval cannot race them when the suite keeps the GUI thread busy.
+    page.live.cue_interval_ms = 60_000
     wizard.start_button.click()
     assert isinstance(page.current_view(), LiveRaceView)
     race = wizard.race
     assert race is not None
-    assert page.live.start_lights.lit_lights == 1
-    assert not page.live.start_lights.showing_go
-    assert not page.live.start_lights.isHidden()
+    live = page.live
+    assert live.start_lights.lit_lights == 1
+    assert not live.start_lights.showing_go
+    assert live.start_lights.isVisible()
     assert env.races.require_race(race.id).status is RaceStatus.READY
-    qtbot.waitUntil(
-        lambda: env.races.require_race(race.id).status is RaceStatus.RUNNING,
-        timeout=3000,
-    )
+    for lit in (2, 3, 4, 5):
+        live.advance_start_cue()
+        assert live.start_lights.lit_lights == lit
+        assert not live.start_lights.showing_go
+        assert env.races.require_race(race.id).status is RaceStatus.READY
+    live.advance_start_cue()
+    assert live.start_lights.showing_go
+    assert live.start_lights.lit_lights == 0
+    assert env.races.require_race(race.id).status is RaceStatus.RUNNING
     assert env.races.require_race(race.id).timing_provider == "camera"
 
 
