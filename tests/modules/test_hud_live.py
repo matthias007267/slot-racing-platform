@@ -31,7 +31,9 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     runner = live.runner
     assert runner is not None and runner.status is RaceStatus.RUNNING
 
-    assert live.header.isVisibleTo(live)
+    assert live.header.isHidden()
+    assert live.clock.isVisibleTo(live)
+    assert live.status.isVisibleTo(live)
     assert live.ranking.isVisibleTo(live)
     assert live.status_label.text() == "● Läuft"
     assert live.messages.message_label.text() == "Rennen gestartet"
@@ -89,7 +91,7 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert "Zoe" in live.best_lap.value_label.text()
 
 
-def test_a_saved_layout_hides_a_panel_on_the_live_view(qtbot: QtBot, env: Env) -> None:
+def test_a_saved_layout_does_not_hide_the_fixed_live_clock(qtbot: QtBot, env: Env) -> None:
     store = env.runtime.services.get(HudConfigurationStore)
     config = store.load()
     clock = config.widget(RACE_CLOCK)
@@ -104,8 +106,8 @@ def test_a_saved_layout_hides_a_panel_on_the_live_view(qtbot: QtBot, env: Env) -
     page.buttons["start"].click()
     live = page.live
     release_start_lights(live)
-    assert not live.clock.isVisibleTo(live)
-    assert live.header.isVisibleTo(live)
+    assert live.clock.isVisibleTo(live)
+    assert live.header.isHidden()
     assert live.time_label.text() != ""
 
     shown = store.load()

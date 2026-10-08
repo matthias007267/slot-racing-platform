@@ -276,16 +276,15 @@ def test_the_live_board_has_one_column_per_lane(qtbot: QtBot, env: Env, lanes: i
     last = live.findChild(QLabel, "live-lane-1-last")
     best = live.findChild(QLabel, "live-lane-1-best")
     lap = live.findChild(QLabel, "live-lane-1-lap")
-    gap = live.findChild(QLabel, "live-lane-1-gap")
+    position = live.findChild(QLabel, "live-lane-1-position")
     assert last is not None and last.text() != "-"
     assert best is not None and best.text() != "-"
     assert lap is not None and "/" in lap.text()
-    assert gap is not None and "zum Ersten" in gap.text()
-    if lanes == 2:
-        assert gap is not None and "zum Nächsten" not in gap.text()
-    else:
-        other = live.findChild(QLabel, "live-lane-2-gap")
-        assert other is not None and "zum Nächsten" in other.text()
+    assert position is not None and position.text().startswith("P")
+    assert live.findChild(QLabel, "live-lane-1-gap") is None
+    other = live.findChild(QLabel, "live-lane-2-position")
+    assert other is not None and other.text().startswith("P")
+    assert other.text() != position.text()
 
 
 def test_postponing_and_disqualifying_from_the_waiting_window(qtbot: QtBot, env: Env) -> None:
