@@ -66,6 +66,7 @@ class StoredDetectionZone(BaseModel):
     position_id: str
     lane: int
     roi: NormalizedRoi
+    check_direction: bool = True
 
     @field_validator("position_id", mode="before")
     @classmethod
@@ -74,6 +75,13 @@ class StoredDetectionZone(BaseModel):
             return require_position_id(value)
         except (TypeError, ValueError) as error:
             raise ValueError(str(error)) from error
+
+    @field_validator("check_direction", mode="before")
+    @classmethod
+    def _check_direction(cls, value: object) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError("check_direction must be a bool")
+        return value
 
     @field_validator("lane", mode="before")
     @classmethod
@@ -216,6 +224,7 @@ def to_detector_settings(configuration: CameraConfiguration) -> DetectorSettings
                 zone.position_id,
                 zone.lane,
                 roi_to_pixels(zone.roi, width, height),
+                check_direction=zone.check_direction,
             )
             for zone in zones
         ),
@@ -279,6 +288,7 @@ def scale_detector_settings(
                 zone.position_id,
                 zone.lane,
                 roi_to_pixels(normalized, target_width, target_height),
+                check_direction=zone.check_direction,
             )
         )
     return DetectorSettings(

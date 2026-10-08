@@ -195,6 +195,13 @@ def test_diagnosis_opens_no_camera_and_runs_without_a_race(qtbot: QtBot, tmp_pat
     assert "reference_laps=100" in exported
     assert "keine Erkennungsquote" in exported
     assert "FRAME 1" in dialog.log_text()
+    assert dialog.save_button.text() == "Diagnose exportieren"
+    bundle = dialog.save_diagnosis(tmp_path / "bundle.txt")
+    assert bundle is not None
+    summary_path, report_path, events_path = bundle
+    assert summary_path.read_text(encoding="utf-8")
+    assert "events_complete" in report_path.read_text(encoding="utf-8")
+    assert '"kind":' in events_path.read_text(encoding="utf-8")
     assert exported != dialog.log_text()
     dialog.refresh()
     picture = dialog.save_snapshot(tmp_path / "camera-diagnostic.png")
@@ -915,5 +922,76 @@ def test_stopping_flushes_the_summary_and_a_new_session_starts_clean(tmp_path: P
         assert second.frames_analyzed == 1
         assert "t_ns=0\n" not in session.text()
         assert session.text().count("FRAME ") == 1
+    finally:
+        session.close()
+
+
+def test_a_full_queue_drops_frames_before_attempts(tmp_path: Path) -> None:
+    from slot_racing.modules.timing_camera.diagnostic_store import DiagnosticJournal
+
+    journal = DiagnosticJournal(tmp_path / "queue.jsonl", max_frame_records=100)
+    journal.open()
+    journal._stop_writer()
+    for index in range(2048 - 256):
+        journal._queue.put_nowait({"kind": "pad", "seq": index})
+    journal.offer("frame", {"n": 1})
+    journal.offer("attempt", {"lane": 1})
+    assert journal.frame_detail_limited is True
+    assert journal.events_lost == 0
+    kinds = [item.get("kind") for item in list(journal._queue.queue)]
+    assert "attempt" in kinds
+    assert "frame" not in kinds
+    journal.finish("summary", {"ok": True})
+
+
+def test_disabled_direction_check_is_named_in_the_closing_report(tmp_path: Path) -> None:
+    from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
+    from slot_racing.modules.timing_camera.geometry import DetectionRoi
+
+    configured = DetectorSettings(
+        (
+            DetectionZone(
+                POSITION,
+                1,
+                DetectionRoi(0, 0, SQUARE, SQUARE),
+                check_direction=False,
+            ),
+        ),
+        block_size=20,
+    )
+    session = _session(configured, SQUARE, SQUARE, journal_path=tmp_path / "open.jsonl")
+    try:
+        _feed_at(
+            session,
+            (square_frame(), blob(0, 0), blob(20, 0), blob(0, 0), square_frame()),
+            (0, 20_000_000, 40_000_000, 60_000_000, 80_000_000),
+        )
+        assert len(session.crossings()) == 1
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.direction_check == "disabled"
+        assert report.zone_checks == ((POSITION, 1, False),)
+        assert len(session.activities()) == 1
+        summary = session.activities()[0]
+        assert summary.detection_event is True
+        assert summary.direction_reason == "accepted_without_direction_check"
+        assert report.zones[0].confirmed == 1
+        assert report.zones[0].rejected == 0
+        assert report.zones[0].direction_check_enabled is False
+        assert report.zones[0].mean_samples == 1
+        exported = session.export_text()
+        assert "direction_check=disabled" in exported
+        assert "accepted_without_direction_check" in exported
+        assert "keine Erkennungsquote" in exported
+        assert "Sperrzeit ist nicht gesetzt" in exported
+        summary_path, report_path, events_path = session.write_export(tmp_path / "bundle.txt")
+        assert "events_complete=true" in summary_path.read_text(encoding="utf-8")
+        assert '"direction_check": "disabled"' in report_path.read_text(encoding="utf-8")
+        events = events_path.read_text(encoding="utf-8")
+        assert '"kind":"attempt"' in events
+        assert '"kind":"summary"' in events
+        assert '"direction_check_enabled":false' in events
+        assert events.count('"kind":"attempt"') == 1
     finally:
         session.close()

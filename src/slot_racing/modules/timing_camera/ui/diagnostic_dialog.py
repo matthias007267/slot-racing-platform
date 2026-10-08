@@ -216,7 +216,7 @@ class DetectionDiagnosticDialog(QDialog):
         self.start_button.clicked.connect(self.start_diagnosis)
         self.stop_button.clicked.connect(self.stop_diagnosis)
         self.copy_button.clicked.connect(self.copy_log)
-        self.save_button.clicked.connect(self.save_log)
+        self.save_button.clicked.connect(self.save_diagnosis)
         self.snapshot_button.clicked.connect(self.save_snapshot)
         self.reference_button.clicked.connect(self.apply_reference)
 
@@ -261,7 +261,12 @@ class DetectionDiagnosticDialog(QDialog):
         session = self._session
         if session is not None and session.running:
             session.stop()
-            self._set_status("camera.diagnostic.stopped", error=False)
+            key = (
+                "camera.diagnostic.stopped_truncated"
+                if session.truncated()
+                else "camera.diagnostic.stopped"
+            )
+            self._set_status(key, error=False)
         self.refresh()
 
     def shutdown(self) -> None:
@@ -291,6 +296,19 @@ class DetectionDiagnosticDialog(QDialog):
         if session is not None:
             session.set_reference_laps(lane, laps)
         self._set_status("camera.diagnostic.reference_saved", error=False)
+
+    def save_diagnosis(self, path: Path | None = None) -> tuple[Path, Path, Path] | None:
+        """Write the summary, its JSON form and the event JSONL."""
+        target = path if path is not None else self._ask_path(_export_name("txt"), "Text (*.txt)")
+        if target is None:
+            return None
+        session = self._session
+        if session is None:
+            self._set_status("camera.diagnostic.reference_missing", error=True)
+            return None
+        written = session.write_export(target, include_frames=self.include_frames.isChecked())
+        self._set_status("camera.diagnostic.saved", error=False)
+        return written
 
     def save_log(self, path: Path | None = None) -> Path | None:
         """Write the summary and the structured attempts. Frame rows are optional."""
