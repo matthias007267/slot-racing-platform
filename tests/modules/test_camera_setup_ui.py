@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtWidgets import QFormLayout, QLayout, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.i18n import Translator
@@ -563,3 +564,51 @@ def test_highlighting_one_zone_leaves_the_other_and_expires(qtbot: QtBot) -> Non
     qtbot.waitUntil(lambda: page.stage.highlighted() == (), timeout=1000)
     page.stage.highlight(1, duration_ms=60_000)
     assert page.stage.highlighted() == (1,)
+
+
+def test_direction_check_sits_directly_under_the_direction_field(qtbot: QtBot) -> None:
+    page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
+    direction_form = _form_containing(page, page.direction)
+    zone_form = _form_containing(page, page.position)
+    assert (
+        _field_row(direction_form, page.check_direction)
+        == _field_row(direction_form, page.direction) + 1
+    )
+    assert zone_form is not direction_form
+    assert zone_form.indexOf(page.check_direction) < 0
+
+
+def _form_containing(root: QWidget, widget: QWidget) -> QFormLayout:
+    found = _search_form(root.layout(), widget)
+    assert isinstance(found, QFormLayout)
+    return found
+
+
+def _search_form(layout: QLayout | None, widget: QWidget) -> QFormLayout | None:
+    if layout is None:
+        return None
+    if isinstance(layout, QFormLayout) and layout.indexOf(widget) >= 0:
+        return layout
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item is None:
+            continue
+        nested = item.layout()
+        if nested is not None:
+            found = _search_form(nested, widget)
+            if found is not None:
+                return found
+        child = item.widget()
+        if child is not None:
+            found = _search_form(child.layout(), widget)
+            if found is not None:
+                return found
+    return None
+
+
+def _field_row(form: QFormLayout, widget: QWidget) -> int:
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+        if item is not None and item.widget() is widget:
+            return row
+    raise AssertionError(widget)
