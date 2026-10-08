@@ -12,17 +12,20 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QRadialGradient, QResizeEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from slot_racing.modules.races.hud import (
+    LIGHT_ASPECT,
+    LIGHT_GAP,
+    LIGHT_GO_UNITS,
+    LIGHT_PAD_X,
+    LIGHT_PAD_Y,
+    LIGHT_UNIT_HEIGHT,
+    LIGHT_UNIT_WIDTH,
+)
 from slot_racing.modules.races.ui.start_cue import START_LIGHT_COUNT, StartCueStep, StartPhase
 from slot_racing.uikit.theme import COLORS
 
-# Proportions of one lamp. The housing is derived from the widget width, then
-# capped so a large window does not hand the whole screen to the gantry.
-_MAX_LAMP = 92.0
-_SIDE_MARGIN = 12.0
-_PAD_X = 0.50
-_PAD_Y = 0.42
-_GAP = 0.40
-_SPAN = 2 * _PAD_X + START_LIGHT_COUNT + (START_LIGHT_COUNT - 1) * _GAP
+# A layout that is not an overlay still wants a usable minimum. The overlay
+# path sizes the gantry from the frame, with no separate pixel cap.
 _MIN_WIDTH = 480
 
 
@@ -128,33 +131,16 @@ class StartLightWidget(QWidget):
             self.setMinimumHeight(height)
 
     def _height_for(self, width: int) -> int:
-        gantry = self._measure(width)
-        extra = gantry.go_band if self._go else 0.0
-        return int(gantry.housing.bottom() + extra + 8)
+        return max(1, round(width / LIGHT_ASPECT))
 
     def _gantry(self) -> _Gantry:
-        return self._measure(max(self.width(), 1))
-
-    def _measure(self, width: int) -> _Gantry:
-        span = max(float(width) - _SIDE_MARGIN * 2, 1.0)
-        lamp = min(_MAX_LAMP, span / _SPAN)
-        pad_x = _PAD_X * lamp
-        pad_y = _PAD_Y * lamp
-        gap = _GAP * lamp
-        housing_w = pad_x * 2 + START_LIGHT_COUNT * lamp + (START_LIGHT_COUNT - 1) * gap
-        housing_h = pad_y * 2 + lamp
-        origin_x = (float(width) - housing_w) / 2
-        housing = QRectF(origin_x, 6.0, housing_w, housing_h)
-        left = origin_x + pad_x
-        top = housing.top() + pad_y
-        lamps = tuple(
-            QRectF(left + index * (lamp + gap), top, lamp, lamp)
-            for index in range(START_LIGHT_COUNT)
-        )
-        return _Gantry(housing, lamps, lamp * 0.78)
+        width = max(self.width(), 1)
+        if self._overlay and self.height() > 1:
+            return _fit_gantry(width, self.height())
+        return _fit_gantry(width, self._height_for(width))
 
     def _draw_housing(self, painter: QPainter, housing: QRectF) -> None:
-        radius = min(housing.height() * 0.22, 22.0)
+        radius = housing.height() * 0.22
         painter.setPen(QColor(COLORS.border))
         painter.setBrush(QColor(COLORS.background).lighter(118))
         painter.drawRoundedRect(housing, radius, radius)
@@ -213,3 +199,23 @@ class StartLightWidget(QWidget):
             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
             "GO",
         )
+
+
+def _fit_gantry(width: int, height: int) -> _Gantry:
+    """Scale the whole gantry into the box. Lamps stay round at every size."""
+    box_w = max(float(width), 1.0)
+    box_h = max(float(height), 1.0)
+    lamp = min(box_w / LIGHT_UNIT_WIDTH, box_h / LIGHT_UNIT_HEIGHT)
+    housing_w = LIGHT_UNIT_WIDTH * lamp
+    housing_h = (LIGHT_UNIT_HEIGHT - LIGHT_GO_UNITS) * lamp
+    content_h = LIGHT_UNIT_HEIGHT * lamp
+    origin_x = (box_w - housing_w) / 2
+    origin_y = (box_h - content_h) / 2
+    housing = QRectF(origin_x, origin_y, housing_w, housing_h)
+    left = origin_x + LIGHT_PAD_X * lamp
+    top = origin_y + LIGHT_PAD_Y * lamp
+    step = lamp * (1.0 + LIGHT_GAP)
+    lamps = tuple(
+        QRectF(left + index * step, top, lamp, lamp) for index in range(START_LIGHT_COUNT)
+    )
+    return _Gantry(housing, lamps, LIGHT_GO_UNITS * lamp)

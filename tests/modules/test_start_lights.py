@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtGui import QColor
 from pytestqt.qtbot import QtBot
 
+from slot_racing.modules.races.hud import LIGHT_ASPECT
 from slot_racing.modules.races.ui.start_cue import StartCueStep, StartPhase
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
 
@@ -69,6 +70,23 @@ def test_the_gantry_starts_dark_and_lights_one_lamp_at_a_time(qtbot: QtBot) -> N
 
     with pytest.raises(ValueError, match="between 0 and 5"):
         lights.show_lights(6)
+
+
+def test_an_overlay_grows_past_the_old_lamp_cap(qtbot: QtBot) -> None:
+    lights = StartLightWidget()
+    qtbot.addWidget(lights)
+    lights.use_as_overlay()
+    width = 1400
+    height = round(width / LIGHT_ASPECT)
+    lights.resize(width, height)
+    lights.show_lights(2)
+    lamps = lights.lamp_rects()
+    assert lamps[0].width() > 92
+    for lamp in lamps:
+        assert abs(lamp.width() - lamp.height()) < 0.6
+        assert lamp.right() <= width + 0.5
+        assert lamp.bottom() <= height + 0.5
+    assert lights.heightForWidth(width) == height
 
 
 def test_go_puts_every_lamp_out_and_then_the_gantry_can_leave(qtbot: QtBot) -> None:

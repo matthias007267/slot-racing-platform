@@ -35,6 +35,28 @@ SHARE_MIN = 1
 SHARE_MAX = 6
 STANDARD_LAYOUT_ID = "standard"
 
+# The gantry is drawn from these units. One unit is one lamp. Width and height
+# stay in this ratio at every scale, in the editor and in a live race.
+LIGHT_PAD_X = 0.50
+LIGHT_PAD_Y = 0.42
+LIGHT_GAP = 0.40
+LIGHT_LAMP_COUNT = 5
+LIGHT_GO_UNITS = 0.78
+LIGHT_UNIT_WIDTH = 2 * LIGHT_PAD_X + LIGHT_LAMP_COUNT + (LIGHT_LAMP_COUNT - 1) * LIGHT_GAP
+LIGHT_UNIT_HEIGHT = 2 * LIGHT_PAD_Y + 1.0 + LIGHT_GO_UNITS
+LIGHT_ASPECT = LIGHT_UNIT_WIDTH / LIGHT_UNIT_HEIGHT
+"""Pixel width divided by pixel height. The frame never leaves this ratio."""
+
+LIGHT_STANDARD_WIDTH = 0.50
+"""Share of the HUD width at 100%. That is the factory gantry."""
+
+LIGHT_STANDARD_HEIGHT = 0.22
+"""Stored companion of the factory width. Placement uses :data:`LIGHT_ASPECT`."""
+
+LIGHT_SCALE_MIN = 20
+LIGHT_SCALE_MAX = 200
+"""100% is the factory width. 200% is the full HUD width, when the height still fits."""
+
 
 @dataclass(frozen=True, slots=True)
 class HudWindowPlacement:
@@ -118,13 +140,20 @@ class FieldStyle:
 
 @dataclass(frozen=True, slots=True)
 class LightFrame:
-    """Start gantry, as fractions of the HUD surface. It is not part of the flow."""
+    """Start gantry on the HUD surface. It is not part of the flow.
+
+    ``scale`` is the size, in percent of the factory gantry. ``width`` and
+    ``height`` repeat that scale as fractions so an older reader still sees a
+    size. The pixels always come from :func:`light_pixels`, which keeps
+    :data:`LIGHT_ASPECT`.
+    """
 
     visible: bool = True
     x: float = 0.25
     y: float = 0.30
-    width: float = 0.50
-    height: float = 0.22
+    width: float = LIGHT_STANDARD_WIDTH
+    height: float = LIGHT_STANDARD_HEIGHT
+    scale: int = 100
 
     def as_config(self) -> HudWidgetConfig:
         return HudWidgetConfig(
@@ -247,6 +276,117 @@ def clamp_widget(widget: HudWidgetConfig) -> HudWidgetConfig:
         y=_clamp_origin(widget.y, height),
         width=width,
         height=height,
+    )
+
+
+def snap_light_scale(value: object) -> int:
+    """A gantry scale in percent, inside the absolute range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 100
+    return min(LIGHT_SCALE_MAX, max(LIGHT_SCALE_MIN, round(float(value))))
+
+
+def light_width_fraction(scale: int) -> float:
+    return LIGHT_STANDARD_WIDTH * snap_light_scale(scale) / 100
+
+
+def light_height_fraction(scale: int) -> float:
+    return LIGHT_STANDARD_HEIGHT * snap_light_scale(scale) / 100
+
+
+def light_frame(
+    *,
+    visible: bool = True,
+    x: float = 0.25,
+    y: float = 0.30,
+    scale: int = 100,
+) -> LightFrame:
+    """One proportional gantry. Width and height fractions follow ``scale``."""
+    snapped = snap_light_scale(scale)
+    return LightFrame(
+        visible=visible,
+        x=x,
+        y=y,
+        width=light_width_fraction(snapped),
+        height=light_height_fraction(snapped),
+        scale=snapped,
+    )
+
+
+def normalize_light(frame: LightFrame) -> LightFrame:
+    """Prefer ``scale``. A width that does not belong to that scale is an old rectangle."""
+    expected = light_width_fraction(frame.scale)
+    if abs(frame.width - expected) > 0.004:
+        scale = snap_light_scale(frame.width / LIGHT_STANDARD_WIDTH * 100)
+    else:
+        scale = snap_light_scale(frame.scale)
+    return light_frame(visible=frame.visible, x=frame.x, y=frame.y, scale=scale)
+
+
+def light_scale_limits(surface_w: int, surface_h: int) -> tuple[int, int]:
+    """Percent range whose box fits this HUD. The top end is the largest that still fits."""
+    if surface_w < 2 or surface_h < 2:
+        return LIGHT_SCALE_MIN, LIGHT_SCALE_MAX
+    high = LIGHT_SCALE_MIN
+    for scale in range(LIGHT_SCALE_MAX, LIGHT_SCALE_MIN - 1, -1):
+        width = round(surface_w * LIGHT_STANDARD_WIDTH * scale / 100)
+        height = round(width / LIGHT_ASPECT)
+        if 1 <= width <= surface_w and 1 <= height <= surface_h:
+            high = scale
+            break
+    return LIGHT_SCALE_MIN, high
+
+
+def effective_light_scale(scale: int, surface_w: int, surface_h: int) -> int:
+    """The scale actually drawn. A stored value above the surface limit is lowered for display."""
+    snapped = snap_light_scale(scale)
+    if surface_w < 2 or surface_h < 2:
+        return snapped
+    low, high = light_scale_limits(surface_w, surface_h)
+    return min(high, max(low, snapped))
+
+
+def light_pixels(frame: LightFrame, surface_w: int, surface_h: int) -> PixelRect:
+    """The gantry on this surface. The box stays inside and keeps :data:`LIGHT_ASPECT`."""
+    if surface_w <= 0 or surface_h <= 0:
+        return PixelRect(0, 0, 0, 0)
+    scale = effective_light_scale(frame.scale, surface_w, surface_h)
+    width = max(1, round(surface_w * LIGHT_STANDARD_WIDTH * scale / 100))
+    height = max(1, round(width / LIGHT_ASPECT))
+    if height > surface_h:
+        height = surface_h
+        width = max(1, min(surface_w, round(height * LIGHT_ASPECT)))
+    if width > surface_w:
+        width = surface_w
+        height = max(1, min(surface_h, round(width / LIGHT_ASPECT)))
+    x = min(max(0, round(frame.x * surface_w)), max(0, surface_w - width))
+    y = min(max(0, round(frame.y * surface_h)), max(0, surface_h - height))
+    return PixelRect(x, y, width, height)
+
+
+def light_frame_from_box(
+    x_px: int,
+    y_px: int,
+    width_px: int,
+    height_px: int,
+    surface_w: int,
+    surface_h: int,
+    *,
+    visible: bool,
+) -> LightFrame:
+    """A drag result. The width chooses the scale. The height is the locked aspect."""
+    del height_px
+    if surface_w <= 0 or surface_h <= 0:
+        return light_frame(visible=visible)
+    raw = width_px / surface_w / LIGHT_STANDARD_WIDTH * 100
+    scale = effective_light_scale(snap_light_scale(raw), surface_w, surface_h)
+    draft = light_frame(visible=visible, x=x_px / surface_w, y=y_px / surface_h, scale=scale)
+    placed = light_pixels(draft, surface_w, surface_h)
+    return light_frame(
+        visible=visible,
+        x=placed.x / surface_w,
+        y=placed.y / surface_h,
+        scale=scale,
     )
 
 
@@ -476,6 +616,7 @@ def _layout_document(layout: HudLayout) -> dict[str, Any]:
             "visible": lights.visible,
             "x": lights.x,
             "y": lights.y,
+            "scale": lights.scale,
             "width": lights.width,
             "height": lights.height,
         },
@@ -530,20 +671,24 @@ def _lights(value: object) -> LightFrame:
     if not isinstance(value, dict):
         return base
     visible = value.get("visible")
-    frame = LightFrame(
-        visible=visible if isinstance(visible, bool) else True,
+    shown = visible if isinstance(visible, bool) else True
+    if "scale" in value:
+        scale = snap_light_scale(value.get("scale"))
+    else:
+        width = _number(value.get("width"), base.width)
+        scale = snap_light_scale(width / LIGHT_STANDARD_WIDTH * 100)
+    frame = light_frame(
+        visible=shown,
         x=_number(value.get("x"), base.x),
         y=_number(value.get("y"), base.y),
-        width=_number(value.get("width"), base.width),
-        height=_number(value.get("height"), base.height),
+        scale=scale,
     )
-    clamped = clamp_widget(frame.as_config())
-    return LightFrame(
+    width = frame.width
+    return light_frame(
         visible=frame.visible,
-        x=clamped.x,
-        y=clamped.y,
-        width=clamped.width,
-        height=clamped.height,
+        x=min(max(0.0, frame.x), max(0.0, 1.0 - width)),
+        y=min(max(0.0, frame.y), 1.0),
+        scale=frame.scale,
     )
 
 

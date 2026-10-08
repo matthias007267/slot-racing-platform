@@ -12,9 +12,9 @@ from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
 from slot_racing.core.domain import RaceStatus
 from slot_racing.modules.races.hud import (
     HudConfigurationStore,
+    light_pixels,
     mark_default,
     replace_layout,
-    to_pixels,
 )
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -189,7 +189,7 @@ def _surface(live: LiveRaceView) -> tuple[object, ...]:
 
 def _assert_lights(live: LiveRaceView) -> None:
     target = live.board if live.stage.isHidden() and not live.board.isHidden() else live.stage
-    rect = to_pixels(live.bound_layout().lights.as_config(), target.width(), target.height())
+    rect = light_pixels(live.bound_layout().lights, target.width(), target.height())
     origin = target.mapTo(live, QPoint(0, 0))
     geometry = live.start_lights.geometry()
     assert geometry.x() == origin.x() + rect.x
