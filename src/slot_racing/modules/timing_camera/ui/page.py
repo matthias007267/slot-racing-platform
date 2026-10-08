@@ -207,6 +207,7 @@ class CameraSetupPage(QWidget):
         camera_form.addRow(self._tr("camera.field.resolution"), self.resolution)
         camera_form.addRow(self._tr("camera.field.fps"), self.fps)
         camera_form.addRow(self._tr("camera.field.direction"), self.direction)
+        camera_form.addRow("", self.check_direction)
         sensitivity_row = QHBoxLayout()
         sensitivity_row.addWidget(self.sensitivity_less)
         sensitivity_row.addWidget(self.sensitivity, 1)
@@ -220,7 +221,6 @@ class CameraSetupPage(QWidget):
         camera_form.addRow("", self.resolution_value)
         zone_form = QFormLayout()
         zone_form.addRow(self._tr("camera.field.position"), self.position)
-        zone_form.addRow("", self.check_direction)
 
         side = QWidget()
         side.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Expanding)
