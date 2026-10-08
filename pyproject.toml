@@ -180,6 +180,7 @@ source_modules = [
     "slot_racing.modules.timing_camera.configuration",
     "slot_racing.modules.timing_camera.detection",
     "slot_racing.modules.timing_camera.diagnostic",
+    "slot_racing.modules.timing_camera.diagnostic_store",
     "slot_racing.modules.timing_camera.frame_source",
     "slot_racing.modules.timing_camera.frames",
     "slot_racing.modules.timing_camera.geometry",

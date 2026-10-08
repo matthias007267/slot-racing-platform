@@ -80,6 +80,8 @@ def _session(
     height: int,
     *,
     max_lines: int = 12_000,
+    journal_path: Path | None = None,
+    max_frame_records: int = 50_000,
 ) -> DiagnosticSession:
     config = _config_for(configured, width, height)
     from slot_racing.modules.timing_camera.detection import DetectorSettings
@@ -87,7 +89,13 @@ def _session(
 
     assert isinstance(configured, DetectorSettings)
     assert isinstance(config, DiagnosticConfig)
-    return DiagnosticSession(configured, config, max_lines=max_lines)
+    return DiagnosticSession(
+        configured,
+        config,
+        max_lines=max_lines,
+        journal_path=journal_path,
+        max_frame_records=max_frame_records,
+    )
 
 
 def _feed(session: DiagnosticSession, pictures: tuple[GrayFrame, ...], start_ns: int = 0) -> None:
@@ -176,9 +184,18 @@ def test_diagnosis_opens_no_camera_and_runs_without_a_race(qtbot: QtBot, tmp_pat
     clipboard = QGuiApplication.clipboard()
     assert clipboard is not None
     assert clipboard.text() == dialog.log_text()
+    dialog.reference_lane.setValue(1)
+    dialog.reference_laps.setValue(100)
+    dialog.apply_reference()
     saved = dialog.save_log(tmp_path / "camera-diagnostic-log.txt")
     assert saved is not None
-    assert saved.read_text(encoding="utf-8") == dialog.log_text()
+    exported = saved.read_text(encoding="utf-8")
+    assert "=== Diagnoseabschluss ===" in exported
+    assert "events_complete=" in exported
+    assert "reference_laps=100" in exported
+    assert "keine Erkennungsquote" in exported
+    assert "FRAME 1" in dialog.log_text()
+    assert exported != dialog.log_text()
     dialog.refresh()
     picture = dialog.save_snapshot(tmp_path / "camera-diagnostic.png")
     assert picture is not None
@@ -551,3 +568,352 @@ def test_the_setup_page_names_the_diagnostic_button(qtbot: QtBot) -> None:
     page, _opener = open_page(qtbot, CameraConfigurationStore(database()))
     assert page.diagnostic.text() == "Erkennungsdiagnose"
     assert translator().translate("camera.diagnostic.stop") == "Diagnose stoppen"
+
+
+def _feed_at(
+    session: DiagnosticSession, pictures: tuple[GrayFrame, ...], stamps: tuple[int, ...]
+) -> None:
+    session.start()
+    for picture, stamp in zip(pictures, stamps, strict=True):
+        session.submit(TimedFrame(picture, stamp))
+        assert session.wait_idle()
+
+
+def test_direction_reason_codes_name_one_sample_without_guessing_a_direction() -> None:
+    from slot_racing.modules.timing_camera.diagnostic_store import (
+        direction_reason_code,
+        percentile_nearest,
+    )
+
+    assert (
+        direction_reason_code(
+            detected=False,
+            max_samples=1,
+            samples_expired=0,
+            below_size_frames=0,
+            frames=1,
+            algorithm_reason="too_few_direction_samples",
+        )
+        == "single_sample_one_frame"
+    )
+    assert (
+        direction_reason_code(
+            detected=False,
+            max_samples=1,
+            samples_expired=1,
+            below_size_frames=0,
+            frames=2,
+            algorithm_reason="too_few_direction_samples",
+        )
+        == "direction_window_expired"
+    )
+    assert (
+        direction_reason_code(
+            detected=False,
+            max_samples=1,
+            samples_expired=0,
+            below_size_frames=2,
+            frames=3,
+            algorithm_reason="below_component_size",
+        )
+        == "single_sample_below_size"
+    )
+    assert (
+        direction_reason_code(
+            detected=False,
+            max_samples=1,
+            samples_expired=0,
+            below_size_frames=0,
+            frames=2,
+            algorithm_reason="wrong_direction",
+            wrong_direction_frames=1,
+        )
+        == "wrong_direction"
+    )
+    assert percentile_nearest([10, 20, 30, 40], 95) == 40
+    assert percentile_nearest([], 95) is None
+
+
+def test_a_long_recording_keeps_every_attempt_when_frame_detail_is_capped(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostic.jsonl"
+    session = _session(
+        settings(1),
+        WIDTH,
+        HEIGHT,
+        max_lines=200,
+        journal_path=path,
+        max_frame_records=50,
+    )
+    picture = blank()
+    session.start()
+    try:
+        for index in range(10_000):
+            session.submit(TimedFrame(picture, index * 40_000_000, sequence=index + 1))
+            assert session.wait_idle()
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.frames_analyzed == 10_000
+        assert report.frames_submitted == 10_000
+        assert report.frames_skipped == 0
+        assert report.text_log_truncated is True
+        assert report.events_complete is True
+        assert report.frame_detail_complete is False
+        assert report.frame_records_kept == 50
+        assert report.events_lost == 0
+        assert report.write_errors == 0
+        assert report.dt_min_ns == 40_000_000
+        assert report.dt_max_ns == 40_000_000
+        assert report.dt_average_ns == 40_000_000
+        assert report.analysis_min_ns is not None
+        assert report.analysis_p95_ns is not None
+        assert report.analysis_max_ns >= report.analysis_min_ns
+        assert session.text().rstrip().endswith("[diagnostic log truncated]")
+        exported = session.export_text()
+        assert "events_complete=true" in exported
+        assert "frame_detail_complete=false" in exported
+        assert "text_log_truncated=true" in exported
+        assert "frames_analyzed=10000" in exported
+        assert "Das Textprotokoll wurde gekürzt" in exported
+        assert "Ereignisse und Abschlussstatistik decken die ganze Aufzeichnung ab." in exported
+        assert '"kind":"frame"' not in exported
+        detailed = session.export_text(include_frames=True)
+        assert detailed.count('"kind":"frame"') == 50
+        assert path.is_file()
+        assert '"kind":"summary"' in path.read_text(encoding="utf-8")
+    finally:
+        session.close()
+
+
+def test_one_motion_is_one_rejection_and_a_single_sample_names_its_cause(tmp_path: Path) -> None:
+    path = tmp_path / "attempts.jsonl"
+    single = _session(square_settings(), SQUARE, SQUARE, journal_path=path)
+    try:
+        _feed_at(
+            single,
+            (square_frame(), blob(0, 0), square_frame()),
+            (0, 20_000_000, 40_000_000),
+        )
+        single.stop()
+        report = single.report()
+        assert report is not None
+        assert len(single.activities()) == 1
+        summary = single.activities()[0]
+        assert summary.lane == 1
+        assert summary.detection_event is False
+        assert summary.direction_samples == 1
+        assert summary.direction_reason == "single_sample_one_frame"
+        assert summary.reason == "too_few_direction_samples"
+        assert report.zones[0].lane == 1
+        assert report.zones[0].rejected == 1
+        assert report.zones[0].confirmed == 0
+        assert report.zones[0].single_sample == 1
+        assert dict(report.zones[0].reasons)["single_sample_one_frame"] == 1
+        exported = single.export_text()
+        assert '"kind":"attempt"' in exported
+        assert "single_sample_one_frame" in exported
+        assert '"result":"rejected"' in exported
+        assert exported.count('"kind":"attempt"') == 1
+    finally:
+        single.close()
+
+    repeated = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "repeat.jsonl")
+    try:
+        _feed_at(
+            repeated,
+            (square_frame(), blob(0, 0), blob(0, 0), blob(0, 0), square_frame()),
+            (0, 20_000_000, 40_000_000, 60_000_000, 80_000_000),
+        )
+        repeated.stop()
+        report = repeated.report()
+        assert report is not None
+        assert len(repeated.activities()) == 1
+        assert report.zones[0].rejected == 1
+        assert report.zones[0].confirmed == 0
+        assert repeated.activities()[0].direction_reason == "below_shift"
+        assert "reason=below_shift" in repeated.text()
+    finally:
+        repeated.close()
+
+
+def test_a_direction_window_expiry_is_recorded_on_the_closed_attempt(tmp_path: Path) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "window.jsonl")
+    try:
+        _feed_at(
+            session,
+            (square_frame(), blob(0, 0), blob(0, 0), square_frame()),
+            (0, 20_000_000, 10 * _NS, 10 * _NS + 20_000_000),
+        )
+        session.stop()
+        summary = session.activities()[0]
+        assert summary.direction_samples == 1
+        assert summary.direction_reason == "direction_window_expired"
+        assert len(session.activities()) == 1
+        report = session.report()
+        assert report is not None
+        assert report.zones[0].single_sample == 1
+        assert dict(report.zones[0].reasons)["direction_window_expired"] == 1
+        exported = session.export_text()
+        assert "direction_window_expired" in exported
+        assert '"samples_discarded":' in exported
+        assert '"samples_valid":1' in exported
+    finally:
+        session.close()
+
+
+def test_small_follow_up_frames_are_named_when_they_add_no_second_sample(tmp_path: Path) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "size.jsonl")
+    try:
+        _feed_at(
+            session,
+            (square_frame(), blob(0, 0), blob(0, 0, 10, 10), square_frame()),
+            (0, 20_000_000, 40_000_000, 60_000_000),
+        )
+        session.stop()
+        summary = session.activities()[0]
+        assert summary.direction_reason == "single_sample_below_size"
+        assert summary.direction_samples == 1
+        report = session.report()
+        assert report is not None
+        assert report.zones[0].rejected == 1
+        assert report.zones[0].single_sample == 1
+    finally:
+        session.close()
+
+
+def test_confirmed_crossings_stay_separate_from_rejections_and_reference_laps(
+    tmp_path: Path,
+) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "laps.jsonl")
+    try:
+        session.set_reference_laps(1, 100)
+        session.set_reference_laps(2, 0)
+        _feed_at(
+            session,
+            (square_frame(), blob(0, 0), blob(20, 0), square_frame()),
+            (0, 20_000_000, 40_000_000, 60_000_000),
+        )
+        assert len(session.crossings()) == 1
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.zones[0].confirmed == 1
+        assert report.zones[0].rejected == 0
+        assert session.activities()[0].direction_reason == "accepted"
+        assert "reason=accepted" in session.text()
+        lane_1 = report.references[0]
+        lane_2 = report.references[1]
+        assert lane_1.lane == 1
+        assert lane_1.reference_laps == 100
+        assert lane_1.confirmed_events == 1
+        assert lane_1.difference == -99
+        assert lane_1.ratio == 0.01
+        assert lane_2.reference_laps == 0
+        assert lane_2.ratio is None
+        exported = session.export_text()
+        assert "reference_laps=100" in exported
+        assert "confirmed_events=1" in exported
+        assert "difference=-99" in exported
+        assert "ratio=0.010" in exported
+        assert "ratio=n/a" in exported
+        assert "keine Erkennungsquote" in exported
+        assert len(session.crossings()) == 1
+    finally:
+        session.close()
+
+
+def test_attempts_keep_the_zone_that_produced_them(tmp_path: Path) -> None:
+    session = _session(settings(1, 2), WIDTH, HEIGHT, journal_path=tmp_path / "zones.jsonl")
+    try:
+        _feed(session, (blank(), column(2, LINE_X), blank()))
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.zones
+        assert {zone.lane for zone in report.zones} == {2}
+        assert all(activity.lane == 2 for activity in session.activities())
+        exported = session.export_text()
+        assert '"lane":2' in exported
+        assert '"lane":1' not in exported
+    finally:
+        session.close()
+
+
+def test_two_confirmed_crossings_record_the_gap_between_them(tmp_path: Path) -> None:
+    session = _session(settings(1), WIDTH, HEIGHT, journal_path=tmp_path / "gaps.jsonl")
+    try:
+        _feed_at(
+            session,
+            (
+                blank(),
+                column(1, LINE_X),
+                column(1, LINE_X + 2),
+                blank(),
+                column(1, LINE_X),
+                column(1, LINE_X + 2),
+                blank(),
+            ),
+            (0, 100, 200, 240, 300, 400, 440),
+        )
+        session.stop()
+        report = session.report()
+        assert report is not None
+        zone = report.zones[0]
+        assert zone.lane == 1
+        assert zone.confirmed == 2
+        assert len(zone.confirmed_gaps_ns) == 1
+        assert zone.confirmed_gaps_ns[0] > 0
+        assert "confirmed_gaps_ms" in session.export_text()
+    finally:
+        session.close()
+
+
+def test_an_unwritable_journal_is_visible_and_detection_still_runs(tmp_path: Path) -> None:
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("blocked", encoding="utf-8")
+    session = _session(
+        square_settings(),
+        SQUARE,
+        SQUARE,
+        journal_path=blocked / "diagnostic.jsonl",
+    )
+    try:
+        _feed_at(session, (square_frame(), blob(0, 0), square_frame()), (0, 20_000_000, 40_000_000))
+        assert len(session.activities()) == 1
+        session.stop()
+        report = session.report()
+        assert report is not None
+        assert report.journal_opened is False
+        assert report.events_complete is False
+        assert report.write_errors >= 1
+        assert report.events_lost >= 1
+        assert "FRAME 1" in session.text()
+        exported = session.export_text()
+        assert "events_complete=false" in exported
+        assert "Ereignisaufzeichnung unvollständig" in exported
+        assert "frame_detail_complete=false" in exported
+    finally:
+        session.close()
+
+
+def test_stopping_flushes_the_summary_and_a_new_session_starts_clean(tmp_path: Path) -> None:
+    path = tmp_path / "again.jsonl"
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=path)
+    try:
+        _feed(session, (square_frame(),))
+        session.stop()
+        first = session.report()
+        assert first is not None
+        assert first.frames_analyzed == 1
+        assert '"kind":"summary"' in path.read_text(encoding="utf-8")
+        session.start()
+        session.submit(TimedFrame(square_frame(), 5_000_000))
+        assert session.wait_idle()
+        session.stop()
+        second = session.report()
+        assert second is not None
+        assert second.frames_analyzed == 1
+        assert "t_ns=0\n" not in session.text()
+        assert session.text().count("FRAME ") == 1
+    finally:
+        session.close()

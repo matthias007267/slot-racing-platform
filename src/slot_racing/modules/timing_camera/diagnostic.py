@@ -8,11 +8,15 @@ keeps the newest unread frame, the same latest-frame rule as capture.
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -30,10 +34,22 @@ from slot_racing.modules.timing_camera.detection import (
     resolution_preset_name,
     sensitivity_profile,
 )
+from slot_racing.modules.timing_camera.diagnostic_store import (
+    DiagnosticJournal,
+    DiagnosticReport,
+    LaneReference,
+    ZoneReport,
+    direction_reason_code,
+    export_document,
+    percentile_nearest,
+)
 from slot_racing.modules.timing_camera.frame_source import TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 
 MAX_LOG_LINES = 12_000
+DEFAULT_MAX_FRAME_RECORDS = 50_000
+_ANALYSIS_SAMPLE_CAP = 50_000
+_SAMPLE_HISTORY = 32
 _MAX_MAP_CELLS = 512
 _MAX_MAP_ROWS = 40
 _MAX_MAP_COLS = 64
@@ -156,6 +172,7 @@ class ActivitySummary:
     reason: str
     activity_frames: int
     direction_samples: int
+    direction_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +231,24 @@ class _Burst:
     last_reason: str
     frames: int
     direction_samples: int
+    samples_created: int = 0
+    samples_discarded: int = 0
+    below_size_frames: int = 0
+    too_short_frames: int = 0
+    insufficient_frames: int = 0
+    wrong_direction_frames: int = 0
+    component_sum: int = 0
+    component_peak: int = 0
+    component_frames: int = 0
+    state_changes: int = 0
+    last_state: str = ""
+    first_frame: int = 0
+    last_frame: int = 0
+    capture_seq_start: int | None = None
+    capture_seq_end: int | None = None
+    centroids_omitted: int = 0
+    centroids: list[tuple[int, float, float]] | None = None
+    shifts: list[float] | None = None
 
 
 def diagnostic_config(
@@ -456,6 +491,8 @@ class DiagnosticSession:
         config: DiagnosticConfig,
         *,
         max_lines: int = MAX_LOG_LINES,
+        journal_path: Path | None = None,
+        max_frame_records: int = DEFAULT_MAX_FRAME_RECORDS,
     ) -> None:
         if not isinstance(settings, DetectorSettings):
             raise TypeError("settings must be DetectorSettings")
@@ -463,11 +500,19 @@ class DiagnosticSession:
             raise TypeError("config must be a DiagnosticConfig")
         if isinstance(max_lines, bool) or not isinstance(max_lines, int) or max_lines < 1:
             raise ValueError("max_lines must be at least 1")
+        if journal_path is not None and not isinstance(journal_path, Path):
+            raise TypeError("journal_path must be a Path")
+        if isinstance(max_frame_records, bool) or not isinstance(max_frame_records, int):
+            raise TypeError("max_frame_records must be an int")
+        if max_frame_records < 0:
+            raise ValueError("max_frame_records must not be negative")
         self._base_settings = settings
         self._settings = settings
         self._config = config
         self._expected = (config.requested_width, config.requested_height)
         self._max_lines = max_lines
+        self._journal_path = journal_path
+        self._max_frame_records = max_frame_records
         self._cond = threading.Condition()
         self._pending: TimedFrame | None = None
         self._pending_capture: CaptureCounters | None = None
@@ -498,6 +543,18 @@ class DiagnosticSession:
         self._zone_numbers = {(zone.position_id, zone.lane): zone.number for zone in config.zones}
         self._actual: tuple[int, int] | None = None
         self._actual_logged = False
+        self._journal: DiagnosticJournal | None = None
+        self._journal_dir: Path | None = None
+        self._journal_closed = False
+        self._report: DiagnosticReport | None = None
+        self._references: dict[int, int] = {}
+        self._analysis_samples: list[int] = []
+        self._analysis_ns_min: int | None = None
+        self._dt_min: int | None = None
+        self._dt_max: int | None = None
+        self._dt_sum = 0
+        self._dt_count = 0
+        self._ended_at = ""
 
     @property
     def running(self) -> bool:
@@ -516,8 +573,10 @@ class DiagnosticSession:
             self._settings = self._base_settings
             self._running = True
             self._stop.clear()
+            self._open_journal_locked()
             for line in format_header(self._config).split("\n"):
                 self._append_locked(line)
+            self._offer_session_locked()
             self._thread = threading.Thread(
                 target=self._run, name="slot-racing-detection-diagnostic", daemon=True
             )
@@ -535,12 +594,29 @@ class DiagnosticSession:
             thread.join(timeout=2)
             if thread.is_alive():
                 raise RuntimeError("camera diagnostic thread did not stop")
+        journal: DiagnosticJournal | None = None
         with self._cond:
             self._finish_open_bursts_locked()
             if self._lines and not self._footer_written:
                 for line in self._footer_locked().split("\n"):
                     self._append_locked(line)
                 self._footer_written = True
+            if self._ended_at == "":
+                self._ended_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            if self._journal is not None and not self._journal_closed:
+                journal = self._journal
+                self._journal_closed = True
+                payload = self._summary_payload_locked(journal)
+            else:
+                payload = None
+        if journal is not None and payload is not None:
+            if journal.opened:
+                journal.finish("summary", payload)
+            else:
+                journal.finish("closed", {})
+        with self._cond:
+            if self._report is None:
+                self._report = self._build_report_locked(journal)
 
     def close(self) -> None:
         self.stop()
@@ -559,17 +635,44 @@ class DiagnosticSession:
                 self._skipped += 1
             self._pending = frame
             self._pending_capture = capture
-            self._cond.notify()
+            self._cond.notify_all()
 
     def wait_idle(self, timeout: float = 2.0) -> bool:
         """True once the worker has finished every submitted frame."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._cond:
-                if self._pending is None and not self._in_flight:
-                    return True
-            time.sleep(0.005)
-        return False
+        with self._cond:
+            while self._pending is not None or self._in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def set_reference_laps(self, lane: int, laps: int) -> None:
+        """Store a hand-counted lap total. Detection does not read it."""
+        if isinstance(lane, bool) or not isinstance(lane, int) or lane < 1:
+            raise ValueError("lane must be at least 1")
+        if isinstance(laps, bool) or not isinstance(laps, int) or laps < 0:
+            raise ValueError("laps must not be negative")
+        with self._cond:
+            self._references[lane] = laps
+            report = self._report
+            if report is not None:
+                self._report = replace(report, references=self._reference_rows_locked(report.zones))
+
+    def report(self) -> DiagnosticReport | None:
+        """Closing figures. Present after :meth:`stop`."""
+        with self._cond:
+            return self._report
+
+    def export_text(self, *, include_frames: bool = False) -> str:
+        """Human summary plus structured attempts. Frame rows stay optional."""
+        with self._cond:
+            report = self._report
+            journal = self._journal
+        if report is None or journal is None:
+            return self.text()
+        return export_document(report, journal.records(), include_frames=include_frames)
 
     def text(self) -> str:
         with self._cond:
@@ -615,6 +718,7 @@ class DiagnosticSession:
             finally:
                 with self._cond:
                     self._in_flight = False
+                    self._cond.notify_all()
 
     def _analyze(self, delivered: TimedFrame, capture: CaptureCounters | None) -> None:
         started = time.perf_counter_ns()
@@ -675,11 +779,22 @@ class DiagnosticSession:
             self._analysis_ns_total += elapsed
             self._last_analysis_ns = elapsed
             self._analysis_ns_max = max(self._analysis_ns_max, elapsed)
+            if self._analysis_ns_min is None or elapsed < self._analysis_ns_min:
+                self._analysis_ns_min = elapsed
+            if len(self._analysis_samples) < _ANALYSIS_SAMPLE_CAP:
+                self._analysis_samples.append(elapsed)
             if self._first_ns is None:
                 self._first_ns = delivered.timestamp_ns
             dt = None if self._previous_ns is None else delivered.timestamp_ns - self._previous_ns
             self._previous_ns = delivered.timestamp_ns
             self._last_dt_ns = dt
+            if dt is not None and dt >= 0:
+                self._dt_count += 1
+                self._dt_sum += dt
+                if self._dt_min is None or dt < self._dt_min:
+                    self._dt_min = dt
+                if self._dt_max is None or dt > self._dt_max:
+                    self._dt_max = dt
             self._note_capture_locked(capture, delivered.timestamp_ns)
             self._actual = (frame.width, frame.height)
             if not self._actual_logged:
@@ -689,9 +804,12 @@ class DiagnosticSession:
                 self._actual_logged = True
             elapsed_ns = delivered.timestamp_ns - self._first_ns
             self._append_frame_locked(delivered, dt, elapsed, inspection, crossings, elapsed_ns)
+            self._offer_frame_locked(delivered, dt, elapsed, inspection)
             self._all_crossings.extend(crossings)
             if inspection is not None:
-                self._follow_activity_locked(inspection, delivered.timestamp_ns, elapsed_ns)
+                self._follow_activity_locked(
+                    inspection, delivered.timestamp_ns, elapsed_ns, delivered.sequence
+                )
             performance = self._performance_locked()
             ready = inspection is not None and inspection.reference_ready
             self._latest = DiagnosticSnapshot(
@@ -762,6 +880,16 @@ class DiagnosticSession:
         self._actual = None
         self._actual_logged = False
         self._in_flight = False
+        self._journal = None
+        self._journal_closed = False
+        self._report = None
+        self._analysis_samples = []
+        self._analysis_ns_min = None
+        self._dt_min = None
+        self._dt_max = None
+        self._dt_sum = 0
+        self._dt_count = 0
+        self._ended_at = ""
 
     def _append_locked(self, line: str) -> None:
         if self._truncated:
@@ -804,16 +932,22 @@ class DiagnosticSession:
                 self._append_locked(line)
 
     def _follow_activity_locked(
-        self, inspection: FrameInspection, timestamp_ns: int, elapsed_ns: int
+        self,
+        inspection: FrameInspection,
+        timestamp_ns: int,
+        elapsed_ns: int,
+        capture_seq: int,
     ) -> None:
         for index, zone in enumerate(inspection.zones, start=1):
             key = (zone.position_id, zone.lane)
             if zone.reason in _IDLE_REASONS:
                 burst = self._bursts.pop(key, None)
                 if burst is not None:
+                    burst.samples_discarded += zone.samples_expired
                     summary = _close_burst(zone, index, burst, timestamp_ns, zone.reason)
                     self._activities.append(summary)
                     self._append_summary_locked(summary, elapsed_ns, zone)
+                    self._record_attempt_locked(summary, burst)
                 continue
             burst = self._bursts.get(key)
             if burst is None:
@@ -828,8 +962,15 @@ class DiagnosticSession:
                     last_reason=zone.reason,
                     frames=1,
                     direction_samples=zone.sample_count,
+                    first_frame=self._analyzed,
+                    last_frame=self._analyzed,
+                    capture_seq_start=capture_seq,
+                    capture_seq_end=capture_seq,
+                    centroids=[],
+                    shifts=[],
                 )
                 self._bursts[key] = burst
+                self._note_sample_locked(burst, zone, timestamp_ns)
                 self._append_activity_locked(index, zone, elapsed_ns, opened=True)
             else:
                 burst.peak_changed_blocks = max(burst.peak_changed_blocks, zone.changed_blocks)
@@ -839,10 +980,13 @@ class DiagnosticSession:
                 burst.detection_event = burst.detection_event or zone.accepted
                 burst.frames += 1
                 burst.direction_samples = max(burst.direction_samples, zone.sample_count)
+                burst.last_frame = self._analyzed
+                burst.capture_seq_end = capture_seq
                 if zone.accepted:
                     burst.reason = "accepted"
                 elif not burst.detection_event:
                     burst.reason = zone.reason
+                self._note_sample_locked(burst, zone, timestamp_ns)
                 if zone.reason != burst.last_reason:
                     burst.last_reason = zone.reason
                     self._append_activity_locked(index, zone, elapsed_ns, opened=False)
@@ -856,25 +1000,18 @@ class DiagnosticSession:
         inspection = None if latest is None else latest.inspection
         for key, burst in list(self._bursts.items()):
             number = self._zone_numbers.get(key, 0)
-            summary = ActivitySummary(
+            summary = _summary_from_burst(
+                burst,
                 position_id=key[0],
                 lane=key[1],
                 zone_number=number,
-                started_ns=burst.started_ns,
                 ended_ns=stamp,
-                duration_ns=max(0, stamp - burst.started_ns),
-                peak_changed_blocks=burst.peak_changed_blocks,
-                peak_changed_ratio=burst.peak_changed_ratio,
-                peak_difference=burst.peak_difference,
-                direction_confirmed=burst.direction_confirmed,
-                detection_event=burst.detection_event,
-                reason=_activity_reason(burst.reason, detected=burst.detection_event),
-                activity_frames=burst.frames,
-                direction_samples=burst.direction_samples,
+                closing_reason=burst.reason,
             )
             self._activities.append(summary)
             zone = _zone_by_key(inspection, key)
             self._append_summary_locked(summary, elapsed, zone)
+            self._record_attempt_locked(summary, burst)
         self._bursts.clear()
 
     def _append_activity_locked(
@@ -935,6 +1072,7 @@ class DiagnosticSession:
                     f"direction_confirmed={'true' if summary.direction_confirmed else 'false'}",
                     f"detection_event={'true' if summary.detection_event else 'false'}",
                     f"reason={summary.reason}",
+                    f"direction_reason={summary.direction_reason}",
                 ]
             )
         )
@@ -1029,6 +1167,337 @@ class DiagnosticSession:
             ]
         )
 
+    def _open_journal_locked(self) -> None:
+        path = self._journal_path
+        if path is None:
+            if self._journal_dir is None:
+                self._journal_dir = Path(tempfile.mkdtemp(prefix="slot-racing-diagnostic-"))
+            path = self._journal_dir / "diagnostic.jsonl"
+        journal = DiagnosticJournal(path, max_frame_records=self._max_frame_records)
+        journal.open()
+        self._journal = journal
+        self._journal_closed = False
+
+    def _offer_session_locked(self) -> None:
+        journal = self._journal
+        if journal is None:
+            return
+        config = self._config
+        journal.offer(
+            "session",
+            {
+                "started_at": config.started_at,
+                "requested_width": config.requested_width,
+                "requested_height": config.requested_height,
+                "requested_fps": config.requested_fps,
+                "block_size": config.block_size,
+                "sensitivity": config.sensitivity,
+                "difference_threshold": config.difference_threshold,
+                "min_blocks": config.min_blocks,
+                "min_shift": config.min_shift,
+                "window_ns": config.window_ns,
+                "direction": config.direction,
+                "max_frame_records": self._max_frame_records,
+            },
+        )
+
+    def _offer_frame_locked(
+        self,
+        delivered: TimedFrame,
+        dt: int | None,
+        analysis_ns: int,
+        inspection: FrameInspection | None,
+    ) -> None:
+        journal = self._journal
+        if journal is None or journal.frame_detail_limited:
+            return
+        zones: list[dict[str, object]] = []
+        if inspection is not None:
+            for zone in inspection.zones:
+                centroid: list[float] | None
+                if zone.centroid is None:
+                    centroid = None
+                else:
+                    centroid = [round(zone.centroid[0], 2), round(zone.centroid[1], 2)]
+                shift = None if zone.shift is None else round(zone.shift, 3)
+                zones.append(
+                    {
+                        "lane": zone.lane,
+                        "position": zone.position_id,
+                        "reason": zone.reason,
+                        "state": zone.state.value,
+                        "samples": zone.sample_count,
+                        "samples_expired": zone.samples_expired,
+                        "component_blocks": zone.component_blocks,
+                        "changed_blocks": zone.changed_blocks,
+                        "shift": shift,
+                        "accepted": zone.accepted,
+                        "centroid": centroid,
+                        "window_ns": zone.window_ns,
+                        "reference_frozen": zone.reference_frozen,
+                        "reference_updates": zone.reference_updates,
+                    }
+                )
+        journal.offer(
+            "frame",
+            {
+                "frame": self._analyzed,
+                "capture_seq": delivered.sequence,
+                "t_ns": delivered.timestamp_ns,
+                "dt_ns": dt,
+                "analysis_ns": analysis_ns,
+                "zones": zones,
+            },
+        )
+
+    def _note_sample_locked(self, burst: _Burst, zone: ZoneInspection, timestamp_ns: int) -> None:
+        burst.samples_discarded += zone.samples_expired
+        if zone.reason == "below_size":
+            burst.below_size_frames += 1
+        elif zone.reason == "too_short":
+            burst.too_short_frames += 1
+        elif zone.reason in {"insufficient_motion", "below_shift"}:
+            burst.insufficient_frames += 1
+        elif zone.reason == "wrong_direction":
+            burst.wrong_direction_frames += 1
+        if zone.component_blocks > 0:
+            burst.component_sum += zone.component_blocks
+            burst.component_peak = max(burst.component_peak, zone.component_blocks)
+            burst.component_frames += 1
+        keeps_sample = zone.centroid is not None and zone.reason not in {
+            "occupied",
+            "released",
+            "released_to_background",
+        }
+        if keeps_sample and zone.centroid is not None:
+            burst.samples_created += 1
+            history = burst.centroids
+            if history is None:
+                history = []
+                burst.centroids = history
+            if len(history) < _SAMPLE_HISTORY:
+                history.append(
+                    (timestamp_ns, round(zone.centroid[0], 2), round(zone.centroid[1], 2))
+                )
+            else:
+                burst.centroids_omitted += 1
+        if zone.shift is not None:
+            shifts = burst.shifts
+            if shifts is None:
+                shifts = []
+                burst.shifts = shifts
+            if len(shifts) < _SAMPLE_HISTORY:
+                shifts.append(round(zone.shift, 3))
+        state = zone.state.value
+        if burst.last_state and state != burst.last_state:
+            burst.state_changes += 1
+        burst.last_state = state
+
+    def _record_attempt_locked(self, summary: ActivitySummary, burst: _Burst) -> None:
+        journal = self._journal
+        if journal is None:
+            return
+        centroids = [] if burst.centroids is None else burst.centroids
+        gaps: list[int] = []
+        previous: int | None = None
+        for stamp, _x, _y in centroids:
+            if previous is not None:
+                gaps.append(stamp - previous)
+            previous = stamp
+        average: float | None = None
+        if burst.component_frames > 0:
+            average = burst.component_sum / burst.component_frames
+        if summary.detection_event:
+            direction = "confirmed"
+        elif summary.direction_reason == "wrong_direction":
+            direction = "wrong_direction"
+        else:
+            direction = "undetermined"
+        journal.offer(
+            "attempt",
+            {
+                "lane": summary.lane,
+                "position": summary.position_id,
+                "zone": summary.zone_number,
+                "started_ns": summary.started_ns,
+                "ended_ns": summary.ended_ns,
+                "samples_created": burst.samples_created,
+                "samples_valid": summary.direction_samples,
+                "samples_discarded": burst.samples_discarded,
+                "sample_gaps_ns": gaps,
+                "centroids": [[stamp, x, y] for stamp, x, y in centroids],
+                "centroids_omitted": burst.centroids_omitted,
+                "shifts": [] if burst.shifts is None else list(burst.shifts),
+                "component_peak": burst.component_peak,
+                "component_average": average,
+                "changed_blocks_peak": summary.peak_changed_blocks,
+                "state_changes": burst.state_changes,
+                "last_state": burst.last_state,
+                "below_size_frames": burst.below_size_frames,
+                "too_short_frames": burst.too_short_frames,
+                "insufficient_frames": burst.insufficient_frames,
+                "wrong_direction_frames": burst.wrong_direction_frames,
+                "direction": direction,
+                "result": "accepted" if summary.detection_event else "rejected",
+                "reason": summary.reason,
+                "direction_reason": summary.direction_reason,
+                "frame_start": burst.first_frame,
+                "frame_end": burst.last_frame,
+                "capture_seq_start": burst.capture_seq_start,
+                "capture_seq_end": burst.capture_seq_end,
+                "activity_frames": summary.activity_frames,
+            },
+        )
+
+    def _summary_payload_locked(self, journal: DiagnosticJournal) -> dict[str, object]:
+        zones = self._zone_reports_locked()
+        return {
+            "started_at": self._config.started_at,
+            "ended_at": self._ended_at,
+            "frames_submitted": self._submitted,
+            "frames_analyzed": self._analyzed,
+            "frames_skipped": self._skipped,
+            "events_lost": journal.events_lost,
+            "write_errors": journal.write_errors,
+            "frame_records_kept": journal.frames_written,
+            "frame_detail_limited": journal.frame_detail_limited,
+            "text_log_truncated": self._truncated,
+            "zones": [
+                {
+                    "lane": zone.lane,
+                    "position": zone.position_id,
+                    "confirmed": zone.confirmed,
+                    "rejected": zone.rejected,
+                    "single_sample": zone.single_sample,
+                    "invalid_direction": zone.invalid_direction,
+                    "reasons": dict(zone.reasons),
+                }
+                for zone in zones
+            ],
+        }
+
+    def _build_report_locked(self, journal: DiagnosticJournal | None) -> DiagnosticReport:
+        performance = self._performance_locked()
+        zones = self._zone_reports_locked()
+        duration = None
+        if self._first_ns is not None and self._previous_ns is not None:
+            duration = self._previous_ns - self._first_ns
+        dt_average = None if self._dt_count == 0 else self._dt_sum // self._dt_count
+        opened = False
+        error = ""
+        lost = 0
+        write_errors = 0
+        kept = 0
+        limited = False
+        if journal is not None:
+            opened = journal.opened
+            error = journal.error
+            lost = journal.events_lost
+            write_errors = journal.write_errors
+            kept = journal.frames_written
+            limited = journal.frame_detail_limited
+        actual_width = None if self._actual is None else self._actual[0]
+        actual_height = None if self._actual is None else self._actual[1]
+        config = self._config
+        return DiagnosticReport(
+            started_at=config.started_at,
+            ended_at=self._ended_at,
+            duration_ns=duration,
+            requested_width=config.requested_width,
+            requested_height=config.requested_height,
+            actual_width=actual_width,
+            actual_height=actual_height,
+            requested_fps=config.requested_fps,
+            camera_fps=performance.camera_fps,
+            analysis_fps=performance.analysis_fps,
+            block_size=config.block_size,
+            sensitivity=config.sensitivity,
+            difference_threshold=config.difference_threshold,
+            min_blocks=config.min_blocks,
+            min_shift=config.min_shift,
+            window_ns=config.window_ns,
+            direction=config.direction,
+            frames_submitted=self._submitted,
+            frames_analyzed=self._analyzed,
+            frames_skipped=self._skipped,
+            capture_dropped=performance.capture_dropped,
+            read_failures=performance.read_failures,
+            dt_min_ns=self._dt_min,
+            dt_max_ns=self._dt_max,
+            dt_average_ns=dt_average,
+            analysis_min_ns=self._analysis_ns_min,
+            analysis_max_ns=self._analysis_ns_max,
+            analysis_average_ns=performance.average_analysis_ns,
+            analysis_p95_ns=percentile_nearest(self._analysis_samples, 95),
+            events_lost=lost,
+            write_errors=write_errors,
+            journal_opened=opened,
+            journal_error=error,
+            frame_records_kept=kept,
+            frame_detail_limited=limited,
+            text_log_truncated=self._truncated,
+            zones=zones,
+            references=self._reference_rows_locked(zones),
+        )
+
+    def _zone_reports_locked(self) -> tuple[ZoneReport, ...]:
+        grouped: dict[tuple[str, int], list[ActivitySummary]] = {}
+        for activity in self._activities:
+            grouped.setdefault((activity.position_id, activity.lane), []).append(activity)
+        reports: list[ZoneReport] = []
+        single_codes = {
+            "single_sample",
+            "single_sample_one_frame",
+            "single_sample_below_size",
+            "direction_window_expired",
+        }
+        for (position_id, lane), activities in grouped.items():
+            confirmed = [item for item in activities if item.detection_event]
+            rejected = [item for item in activities if not item.detection_event]
+            reasons: Counter[str] = Counter(
+                item.direction_reason or item.reason for item in rejected
+            )
+            ordered = tuple(sorted(reasons.items()))
+            confirmed.sort(key=lambda item: item.ended_ns)
+            gaps: list[int] = []
+            previous: int | None = None
+            for item in confirmed:
+                if previous is not None:
+                    gaps.append(item.ended_ns - previous)
+                previous = item.ended_ns
+            reports.append(
+                ZoneReport(
+                    lane=lane,
+                    position_id=position_id,
+                    confirmed=len(confirmed),
+                    rejected=len(rejected),
+                    reasons=ordered,
+                    single_sample=sum(
+                        1 for item in rejected if item.direction_reason in single_codes
+                    ),
+                    invalid_direction=sum(
+                        1 for item in rejected if item.direction_reason == "invalid_direction"
+                    ),
+                    confirmed_gaps_ns=tuple(gaps),
+                )
+            )
+        reports.sort(key=lambda item: (item.lane, item.position_id))
+        return tuple(reports)
+
+    def _reference_rows_locked(self, zones: tuple[ZoneReport, ...]) -> tuple[LaneReference, ...]:
+        confirmed: dict[int, int] = {}
+        for zone in zones:
+            confirmed[zone.lane] = confirmed.get(zone.lane, 0) + zone.confirmed
+        rows = [
+            LaneReference(
+                lane=lane,
+                reference_laps=laps,
+                confirmed_events=confirmed.get(lane, 0),
+            )
+            for lane, laps in sorted(self._references.items())
+        ]
+        return tuple(rows)
+
 
 def _overwrites(capture: CaptureCounters | None) -> int | None:
     """Latest-frame replacements seen with this frame. Not a failed read."""
@@ -1100,26 +1569,54 @@ def _zone_line(number: int, zone: ZoneInspection) -> str:
 def _close_burst(
     zone: ZoneInspection, number: int, burst: _Burst, timestamp_ns: int, reason: str
 ) -> ActivitySummary:
-    closed_reason = burst.reason if burst.detection_event else reason
-    if burst.detection_event:
-        closed_reason = "accepted"
-    elif burst.reason not in _IDLE_REASONS:
-        closed_reason = burst.reason
-    return ActivitySummary(
+    closing = burst.reason if burst.reason not in _IDLE_REASONS else reason
+    return _summary_from_burst(
+        burst,
         position_id=zone.position_id,
         lane=zone.lane,
         zone_number=number,
-        started_ns=burst.started_ns,
         ended_ns=timestamp_ns,
-        duration_ns=max(0, timestamp_ns - burst.started_ns),
+        closing_reason=closing,
+    )
+
+
+def _summary_from_burst(
+    burst: _Burst,
+    *,
+    position_id: str,
+    lane: int,
+    zone_number: int,
+    ended_ns: int,
+    closing_reason: str,
+) -> ActivitySummary:
+    detected = burst.detection_event
+    raw = "accepted" if detected else closing_reason
+    reason = _activity_reason(raw, detected=detected)
+    code = direction_reason_code(
+        detected=detected,
+        max_samples=burst.direction_samples,
+        samples_expired=burst.samples_discarded,
+        below_size_frames=burst.below_size_frames,
+        frames=burst.frames,
+        algorithm_reason=reason,
+        wrong_direction_frames=burst.wrong_direction_frames,
+    )
+    return ActivitySummary(
+        position_id=position_id,
+        lane=lane,
+        zone_number=zone_number,
+        started_ns=burst.started_ns,
+        ended_ns=ended_ns,
+        duration_ns=max(0, ended_ns - burst.started_ns),
         peak_changed_blocks=burst.peak_changed_blocks,
         peak_changed_ratio=burst.peak_changed_ratio,
         peak_difference=burst.peak_difference,
         direction_confirmed=burst.direction_confirmed,
-        detection_event=burst.detection_event,
-        reason=_activity_reason(closed_reason, detected=burst.detection_event),
+        detection_event=detected,
+        reason=reason,
         activity_frames=burst.frames,
         direction_samples=burst.direction_samples,
+        direction_reason=code,
     )
 
 

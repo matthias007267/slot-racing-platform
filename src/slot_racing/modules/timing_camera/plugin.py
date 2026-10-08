@@ -108,6 +108,22 @@ class CameraTimingPlugin(Plugin):
             "camera.diagnostic.too_few_samples_many": (
                 "Richtungsbestimmung nicht möglich: nur {samples} verwertbare Bewegungssamples."
             ),
+            "camera.diagnostic.single_sample_pending": (
+                "Richtungsbestimmung nicht möglich: nur 1 verwertbares Bewegungssample "
+                "in diesem Frame. Ein zweites Sample liegt noch nicht vor."
+            ),
+            "camera.diagnostic.direction_window_expired": (
+                "Richtungsbestimmung nicht möglich: das vorherige Bewegungssample liegt "
+                "außerhalb des Richtungszeitfensters."
+            ),
+            "camera.diagnostic.include_frames": "Frame-Details mitspeichern",
+            "camera.diagnostic.reference_lane": "Bahn",
+            "camera.diagnostic.reference_laps": "Referenzrunden",
+            "camera.diagnostic.reference_apply": "Referenz übernehmen",
+            "camera.diagnostic.reference_saved": (
+                "Referenz gespeichert. Die Erkennung bleibt unverändert."
+            ),
+            "camera.diagnostic.reference_missing": "Noch keine Diagnose gestartet.",
             "camera.status.live": "Live",
             "camera.status.offline": "Kamera nicht verfügbar",
             "camera.status.offline_detail": "Kamera konnte nicht geöffnet werden.",
