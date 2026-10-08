@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -97,6 +99,7 @@ class DetectionDiagnosticDialog(QDialog):
         self._cards: list[_ZoneCard] = []
         self._translator = translator
         self._host = host
+        self._lane_references: dict[int, int] = {}
         self._session: DiagnosticSession | None = None
         self._config: DiagnosticConfig | None = None
         self._view = DiagnosticView.ANALYSIS
@@ -143,11 +146,22 @@ class DetectionDiagnosticDialog(QDialog):
         self.save_button.setObjectName("camera-diagnostic-save")
         self.snapshot_button = QPushButton(self._tr("camera.diagnostic.snapshot"))
         self.snapshot_button.setObjectName("camera-diagnostic-snapshot")
+        self.reference_lane = QSpinBox()
+        self.reference_lane.setObjectName("camera-diagnostic-reference-lane")
+        self.reference_lane.setRange(1, 8)
+        self.reference_laps = QSpinBox()
+        self.reference_laps.setObjectName("camera-diagnostic-reference-laps")
+        self.reference_laps.setRange(0, 100_000)
+        self.reference_button = QPushButton(self._tr("camera.diagnostic.reference_apply"))
+        self.reference_button.setObjectName("camera-diagnostic-reference-apply")
+        self.include_frames = QCheckBox(self._tr("camera.diagnostic.include_frames"))
+        self.include_frames.setObjectName("camera-diagnostic-include-frames")
         set_role(self.start_button, "primary")
         set_role(self.stop_button, "secondary")
         set_role(self.copy_button, "ghost")
         set_role(self.save_button, "ghost")
         set_role(self.snapshot_button, "ghost")
+        set_role(self.reference_button, "ghost")
         self.log = QPlainTextEdit()
         self.log.setObjectName("camera-diagnostic-log")
         self.log.setReadOnly(True)
@@ -179,7 +193,13 @@ class DetectionDiagnosticDialog(QDialog):
         exports = QHBoxLayout()
         exports.addWidget(self.copy_button)
         exports.addWidget(self.save_button)
+        exports.addWidget(self.include_frames)
         exports.addWidget(self.snapshot_button)
+        exports.addWidget(QLabel(self._tr("camera.diagnostic.reference_lane")))
+        exports.addWidget(self.reference_lane)
+        exports.addWidget(QLabel(self._tr("camera.diagnostic.reference_laps")))
+        exports.addWidget(self.reference_laps)
+        exports.addWidget(self.reference_button)
         exports.addStretch(1)
         root = QVBoxLayout(self)
         configure_page(root)
@@ -198,6 +218,7 @@ class DetectionDiagnosticDialog(QDialog):
         self.copy_button.clicked.connect(self.copy_log)
         self.save_button.clicked.connect(self.save_log)
         self.snapshot_button.clicked.connect(self.save_snapshot)
+        self.reference_button.clicked.connect(self.apply_reference)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.shutdown()
@@ -226,6 +247,8 @@ class DetectionDiagnosticDialog(QDialog):
         )
         session = DiagnosticSession(settings, config, max_lines=MAX_LOG_LINES)
         session.start()
+        for lane, laps in self._lane_references.items():
+            session.set_reference_laps(lane, laps)
         self._session = session
         self._config = config
         self._host.attach_diagnostic(self._on_frame)
@@ -259,12 +282,27 @@ class DetectionDiagnosticDialog(QDialog):
             clipboard.setText(text)
         self._set_status("camera.diagnostic.copied", error=False)
 
+    def apply_reference(self) -> None:
+        """Remember a hand-counted lap total for one lane. Detection ignores it."""
+        lane = self.reference_lane.value()
+        laps = self.reference_laps.value()
+        self._lane_references[lane] = laps
+        session = self._session
+        if session is not None:
+            session.set_reference_laps(lane, laps)
+        self._set_status("camera.diagnostic.reference_saved", error=False)
+
     def save_log(self, path: Path | None = None) -> Path | None:
-        """Write the full diagnostic text as UTF-8. ``path`` skips the file dialog."""
+        """Write the summary and the structured attempts. Frame rows are optional."""
         target = path if path is not None else self._ask_path(_export_name("txt"), "Text (*.txt)")
         if target is None:
             return None
-        target.write_text(self.log_text(), encoding="utf-8")
+        session = self._session
+        if session is None:
+            body = ""
+        else:
+            body = session.export_text(include_frames=self.include_frames.isChecked())
+        target.write_text(body, encoding="utf-8")
         self._set_status("camera.diagnostic.saved", error=False)
         return target
 
@@ -397,11 +435,12 @@ class DetectionDiagnosticDialog(QDialog):
         ]
         if zone.reason == "too_short":
             samples = max(zone.sample_count, 1)
-            key = (
-                "camera.diagnostic.too_few_samples"
-                if samples == 1
-                else "camera.diagnostic.too_few_samples_many"
-            )
+            if samples <= 1 and zone.samples_expired > 0:
+                key = "camera.diagnostic.direction_window_expired"
+            elif samples <= 1:
+                key = "camera.diagnostic.single_sample_pending"
+            else:
+                key = "camera.diagnostic.too_few_samples_many"
             lines.append(self._translator.format(key, samples=samples))
         return "\n".join(lines)
 
