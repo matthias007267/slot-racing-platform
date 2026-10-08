@@ -13,6 +13,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -714,17 +715,25 @@ class DiagnosticSession:
             return ""
         return format_events_jsonl(journal.records(), include_frames=include_frames)
 
-    def write_export(self, stem: Path, *, include_frames: bool = False) -> tuple[Path, Path, Path]:
-        """Write summary text, summary JSON and the event JSONL next to ``stem``."""
-        if not isinstance(stem, Path):
-            raise TypeError("stem must be a Path")
-        summary_path = stem.with_suffix(".txt")
-        report_path = stem.with_suffix(".json")
-        events_path = stem.with_suffix(".jsonl")
-        summary_path.write_text(self.export_summary(), encoding="utf-8")
-        report_path.write_text(self.export_report_json(), encoding="utf-8")
-        events_path.write_text(
-            self.export_events_jsonl(include_frames=include_frames), encoding="utf-8"
+    def write_export(
+        self, stem: str | Path, *, include_frames: bool = False
+    ) -> tuple[Path, Path, Path]:
+        """Write summary text, summary JSON and the event JSONL next to ``stem``.
+
+        ``stem`` is a path or the string a file dialog returns. The session
+        journal is only read. A failed write leaves that journal and any
+        earlier export files in place.
+        """
+        target = _export_stem(stem)
+        summary_path = target.with_suffix(".txt")
+        report_path = target.with_suffix(".json")
+        events_path = target.with_suffix(".jsonl")
+        _publish_texts(
+            (
+                (summary_path, self.export_summary()),
+                (report_path, self.export_report_json()),
+                (events_path, self.export_events_jsonl(include_frames=include_frames)),
+            )
         )
         return summary_path, report_path, events_path
 
@@ -1572,6 +1581,38 @@ class DiagnosticSession:
             for lane, laps in sorted(self._references.items())
         ]
         return tuple(rows)
+
+
+def _export_stem(stem: object) -> Path:
+    """Accept the path types a Qt save dialog and a caller can hand over."""
+    if isinstance(stem, bool) or not isinstance(stem, (str, Path)):
+        raise TypeError("stem must be a str or Path")
+    if isinstance(stem, str):
+        if stem.strip() == "":
+            raise ValueError("stem must not be empty")
+        path = Path(stem)
+    else:
+        path = stem
+    if path == Path() or path == Path("."):
+        raise ValueError("stem must not be empty")
+    return path
+
+
+def _publish_texts(files: tuple[tuple[Path, str], ...]) -> None:
+    """Write every file, then replace the destinations. A failure removes temps."""
+    staged: list[Path] = []
+    try:
+        for destination, body in files:
+            temporary = destination.with_name(f".{destination.name}.export-tmp")
+            temporary.write_text(body, encoding="utf-8")
+            staged.append(temporary)
+        for temporary, (destination, _body) in zip(staged, files, strict=True):
+            temporary.replace(destination)
+    except OSError:
+        for temporary in staged:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        raise
 
 
 def _direction_mode(zones: tuple[ZoneFacts, ...]) -> str:

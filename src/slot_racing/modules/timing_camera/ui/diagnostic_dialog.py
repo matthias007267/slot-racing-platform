@@ -170,6 +170,7 @@ class DetectionDiagnosticDialog(QDialog):
         self.log.setPlaceholderText(self._tr("camera.diagnostic.log"))
         self.status = QLabel()
         self.status.setObjectName("camera-diagnostic-status")
+        self.status.setWordWrap(True)
 
         heading = QLabel(self._tr("camera.diagnostic.title"))
         set_role(heading, "section")
@@ -297,22 +298,26 @@ class DetectionDiagnosticDialog(QDialog):
             session.set_reference_laps(lane, laps)
         self._set_status("camera.diagnostic.reference_saved", error=False)
 
-    def save_diagnosis(self, path: Path | None = None) -> tuple[Path, Path, Path] | None:
+    def save_diagnosis(self, path: str | Path | None = None) -> tuple[Path, Path, Path] | None:
         """Write the summary, its JSON form and the event JSONL."""
-        target = path if path is not None else self._ask_path(_export_name("txt"), "Text (*.txt)")
+        target = self._chosen_export(path, _export_name("txt"), "Text (*.txt)")
         if target is None:
             return None
         session = self._session
         if session is None:
             self._set_status("camera.diagnostic.reference_missing", error=True)
             return None
-        written = session.write_export(target, include_frames=self.include_frames.isChecked())
+        try:
+            written = session.write_export(target, include_frames=self.include_frames.isChecked())
+        except (OSError, ValueError, TypeError) as error:
+            self._show_export_error(session, error)
+            return None
         self._set_status("camera.diagnostic.saved", error=False)
         return written
 
-    def save_log(self, path: Path | None = None) -> Path | None:
+    def save_log(self, path: str | Path | None = None) -> Path | None:
         """Write the summary and the structured attempts. Frame rows are optional."""
-        target = path if path is not None else self._ask_path(_export_name("txt"), "Text (*.txt)")
+        target = self._chosen_export(path, _export_name("txt"), "Text (*.txt)")
         if target is None:
             return None
         session = self._session
@@ -320,17 +325,27 @@ class DetectionDiagnosticDialog(QDialog):
             body = ""
         else:
             body = session.export_text(include_frames=self.include_frames.isChecked())
-        target.write_text(body, encoding="utf-8")
+        try:
+            target.write_text(body, encoding="utf-8")
+        except OSError as error:
+            if session is None:
+                self.status.setText(
+                    self._translator.format("camera.diagnostic.export_failed", detail=error)
+                )
+                set_tone(self.status, "error")
+            else:
+                self._show_export_error(session, error)
+            return None
         self._set_status("camera.diagnostic.saved", error=False)
         return target
 
-    def save_snapshot(self, path: Path | None = None) -> Path | None:
+    def save_snapshot(self, path: str | Path | None = None) -> Path | None:
         """Write the current calculation view, including overlays, as a PNG."""
         image = self._image
         if image is None or image.isNull():
             self._set_status("camera.diagnostic.snapshot_missing", error=True)
             return None
-        target = path if path is not None else self._ask_path(_export_name("png"), "PNG (*.png)")
+        target = self._chosen_export(path, _export_name("png"), "PNG (*.png)")
         if target is None:
             return None
         if not image.save(str(target)):
@@ -338,6 +353,30 @@ class DetectionDiagnosticDialog(QDialog):
             return None
         self._set_status("camera.diagnostic.snapshot_saved", error=False)
         return target
+
+    def _chosen_export(self, path: object, name: str, file_filter: str) -> Path | None:
+        """Turn a caller path into ``Path``. A button click passes ``False``."""
+        if isinstance(path, bool) or path is None:
+            return self._ask_path(name, file_filter)
+        if isinstance(path, Path):
+            return path
+        if isinstance(path, str):
+            return Path(path)
+        return self._ask_path(name, file_filter)
+
+    def _show_export_error(self, session: DiagnosticSession, error: BaseException) -> None:
+        """Keep the session. Point at the journal when it is already on disk."""
+        journal = session.journal_path()
+        if journal is not None and journal.is_file():
+            message = self._translator.format(
+                "camera.diagnostic.export_failed_kept",
+                detail=error,
+                journal=journal,
+            )
+        else:
+            message = self._translator.format("camera.diagnostic.export_failed", detail=error)
+        self.status.setText(message)
+        set_tone(self.status, "error")
 
     def log_text(self) -> str:
         session = self._session

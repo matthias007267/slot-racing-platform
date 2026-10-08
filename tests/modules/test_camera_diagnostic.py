@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QFileDialog
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.domain import TimingLayout, TimingSensor, TimingSetup
@@ -995,3 +996,164 @@ def test_disabled_direction_check_is_named_in_the_closing_report(tmp_path: Path)
         assert events.count('"kind":"attempt"') == 1
     finally:
         session.close()
+
+
+def test_write_export_accepts_a_string_and_a_path(tmp_path: Path) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "live.jsonl")
+    try:
+        _feed(session, (square_frame(), blob(0, 0)))
+        session.stop()
+        journal = session.journal_path()
+        assert journal is not None and journal.is_file()
+        journal_before = journal.read_text(encoding="utf-8")
+        assert '"kind":"summary"' in journal_before
+        assert '"kind":"frame"' in journal_before
+
+        from_text = session.write_export(str(tmp_path / "from-text.txt"))
+        from_path = session.write_export(tmp_path / "from-path")
+        for summary_path, report_path, events_path in (from_text, from_path):
+            summary = summary_path.read_text(encoding="utf-8")
+            assert summary_path.suffix == ".txt"
+            assert "=== Diagnoseabschluss ===" in summary
+            assert "events_complete=" in summary
+            assert f"journal_path={journal}" in summary
+            report = report_path.read_text(encoding="utf-8")
+            assert '"events_complete"' in report
+            assert '"journal_path"' in report
+            events = events_path.read_text(encoding="utf-8")
+            assert '"kind":"summary"' in events
+            assert '"kind":"session"' in events
+            assert '"kind":"frame"' not in events
+        assert journal.read_text(encoding="utf-8") == journal_before
+        with_frames = session.write_export(tmp_path / "frames.txt", include_frames=True)
+        assert '"kind":"frame"' in with_frames[2].read_text(encoding="utf-8")
+        assert journal.read_text(encoding="utf-8") == journal_before
+        assert not list(tmp_path.glob(".*.export-tmp"))
+    finally:
+        session.close()
+
+
+def test_write_export_rejects_a_button_flag_and_an_empty_stem(tmp_path: Path) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "kept.jsonl")
+    try:
+        _feed(session, (square_frame(),))
+        session.stop()
+        journal = session.journal_path()
+        assert journal is not None
+        before = journal.read_bytes()
+        with pytest.raises(TypeError, match="str or Path"):
+            session.write_export(False)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="empty"):
+            session.write_export("   ")
+        with pytest.raises(FileNotFoundError):
+            session.write_export(tmp_path / "missing" / "bundle.txt")
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("blocked", encoding="utf-8")
+        with pytest.raises(OSError):
+            session.write_export(blocker / "bundle.txt")
+        assert journal.read_bytes() == before
+        assert session.text()
+        assert not (tmp_path / "missing").exists()
+    finally:
+        session.close()
+
+
+def test_a_failed_export_keeps_the_journal_and_can_be_repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(square_settings(), SQUARE, SQUARE, journal_path=tmp_path / "again.jsonl")
+    try:
+        _feed(session, (square_frame(),))
+        session.stop()
+        journal = session.journal_path()
+        assert journal is not None
+        before = journal.read_bytes()
+        first = session.write_export(tmp_path / "bundle.txt")
+        saved = tuple(path.read_bytes() for path in first)
+        real_write = Path.write_text
+
+        def fail_json(
+            self: Path,
+            data: str,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> int:
+            if self.name.endswith(".json.export-tmp"):
+                raise OSError("disk full")
+            return real_write(self, data, encoding=encoding, errors=errors, newline=newline)
+
+        monkeypatch.setattr(Path, "write_text", fail_json)
+        with pytest.raises(OSError, match="disk full"):
+            session.write_export(tmp_path / "bundle.txt")
+        assert journal.read_bytes() == before
+        assert tuple(path.read_bytes() for path in first) == saved
+        assert not list(tmp_path.glob(".*.export-tmp"))
+        monkeypatch.undo()
+        again = session.write_export(str(tmp_path / "bundle.txt"))
+        assert again[0].read_bytes() == saved[0]
+        assert '"kind":"summary"' in again[2].read_text(encoding="utf-8")
+        assert journal.read_bytes() == before
+    finally:
+        session.close()
+
+
+def test_export_button_uses_the_dialog_string_and_reports_a_failed_write(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(saved_configuration())
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored))
+    page._timer.stop()
+    page.diagnostic.click()
+    dialog = page.findChild(DetectionDiagnosticDialog)
+    assert isinstance(dialog, DetectionDiagnosticDialog)
+    dialog.start_diagnosis()
+    page._pull_frame()
+    assert dialog._session is not None
+    assert dialog._session.wait_idle()
+    dialog.stop_diagnosis()
+    session = dialog._session
+    journal = session.journal_path()
+    assert journal is not None and journal.is_file()
+    journal_before = journal.read_bytes()
+    assert b'"kind":"summary"' in journal_before
+    text_before = session.text()
+    chosen = tmp_path / "clicked.txt"
+
+    def choose_string(*_args: object, **_kwargs: object) -> tuple[str, str]:
+        return str(chosen), "Text (*.txt)"
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose_string)
+    dialog.save_button.click()
+    assert chosen.is_file()
+    assert chosen.with_suffix(".json").is_file()
+    assert '"kind":"summary"' in chosen.with_suffix(".jsonl").read_text(encoding="utf-8")
+    assert "Zusammenfassung, Ereignisse und Statistik gespeichert." in dialog.status.text()
+    assert journal.read_bytes() == journal_before
+    assert session.text() == text_before
+
+    def choose_missing(*_args: object, **_kwargs: object) -> tuple[str, str]:
+        return str(tmp_path / "nowhere" / "bundle.txt"), "Text (*.txt)"
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose_missing)
+    dialog.save_button.click()
+    assert "Export fehlgeschlagen" in dialog.status.text()
+    assert str(journal) in dialog.status.text()
+    assert "erneuter Export" in dialog.status.text()
+    assert journal.read_bytes() == journal_before
+    assert session.text() == text_before
+    assert not (tmp_path / "nowhere").exists()
+
+    retried = tmp_path / "retried.txt"
+
+    def choose_retry(*_args: object, **_kwargs: object) -> tuple[str, str]:
+        return str(retried), "Text (*.txt)"
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose_retry)
+    written = dialog.save_diagnosis(False)  # type: ignore[arg-type]
+    assert written is not None
+    assert retried.is_file()
+    assert '"kind":"summary"' in written[2].read_text(encoding="utf-8")
+    assert journal.read_bytes() == journal_before
+    dialog.close()

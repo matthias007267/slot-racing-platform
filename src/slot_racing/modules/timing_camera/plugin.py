@@ -98,6 +98,14 @@ class CameraTimingPlugin(Plugin):
             ),
             "camera.diagnostic.copied": "Log in die Zwischenablage kopiert.",
             "camera.diagnostic.saved": "Zusammenfassung, Ereignisse und Statistik gespeichert.",
+            "camera.diagnostic.export_failed": (
+                "Export fehlgeschlagen: {detail}. Die Diagnosedaten bleiben in der Sitzung. "
+                "Ein erneuter Export ist möglich."
+            ),
+            "camera.diagnostic.export_failed_kept": (
+                "Export fehlgeschlagen: {detail}. Die vollständige Aufzeichnung bleibt unter "
+                "{journal}. Ein erneuter Export ist möglich."
+            ),
             "camera.diagnostic.snapshot_saved": "Snapshot gespeichert.",
             "camera.diagnostic.snapshot_missing": "Noch kein Analysebild vorhanden.",
             "camera.diagnostic.preview": "Berechnungsvorschau",
