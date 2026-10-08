@@ -172,6 +172,16 @@ class TimeMeasurementCatalog(ABC):
         """Measurements of this track, oldest first. Other tracks are not included."""
 
 
+@dataclass(frozen=True, slots=True)
+class RaceIndexEntry:
+    """One stored race, including a race that has not ended. No result is attached."""
+
+    race_id: int
+    name: str
+    status: RaceStatus
+    finished_at: datetime | None
+
+
 class RaceHistoryCatalog(ABC):
     """Ended races and the layout rows they may belong to. Statistics are computed by the reader."""
 
@@ -186,3 +196,7 @@ class RaceHistoryCatalog(ABC):
     @abstractmethod
     def list_layouts(self, track_id: TrackId) -> tuple[LayoutRevision, ...]:
         """Every stored layout of this track, current plan first. Nothing is invented."""
+
+    @abstractmethod
+    def list_index(self) -> tuple[RaceIndexEntry, ...]:
+        """Every stored race, oldest id first. A race that is still open is included."""

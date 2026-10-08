@@ -41,6 +41,7 @@ def test_all_modules_are_discovered_and_hardware_modules_are_opt_in() -> None:
             "vehicles",
             "tracks",
             "races",
+            "championships",
             "timing",
             "statistics",
             "track_planner",

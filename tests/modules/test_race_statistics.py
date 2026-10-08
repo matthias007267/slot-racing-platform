@@ -113,7 +113,7 @@ def test_migration_adds_an_empty_layout_column() -> None:
         info = list(connection.exec_driver_sql("PRAGMA table_info(time_measurements)"))
     column = next(row for row in info if row[1] == "track_layout_id")
     assert column[3] == 0
-    assert database.schema_revision() == "0017"
+    assert database.schema_revision() == "0018"
     database.dispose()
 
 
