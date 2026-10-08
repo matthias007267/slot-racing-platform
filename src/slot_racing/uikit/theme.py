@@ -48,6 +48,8 @@ class Space:
 
 COLORS = Color()
 SPACE = Space()
+# The live HUD sits beside the main navigation. The HUD editor uses the same width.
+NAVIGATION_WIDTH = 228
 
 _RADIUS = 6
 _BUTTON_HEIGHT = 32

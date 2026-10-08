@@ -47,6 +47,7 @@ class HudWindowPlacement:
     maximized: bool = False
     match_live: bool = True
 
+
 FIELD_DRIVER = "driver"
 FIELD_LAP = "lap"
 FIELD_LANE = "lane"

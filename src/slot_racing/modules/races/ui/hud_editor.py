@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from slot_racing.app.shell import NAVIGATION_WIDTH, ShellHeader
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
@@ -73,7 +72,8 @@ from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
-from slot_racing.uikit.theme import SPACE, set_role
+from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
+from slot_racing.uikit.widgets import StatusPill
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +181,16 @@ def _fallback_top() -> int:
     global _FALLBACK_TOP
     if _FALLBACK_TOP is not None:
         return _FALLBACK_TOP
-    header = ShellHeader()
-    header.set_title("Rennen")
+    header = QWidget()
+    title = QLabel("Rennen")
+    set_role(title, "page-title")
+    status = StatusPill("shell-status")
+    status.set_status("Simulation", "ok")
+    row = QHBoxLayout(header)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(SPACE.md)
+    row.addWidget(title, 1)
+    row.addWidget(status, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     header.ensurePolished()
     top = SPACE.md + max(header.sizeHint().height(), 1) + SPACE.md
     header.deleteLater()
