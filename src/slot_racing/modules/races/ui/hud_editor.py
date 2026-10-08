@@ -72,6 +72,7 @@ from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
+from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
 from slot_racing.uikit.widgets import StatusPill
 
@@ -458,6 +459,33 @@ class HudEditor(QWidget):
         """Write the layout that is on screen, including edits that were not saved yet."""
         self.save()
 
+    def save_and_close(self) -> None:
+        """Store the layout and close the editor after the store confirms the write."""
+        try:
+            self.save()
+        except Exception as error:
+            logger.exception("Could not save the HUD layout")
+            self._show_save_error(error)
+            return
+        if self.is_dirty():
+            self._show_save_error(RuntimeError("stored document differs"))
+            return
+        host = self.window()
+        if isinstance(host, HudEditorWindow):
+            host.close()
+
+    def _show_save_error(self, error: BaseException) -> None:
+        box = QMessageBox(self.window())
+        box.setObjectName("hud-save-error")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self._translator.translate("hud.window.title"))
+        box.setText(
+            f"{self._translator.translate('hud.save.failed')}\n\n"
+            f"{describe_error(self._translator, error)}"
+        )
+        _keep_dialog_text_visible(box)
+        box.exec()
+
     def revert(self) -> None:
         self._stop_cue()
         self._config = self._store.load()
@@ -620,7 +648,7 @@ class HudEditor(QWidget):
         _row(column, tr("hud.preview.lanes"), self._lanes)
 
         column.addWidget(_button("hud-standard", tr("hud.standard"), self.apply_standard_layout))
-        column.addWidget(_button("hud-save", tr("hud.save"), self.save_persistent))
+        column.addWidget(_button("hud-save-close", tr("hud.save_close"), self.save_and_close))
         column.addWidget(_button("hud-revert", tr("hud.revert"), self.revert))
         column.addStretch(1)
 

@@ -330,6 +330,8 @@ class LaneCardBoard(QWidget):
             if lane > lane_count:
                 card = self._cards.pop(lane)
                 self._grid.removeWidget(card)
+                card.hide()
+                card.setParent(None)
                 card.deleteLater()
         for lane in range(1, lane_count + 1):
             if lane not in self._cards:
@@ -348,12 +350,22 @@ class LaneCardBoard(QWidget):
             return
         while self._grid.count():
             self._grid.takeAt(0)
+        # QGridLayout keeps stretch on columns that no longer have a card.
+        # A drop from four lanes to two would otherwise leave empty columns
+        # and pin the remaining cards to the left.
+        for column in range(self._grid.columnCount()):
+            self._grid.setColumnStretch(column, 0)
+            self._grid.setColumnMinimumWidth(column, 0)
+        for row in range(self._grid.rowCount()):
+            self._grid.setRowStretch(row, 0)
+            self._grid.setRowMinimumHeight(row, 0)
         for index, lane in enumerate(range(1, self._lane_count + 1)):
             row, column = divmod(index, columns)
             self._grid.addWidget(self._cards[lane], row, column)
         for column in range(columns):
             self._grid.setColumnStretch(column, 1)
         self._columns = columns
+        self._grid.activate()
 
 
 def _columns_for(lanes: int, width: int) -> int:

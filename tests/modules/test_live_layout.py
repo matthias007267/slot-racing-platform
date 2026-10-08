@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QGridLayout, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.app.main_window import MainWindow
@@ -23,7 +23,7 @@ from slot_racing.modules.races.hud import (
     factory_layout,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
-from slot_racing.modules.races.ui.lane_card import LaneCard, LaneCardBoard, card_top
+from slot_racing.modules.races.ui.lane_card import LaneCard, LaneCardBoard, _columns_for, card_top
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
@@ -454,6 +454,47 @@ def _assert_wrapped(label: QLabel) -> None:
         0, 0, label.width(), 4_000, int(Qt.TextFlag.TextWordWrap), label.text()
     )
     assert bounds.height() <= label.height() + 2
+
+
+def test_lane_cards_fill_the_row_again_when_the_count_drops(qtbot: QtBot) -> None:
+    board = LaneCardBoard(_translator())
+    qtbot.addWidget(board)
+    board.show()
+    for width in (1000, 1400, 700):
+        board.resize(width, 640)
+        QApplication.processEvents()
+        for count in (2, 4, 2, 3, 4, 3, 2):
+            board.show_snapshot(_lanes(count), lane_count=count, mode=RaceMode.LAPS)
+            QApplication.processEvents()
+            _assert_lane_grid(board, count)
+
+
+def _lanes(count: int) -> RaceSnapshot:
+    names = ("Zoe", "Anna", "Ben", "Mia")
+    vehicles = ("Porsche 911", "Ferrari 488", "Audi R8", "BMW M4")
+    rows = tuple(
+        _row(lane, lane, names[lane - 1], vehicles[lane - 1], lane + 6, last=None, best=None)
+        for lane in range(1, count + 1)
+    )
+    return _snapshot(rows, laps=8)
+
+
+def _assert_lane_grid(board: LaneCardBoard, count: int) -> None:
+    assert set(board.cards) == set(range(1, count + 1))
+    grid = board.layout()
+    assert isinstance(grid, QGridLayout)
+    columns = _columns_for(count, board.width())
+    for column in range(columns, grid.columnCount()):
+        assert grid.columnStretch(column) == 0
+        assert grid.columnMinimumWidth(column) == 0
+    first_row = [board.cards[lane] for lane in range(1, min(columns, count) + 1)]
+    assert [card.x() for card in first_row] == sorted(card.x() for card in first_row)
+    right = max(card.x() + card.width() for card in first_row)
+    assert right >= board.width() - 4
+    if count == 2:
+        assert board.cards[1].y() == board.cards[2].y()
+        assert abs(board.cards[1].width() - board.cards[2].width()) <= 4
+        assert board.cards[1].width() > board.width() * 0.4
 
 
 def _row(

@@ -136,6 +136,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hud.edit": "Position / Größe",
         "hud.standard": "Werkslayout",
         "hud.save": "Speichern",
+        "hud.save_close": "Speichern und Schließen",
+        "hud.save.failed": "Das HUD-Layout konnte nicht gespeichert werden.",
         "hud.revert": "Zurücksetzen",
         "hud.font_scale": "Schriftgröße",
         "hud.alignment": "Ausrichtung",

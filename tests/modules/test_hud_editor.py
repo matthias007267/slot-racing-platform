@@ -392,6 +392,64 @@ def test_closing_a_dirty_editor_asks_to_save_discard_or_cancel(qtbot: QtBot, env
     assert window.isVisible()
 
 
+def test_preview_lanes_fill_the_row_again_when_the_count_drops(qtbot: QtBot, env: Env) -> None:
+    window = _main(qtbot, env)
+    editor_window = _open_editor(window)
+    editor_window.resize(1800, 960)
+    QApplication.processEvents()
+    editor = editor_window.editor
+    lanes = editor.findChild(QSpinBox, "hud-preview-lanes")
+    assert lanes is not None
+    font = editor.stage.lanes.cards[1].driver_label.font().pixelSize()
+    for count in (4, 2, 3, 4, 3, 2):
+        lanes.setValue(count)
+        QApplication.processEvents()
+        _assert_preview_lanes(editor, count)
+    assert editor.stage.lanes.cards[1].driver_label.font().pixelSize() == font
+    surface = _surface(editor)
+    positions = _card_boxes(editor)
+    editor.preview_start_sequence()
+    editor.advance_light_preview()
+    assert _surface(editor) == surface
+    assert _card_boxes(editor) == positions
+
+
+def test_save_and_close_stores_the_layout_and_closes_the_editor(qtbot: QtBot, env: Env) -> None:
+    window = _main(qtbot, env)
+    editor_window = _open_editor(window)
+    editor = editor_window.editor
+    button = editor.findChild(QPushButton, "hud-save-close")
+    assert button is not None
+    assert button.text() == "Speichern und Schließen"
+    editor.set_font_scale(135)
+    button.click()
+    assert QApplication.activeModalWidget() is None
+    assert not editor_window.isVisible()
+    assert window.isVisible()
+    stored = env.runtime.services.get(HudConfigurationStore).load().selected()
+    assert stored.font_scale == 135
+
+
+def test_a_failed_save_keeps_the_editor_open(qtbot: QtBot, env: Env) -> None:
+    window = _main(qtbot, env)
+    editor_window = _open_editor(window)
+    editor = editor_window.editor
+    editor.set_font_scale(125)
+
+    def broken(configuration: object) -> object:
+        del configuration
+        raise OSError("disk full")
+
+    editor._store.save = broken  # type: ignore[method-assign]
+    _dismiss_save_error()
+    button = editor.findChild(QPushButton, "hud-save-close")
+    assert button is not None
+    button.click()
+    assert editor_window.isVisible()
+    assert window.isVisible()
+    assert editor.selected_layout().font_scale == 125
+
+
 def test_the_light_overlay_stays_on_the_editor_stage(qtbot: QtBot, env: Env) -> None:
     window = _main(qtbot, env)
     editor_window = _open_editor(window)
@@ -420,6 +478,23 @@ def test_the_light_overlay_stays_on_the_editor_stage(qtbot: QtBot, env: Env) -> 
     assert _surface(editor) == surface
 
 
+def _assert_preview_lanes(editor: HudEditor, count: int) -> None:
+    board = editor.stage.lanes
+    assert set(board.cards) == set(range(1, count + 1))
+    cards = [board.cards[lane] for lane in range(1, count + 1)]
+    first_row_y = min(card.y() for card in cards)
+    row = [card for card in cards if card.y() == first_row_y]
+    right = max(card.x() + card.width() for card in row)
+    assert right >= board.width() - 4
+    if count == 2:
+        assert board.cards[1].y() == board.cards[2].y()
+        assert board.cards[1].width() > board.width() * 0.4
+
+
+def _card_boxes(editor: HudEditor) -> tuple[QRect, ...]:
+    return tuple(card.geometry() for card in editor.stage.lanes.cards.values())
+
+
 def _main(qtbot: QtBot, env: Env) -> MainWindow:
     window = MainWindow(env.runtime)
     qtbot.addWidget(window)
@@ -436,6 +511,17 @@ def _open_editor(window: MainWindow) -> HudEditorWindow:
     editor_window = window.findChild(HudEditorWindow)
     assert isinstance(editor_window, HudEditorWindow)
     return editor_window
+
+
+def _dismiss_save_error() -> None:
+    def click() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        assert box.objectName() == "hud-save-error"
+        assert "Das HUD-Layout konnte nicht gespeichert werden." in box.text()
+        box.accept()
+
+    QTimer.singleShot(0, click)
 
 
 def _answer(object_name: str) -> None:
