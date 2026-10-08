@@ -11,16 +11,21 @@ import json
 import queue
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TextIO
 
 # One line stays small. Matrices and camera pixels are not stored.
 _QUEUE_LIMIT = 2048
+# Attempts and the summary keep this many free slots when frames are still arriving.
+_EVENT_RESERVE = 256
 _FLUSH_EVERY = 64
 
 REASON_TEXT: dict[str, str] = {
-    "accepted": "Durchfahrt bestätigt.",
+    "accepted": "Durchfahrt mit gültiger Fahrtrichtung bestätigt.",
+    "accepted_without_direction_check": (
+        "Durchfahrt ohne Richtungsprüfung bestätigt. Größe und Differenzschwellwert galten."
+    ),
     "single_sample_one_frame": (
         "Nur ein verwertbares Bewegungssample: das Objekt war nur in einem Frame groß genug."
     ),
@@ -55,6 +60,8 @@ def direction_reason_code(
 ) -> str:
     """Name why a closed attempt did or did not get a direction. No new guess."""
     if detected:
+        if algorithm_reason == "accepted_without_direction_check":
+            return "accepted_without_direction_check"
         return "accepted"
     # A rejected opposite shift clears the sample list back to one entry.
     if algorithm_reason == "wrong_direction" or wrong_direction_frames > 0:
@@ -116,6 +123,8 @@ class ZoneReport:
     single_sample: int
     invalid_direction: int
     confirmed_gaps_ns: tuple[int, ...]
+    direction_check_enabled: bool = True
+    mean_samples: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +169,9 @@ class DiagnosticReport:
     text_log_truncated: bool
     zones: tuple[ZoneReport, ...]
     references: tuple[LaneReference, ...]
+    direction_check: str = "enabled"
+    zone_checks: tuple[tuple[str, int, bool], ...] = ()
+    journal_path: str = ""
 
     @property
     def events_complete(self) -> bool:
@@ -196,6 +208,8 @@ def format_summary(report: DiagnosticReport) -> str:
         f"Mindestverschiebung: {report.min_shift:.2f}",
         f"Richtungszeitfenster ms: {report.window_ns / 1_000_000:.1f}",
         f"Fahrtrichtung: {report.direction}",
+        f"direction_check={report.direction_check}",
+        f"journal_path={report.journal_path or 'waiting'}",
         "",
         "Performance",
         f"frames_submitted={report.frames_submitted}",
@@ -213,6 +227,10 @@ def format_summary(report: DiagnosticReport) -> str:
         f"frame_records_kept={report.frame_records_kept}",
         "",
         "Erkennung",
+        (
+            "Die Anzahl bestätigter Durchfahrten ist keine Erkennungsquote. "
+            "Fehlauslösungen und verpasste Durchfahrten können sich ausgleichen."
+        ),
     ]
     if not report.zones:
         lines.append("Zonen: keine abgeschlossenen Bewegungsversuche")
@@ -226,6 +244,9 @@ def format_summary(report: DiagnosticReport) -> str:
                     f"rejected={zone.rejected}",
                     f"single_sample={zone.single_sample}",
                     f"invalid_direction={zone.invalid_direction}",
+                    "direction_check_enabled="
+                    + ("true" if zone.direction_check_enabled else "false"),
+                    f"mean_samples={_mean(zone.mean_samples)}",
                 ]
             )
         )
@@ -234,6 +255,23 @@ def format_summary(report: DiagnosticReport) -> str:
         if zone.confirmed_gaps_ns:
             shown = ", ".join(f"{gap / 1_000_000:.1f}" for gap in zone.confirmed_gaps_ns)
             lines.append(f"confirmed_gaps_ms lane={zone.lane}: {shown}")
+    if report.direction_check != "enabled":
+        lines.append(
+            "Ohne Richtungsprüfung zählt eine zusammenhängende Belegung höchstens einmal. "
+            "Ein freies Frame kann die nächste Durchfahrt öffnen. Eine Sperrzeit ist nicht gesetzt."
+        )
+    if not report.zone_checks:
+        lines.append("Zonenmodus: keine Zone konfiguriert")
+    for position, lane, enabled in report.zone_checks:
+        lines.append(
+            " ".join(
+                [
+                    f"configured lane={lane}",
+                    f"position={position}",
+                    f"direction_check_enabled={'true' if enabled else 'false'}",
+                ]
+            )
+        )
     lines.extend(["", "Referenzrunden"])
     if not report.references:
         lines.append("Keine Referenzrunden eingetragen.")
@@ -329,6 +367,9 @@ class DiagnosticJournal:
                     self.events_lost += 1
                 return
             if kind == "frame" and self._frames_accepted >= self.max_frame_records:
+                self._mark_frame_limit()
+                return
+            if kind == "frame" and self._queue.qsize() >= _QUEUE_LIMIT - _EVENT_RESERVE:
                 self._mark_frame_limit()
                 return
             if not self._enqueue(kind, fields):
@@ -491,6 +532,37 @@ class DiagnosticJournal:
             self.error = str(error)
 
 
+def report_payload(report: DiagnosticReport) -> dict[str, object]:
+    """JSON object for the closing figures, including the completeness flags."""
+    body = asdict(report)
+    body["events_complete"] = report.events_complete
+    body["frame_detail_complete"] = report.frame_detail_complete
+    converted = _jsonable(body)
+    if not isinstance(converted, dict):
+        return {}
+    return converted
+
+
+def format_report_json(report: DiagnosticReport) -> str:
+    return json.dumps(report_payload(report), ensure_ascii=False, indent=2) + "\n"
+
+
+def format_events_jsonl(
+    records: list[dict[str, object]],
+    *,
+    include_frames: bool,
+) -> str:
+    """One JSON object per line. Frame rows stay out unless requested."""
+    lines: list[str] = []
+    for record in records:
+        if record.get("kind") == "frame" and not include_frames:
+            continue
+        lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
 def export_document(
     report: DiagnosticReport,
     records: list[dict[str, object]],
@@ -507,6 +579,20 @@ def export_document(
     if report.frame_detail_limited and not include_frames:
         parts.append("Frame-Details sind unvollständig und wurden in diesem Export weggelassen.")
     return "\n".join(parts) + "\n"
+
+
+def _jsonable(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _mean(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
 
 
 def _ms(value: int | None) -> str:

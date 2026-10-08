@@ -33,6 +33,7 @@ class CameraTimingPlugin(Plugin):
             "camera.field.position": "Position",
             "camera.field.lane": "Lane",
             "camera.field.direction": "Fahrtrichtung",
+            "camera.field.check_direction": "Fahrtrichtung prüfen",
             "camera.field.sensitivity": "Empfindlichkeit",
             "camera.field.detection_resolution": "Erkennungsauflösung",
             "camera.direction.top_to_bottom": "↓  Oben nach unten",
@@ -74,8 +75,8 @@ class CameraTimingPlugin(Plugin):
             "camera.diagnostic.title": "Erkennungsdiagnose",
             "camera.diagnostic.start": "Diagnose starten",
             "camera.diagnostic.stop": "Diagnose stoppen",
-            "camera.diagnostic.copy": "Log kopieren",
-            "camera.diagnostic.save": "Log speichern",
+            "camera.diagnostic.copy": "Textansicht kopieren",
+            "camera.diagnostic.save": "Diagnose exportieren",
             "camera.diagnostic.snapshot": "Snapshot speichern",
             "camera.diagnostic.view": "Ansicht",
             "camera.diagnostic.view.analysis": "Analysebild",
@@ -88,9 +89,15 @@ class CameraTimingPlugin(Plugin):
             "camera.diagnostic.no_zones": "Lege mindestens eine Erkennungszone fest.",
             "camera.diagnostic.invalid": "Die Kamerakonfiguration ist ungültig.",
             "camera.diagnostic.running": "Diagnose läuft",
-            "camera.diagnostic.stopped": "Diagnose gestoppt. Log und letzter Snapshot bleiben.",
+            "camera.diagnostic.stopped": (
+                "Diagnose gestoppt. Zusammenfassung, Ereignisse und Statistik stehen im Export."
+            ),
+            "camera.diagnostic.stopped_truncated": (
+                "Diagnose gestoppt. Die Textansicht ist gekürzt. "
+                "Der Export enthält die Ereignisse und die Abschlussstatistik."
+            ),
             "camera.diagnostic.copied": "Log in die Zwischenablage kopiert.",
-            "camera.diagnostic.saved": "Log gespeichert.",
+            "camera.diagnostic.saved": "Zusammenfassung, Ereignisse und Statistik gespeichert.",
             "camera.diagnostic.snapshot_saved": "Snapshot gespeichert.",
             "camera.diagnostic.snapshot_missing": "Noch kein Analysebild vorhanden.",
             "camera.diagnostic.preview": "Berechnungsvorschau",

@@ -41,6 +41,9 @@ from slot_racing.modules.timing_camera.diagnostic_store import (
     ZoneReport,
     direction_reason_code,
     export_document,
+    format_events_jsonl,
+    format_report_json,
+    format_summary,
     percentile_nearest,
 )
 from slot_racing.modules.timing_camera.frame_source import TimedFrame
@@ -87,6 +90,7 @@ class ZoneFacts:
     y: int
     width: int
     height: int
+    check_direction: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +253,8 @@ class _Burst:
     centroids_omitted: int = 0
     centroids: list[tuple[int, float, float]] | None = None
     shifts: list[float] | None = None
+    confirmed_ns: int | None = None
+    direction_check: bool = True
 
 
 def diagnostic_config(
@@ -272,6 +278,7 @@ def diagnostic_config(
             y=zone.roi.y,
             width=zone.roi.width,
             height=zone.roi.height,
+            check_direction=zone.check_direction,
         )
         for index, zone in enumerate(settings.zones)
     )
@@ -335,6 +342,7 @@ def format_header(config: DiagnosticConfig) -> str:
                 f"Lane: {zone.lane}",
                 f"Coordinates: x={zone.x} y={zone.y} width={zone.width} height={zone.height}",
                 f"Direction: {config.direction}",
+                f"Direction check: {'enabled' if zone.check_direction else 'disabled'}",
                 "",
             ]
         )
@@ -665,6 +673,14 @@ class DiagnosticSession:
         with self._cond:
             return self._report
 
+    def journal_path(self) -> Path | None:
+        """File that receives the structured records. Absent before start."""
+        with self._cond:
+            journal = self._journal
+        if journal is None:
+            return None
+        return journal.path
+
     def export_text(self, *, include_frames: bool = False) -> str:
         """Human summary plus structured attempts. Frame rows stay optional."""
         with self._cond:
@@ -673,6 +689,44 @@ class DiagnosticSession:
         if report is None or journal is None:
             return self.text()
         return export_document(report, journal.records(), include_frames=include_frames)
+
+    def export_summary(self) -> str:
+        """Readable closing figures. Empty of events until :meth:`stop`."""
+        report = self.report()
+        if report is None:
+            return (
+                "Die Abschlussstatistik wird beim Stoppen der Diagnose geschrieben.\n"
+                "Die Textansicht ist nicht die vollständige Aufzeichnung.\n"
+            )
+        return format_summary(report) + "\n"
+
+    def export_report_json(self) -> str:
+        report = self.report()
+        if report is None:
+            return "{}\n"
+        return format_report_json(report)
+
+    def export_events_jsonl(self, *, include_frames: bool = False) -> str:
+        """Attempts, session and summary. Frame rows stay optional."""
+        with self._cond:
+            journal = self._journal
+        if journal is None:
+            return ""
+        return format_events_jsonl(journal.records(), include_frames=include_frames)
+
+    def write_export(self, stem: Path, *, include_frames: bool = False) -> tuple[Path, Path, Path]:
+        """Write summary text, summary JSON and the event JSONL next to ``stem``."""
+        if not isinstance(stem, Path):
+            raise TypeError("stem must be a Path")
+        summary_path = stem.with_suffix(".txt")
+        report_path = stem.with_suffix(".json")
+        events_path = stem.with_suffix(".jsonl")
+        summary_path.write_text(self.export_summary(), encoding="utf-8")
+        report_path.write_text(self.export_report_json(), encoding="utf-8")
+        events_path.write_text(
+            self.export_events_jsonl(include_frames=include_frames), encoding="utf-8"
+        )
+        return summary_path, report_path, events_path
 
     def text(self) -> str:
         with self._cond:
@@ -968,6 +1022,8 @@ class DiagnosticSession:
                     capture_seq_end=capture_seq,
                     centroids=[],
                     shifts=[],
+                    confirmed_ns=timestamp_ns if zone.accepted else None,
+                    direction_check=zone.direction_check,
                 )
                 self._bursts[key] = burst
                 self._note_sample_locked(burst, zone, timestamp_ns)
@@ -983,7 +1039,9 @@ class DiagnosticSession:
                 burst.last_frame = self._analyzed
                 burst.capture_seq_end = capture_seq
                 if zone.accepted:
-                    burst.reason = "accepted"
+                    burst.reason = _accepted_label(zone.reason)
+                    if burst.confirmed_ns is None:
+                        burst.confirmed_ns = timestamp_ns
                 elif not burst.detection_event:
                     burst.reason = zone.reason
                 self._note_sample_locked(burst, zone, timestamp_ns)
@@ -1039,6 +1097,7 @@ class DiagnosticSession:
                     f"direction={zone.direction.value}",
                     f"event={'true' if zone.accepted else 'false'}",
                     f"reason={zone.reason}",
+                    f"direction_check={'true' if zone.direction_check else 'false'}",
                     f"reference_frozen={'true' if zone.reference_frozen else 'false'}",
                     f"reference_updates={zone.reference_updates}",
                     f"background_stable={'true' if zone.background_stable else 'false'}",
@@ -1346,6 +1405,10 @@ class DiagnosticSession:
                 "capture_seq_start": burst.capture_seq_start,
                 "capture_seq_end": burst.capture_seq_end,
                 "activity_frames": summary.activity_frames,
+                "motion_frames": burst.component_frames,
+                "direction_check_enabled": burst.direction_check,
+                "confirmed_ns": burst.confirmed_ns,
+                "released_ns": summary.ended_ns,
             },
         )
 
@@ -1438,6 +1501,11 @@ class DiagnosticSession:
             text_log_truncated=self._truncated,
             zones=zones,
             references=self._reference_rows_locked(zones),
+            direction_check=_direction_mode(self._config.zones),
+            zone_checks=tuple(
+                (zone.position_id, zone.lane, zone.check_direction) for zone in self._config.zones
+            ),
+            journal_path="" if journal is None else str(journal.path),
         )
 
     def _zone_reports_locked(self) -> tuple[ZoneReport, ...]:
@@ -1450,6 +1518,9 @@ class DiagnosticSession:
             "single_sample_one_frame",
             "single_sample_below_size",
             "direction_window_expired",
+        }
+        checks = {
+            (zone.position_id, zone.lane): zone.check_direction for zone in self._config.zones
         }
         for (position_id, lane), activities in grouped.items():
             confirmed = [item for item in activities if item.detection_event]
@@ -1479,6 +1550,10 @@ class DiagnosticSession:
                         1 for item in rejected if item.direction_reason == "invalid_direction"
                     ),
                     confirmed_gaps_ns=tuple(gaps),
+                    direction_check_enabled=checks.get((position_id, lane), True),
+                    mean_samples=(
+                        sum(item.direction_samples for item in activities) / len(activities)
+                    ),
                 )
             )
         reports.sort(key=lambda item: (item.lane, item.position_id))
@@ -1497,6 +1572,21 @@ class DiagnosticSession:
             for lane, laps in sorted(self._references.items())
         ]
         return tuple(rows)
+
+
+def _direction_mode(zones: tuple[ZoneFacts, ...]) -> str:
+    flags = {zone.check_direction for zone in zones}
+    if flags == {False}:
+        return "disabled"
+    if False in flags:
+        return "mixed"
+    return "enabled"
+
+
+def _accepted_label(reason: str) -> str:
+    if reason == "accepted_without_direction_check":
+        return reason
+    return "accepted"
 
 
 def _overwrites(capture: CaptureCounters | None) -> int | None:
@@ -1558,6 +1648,7 @@ def _zone_line(number: int, zone: ZoneInspection) -> str:
             f"direction={zone.direction.value}",
             f"event={'true' if zone.accepted else 'false'}",
             f"reason={zone.reason}",
+            f"direction_check={'true' if zone.direction_check else 'false'}",
             f"reference_frozen={'true' if zone.reference_frozen else 'false'}",
             f"reference_updates={zone.reference_updates}",
             f"background_stable={'true' if zone.background_stable else 'false'}",
@@ -1590,7 +1681,12 @@ def _summary_from_burst(
     closing_reason: str,
 ) -> ActivitySummary:
     detected = burst.detection_event
-    raw = "accepted" if detected else closing_reason
+    if detected and burst.reason == "accepted_without_direction_check":
+        raw = burst.reason
+    elif detected:
+        raw = "accepted"
+    else:
+        raw = closing_reason
     reason = _activity_reason(raw, detected=detected)
     code = direction_reason_code(
         detected=detected,
@@ -1623,6 +1719,8 @@ def _summary_from_burst(
 def _activity_reason(reason: str, *, detected: bool) -> str:
     """Name the algorithm fact that stopped a burst. Not a guess about speed."""
     if detected:
+        if reason == "accepted_without_direction_check":
+            return reason
         return "accepted"
     return {
         "too_short": "too_few_direction_samples",
