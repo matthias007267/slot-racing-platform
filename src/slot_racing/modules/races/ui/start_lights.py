@@ -9,13 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QRadialGradient, QResizeEvent
+from PySide6.QtGui import QColor, QPainter, QPaintEvent, QRadialGradient, QResizeEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from slot_racing.modules.races.hud import (
     LIGHT_ASPECT,
     LIGHT_GAP,
-    LIGHT_GO_UNITS,
     LIGHT_PAD_X,
     LIGHT_PAD_Y,
     LIGHT_UNIT_HEIGHT,
@@ -33,15 +32,14 @@ _MIN_WIDTH = 480
 class _Gantry:
     housing: QRectF
     lamps: tuple[QRectF, ...]
-    go_band: float
 
 
 class StartLightWidget(QWidget):
     """A horizontal gantry of five lamps, dark until a step lights them.
 
     ``show_lights`` is the whole interface. ``lit`` counts lamps from the left.
-    ``go`` draws every lamp dark and shows GO. That word is feedback for the
-    start signal the cue has already given. It is not a second start.
+    ``go`` draws every lamp dark. That lights-out step is the start signal the
+    cue has already given. It is not a second start.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -81,7 +79,7 @@ class StartLightWidget(QWidget):
         self.show_lights(step.lit_lights, go=step.phase is StartPhase.START_SIGNAL)
 
     def show_lights(self, lit: int, *, go: bool = False) -> None:
-        """Light ``lit`` lamps from the left, or show the lights-out GO mark."""
+        """Light ``lit`` lamps from the left, or show the lights-out start signal."""
         if lit < 0 or lit > START_LIGHT_COUNT:
             raise ValueError("lit lights must be between 0 and 5")
         if go and lit != 0:
@@ -117,9 +115,7 @@ class StartLightWidget(QWidget):
         self._draw_housing(painter, gantry.housing)
         for index, rect in enumerate(gantry.lamps):
             self._draw_chamber(painter, rect)
-            self._draw_lamp(painter, rect, on=index < self._lit)
-        if self._go:
-            self._draw_go(painter, gantry)
+            self._draw_lamp(painter, rect, on=index < self._lit and not self._go)
         painter.end()
 
     def _sync_height(self) -> None:
@@ -185,21 +181,6 @@ class StartLightWidget(QWidget):
         reflection = rect.adjusted(radius * 0.55, radius * 0.38, -radius * 1.15, -radius * 1.25)
         painter.drawEllipse(reflection)
 
-    def _draw_go(self, painter: QPainter, gantry: _Gantry) -> None:
-        font = QFont(self.font())
-        font.setPixelSize(max(18, int(gantry.lamps[0].height() * 0.62)))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor(COLORS.accent))
-        painter.drawText(
-            0,
-            int(gantry.housing.bottom()),
-            self.width(),
-            int(gantry.go_band),
-            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
-            "GO",
-        )
-
 
 def _fit_gantry(width: int, height: int) -> _Gantry:
     """Scale the whole gantry into the box. Lamps stay round at every size."""
@@ -207,10 +188,9 @@ def _fit_gantry(width: int, height: int) -> _Gantry:
     box_h = max(float(height), 1.0)
     lamp = min(box_w / LIGHT_UNIT_WIDTH, box_h / LIGHT_UNIT_HEIGHT)
     housing_w = LIGHT_UNIT_WIDTH * lamp
-    housing_h = (LIGHT_UNIT_HEIGHT - LIGHT_GO_UNITS) * lamp
-    content_h = LIGHT_UNIT_HEIGHT * lamp
+    housing_h = LIGHT_UNIT_HEIGHT * lamp
     origin_x = (box_w - housing_w) / 2
-    origin_y = (box_h - content_h) / 2
+    origin_y = (box_h - housing_h) / 2
     housing = QRectF(origin_x, origin_y, housing_w, housing_h)
     left = origin_x + LIGHT_PAD_X * lamp
     top = origin_y + LIGHT_PAD_Y * lamp
@@ -218,4 +198,4 @@ def _fit_gantry(width: int, height: int) -> _Gantry:
     lamps = tuple(
         QRectF(left + index * step, top, lamp, lamp) for index in range(START_LIGHT_COUNT)
     )
-    return _Gantry(housing, lamps, LIGHT_GO_UNITS * lamp)
+    return _Gantry(housing, lamps)

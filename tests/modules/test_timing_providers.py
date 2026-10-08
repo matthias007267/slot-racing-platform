@@ -4,6 +4,7 @@ driven through the standardized interface only (no simulation)."""
 from __future__ import annotations
 
 import ast
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,10 @@ from slot_racing.core.events import (
 from slot_racing.core.timing import TimingSessionSpec, TimingSource
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.engine import RaceConfig, RaceEngine
-from slot_racing.modules.timing.simulation import SimulationTimingFactory
+from slot_racing.modules.timing.simulation import (
+    SimulationTimingFactory,
+    SimulationTimingProvider,
+)
 from tests.support.timing import FakeTimingFactory, FakeTimingSource
 
 
@@ -122,10 +126,13 @@ def test_pause_and_resume_are_accepted_by_every_source(rig: Rig) -> None:
 def test_the_simulation_makes_no_progress_while_paused_and_continues_afterwards() -> None:
     clock = ManualClock()
     spec = TimingSessionSpec(setup=default_timing_setup(), lanes=(1,), laps=1)
-    source = SimulationTimingFactory(clock).create_source(spec)
+    source = SimulationTimingFactory(clock, rng=random.Random(1)).create_source(spec)
+    assert isinstance(source, SimulationTimingProvider)
     received: list[SensorTriggered] = []
     source.start(received.append)
-    clock.advance(2 * S)
+    first = source.next_event_ns
+    assert first is not None
+    clock.set(first)
     source.poll()
     before = [e.position_id for e in received]
     assert before == ["sector_1"]
@@ -138,7 +145,7 @@ def test_the_simulation_makes_no_progress_while_paused_and_continues_afterwards(
     source.resume()
     source.poll()
     assert [e.position_id for e in received] == before
-    clock.advance(10 * S)
+    clock.advance(6 * S)
     source.poll()
     assert [e.position_id for e in received] == ["sector_1", "sector_2", "start_finish"]
     timestamps = [e.timestamp_ns for e in received]

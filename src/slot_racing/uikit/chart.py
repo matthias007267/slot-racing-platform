@@ -39,7 +39,15 @@ class ChartSeries:
 
 
 def series_color(index: int) -> str:
+    """Color for an anonymous series. Drivers use :func:`driver_color` instead."""
     return _SERIES[index % len(_SERIES)]
+
+
+def driver_color(participant_id: int) -> str:
+    """One stable color per driver. Filtering and order do not move it."""
+    if participant_id < 1:
+        return series_color(0)
+    return _SERIES[(participant_id - 1) % len(_SERIES)]
 
 
 class LineChart(QWidget):
@@ -60,6 +68,10 @@ class LineChart(QWidget):
         self._series = tuple(colored)
         self._empty = empty
         self.update()
+
+    @property
+    def series(self) -> tuple[ChartSeries, ...]:
+        return self._series
 
     def paintEvent(self, event: object) -> None:  # noqa: N802
         del event

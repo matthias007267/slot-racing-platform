@@ -1,3 +1,5 @@
+import random
+
 import pytest
 
 from slot_racing.core.clock import NANOS_PER_SECOND as S
@@ -6,6 +8,8 @@ from slot_racing.core.domain import TimingLayout, TimingSetup
 from slot_racing.core.events import SensorTriggered
 from slot_racing.core.timing import TimingSessionSpec, TimingSource
 from slot_racing.modules.timing.simulation import (
+    SIM_LAP_MAX_MS,
+    SIM_LAP_MIN_MS,
     SimulatedLane,
     SimulationTimingFactory,
     SimulationTimingProvider,
@@ -196,5 +200,43 @@ def test_factory_creates_an_independent_source_per_race() -> None:
     first.poll()
     assert {e.lane for e in received} == {1, 2}
     assert len([e for e in received if e.sensor_id == "sf"]) == 4
-    lane_finish = {e.lane: e.timestamp_ns for e in received if e.sensor_id == "sf"}
-    assert lane_finish[1] < lane_finish[2]
+
+
+def test_each_lap_is_an_independent_time_between_three_and_five_seconds() -> None:
+    clock = ManualClock()
+    seed = 4
+    spec = TimingSessionSpec(setup=SETUP, lanes=(1, 2), laps=4)
+    first = SimulationTimingFactory(clock, rng=random.Random(seed)).create_source(spec)
+    second = SimulationTimingFactory(ManualClock(), rng=random.Random(seed)).create_source(spec)
+    received: list[SensorTriggered] = []
+    other: list[SensorTriggered] = []
+    first.start(received.append)
+    second.start(other.append)
+    assert isinstance(first, SimulationTimingProvider)
+    assert isinstance(second, SimulationTimingProvider)
+    first.run_to_end()
+    second.run_to_end()
+    assert [event.timestamp_ns for event in received] == [event.timestamp_ns for event in other]
+    lap_times = _lap_times(received)
+    assert len(lap_times) == 8
+    assert len(set(lap_times)) > 1
+    for time_ns in lap_times:
+        millis = time_ns // 1_000_000
+        assert SIM_LAP_MIN_MS <= millis <= SIM_LAP_MAX_MS
+        assert time_ns == millis * 1_000_000
+    by_lane: dict[int, list[int]] = {1: [], 2: []}
+    for event in received:
+        if event.sensor_id == "sf":
+            by_lane[event.lane].append(event.timestamp_ns)
+    assert by_lane[1][0] != by_lane[2][0]
+
+
+def _lap_times(events: list[SensorTriggered]) -> list[int]:
+    previous: dict[int, int] = {}
+    times: list[int] = []
+    for event in events:
+        if event.sensor_id != "sf":
+            continue
+        times.append(event.timestamp_ns - previous.get(event.lane, 0))
+        previous[event.lane] = event.timestamp_ns
+    return times

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtWidgets import QFrame, QLabel
+from PySide6.QtWidgets import QApplication, QFrame, QLabel
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
@@ -11,8 +11,9 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.modules.races.planning import build_rotation, plan_remaining, rotation_is_complete
 from slot_racing.modules.races.runner import LiveRow
 from slot_racing.modules.races.service import parse_duration_minutes
-from slot_racing.modules.races.types import RaceInfo
+from slot_racing.modules.races.types import HeatBriefing, HeatSeat, LaneChange, RaceInfo
 from slot_racing.modules.races.ui.formatting import lane_gaps
+from slot_racing.modules.races.ui.heat_gate import HeatGate
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.wizard import MODE, PARTICIPANTS
@@ -285,6 +286,110 @@ def test_the_live_board_has_one_column_per_lane(qtbot: QtBot, env: Env, lanes: i
     other = live.findChild(QLabel, "live-lane-2-position")
     assert other is not None and other.text().startswith("P")
     assert other.text() != position.text()
+
+
+def test_the_race_assistant_shows_drivers_and_heats_in_large_blocks(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heimbahn", lanes=2)
+    anna = env.driver("Anna")
+    ben = env.driver("Ben")
+    env.vehicle("Porsche", driver_id=anna.id)
+    env.vehicle("Ferrari", driver_id=ben.id)
+    window, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    window.resize(1200, 800)
+    window.show()
+    page.new_race()
+    wizard = page.wizard
+    wizard.resize(1100, 760)
+    QApplication.processEvents()
+    assert wizard.next_button.objectName() == "wizard-next"
+    assert wizard.back_button.objectName() == "wizard-back"
+    assert wizard.step_label.wordWrap()
+    assert wizard.step_label.font().pixelSize() >= 18
+
+    wizard.name_edit.setText("Finale")
+    assert wizard.go_next()
+    assert wizard.step_label.font().pixelSize() >= 18
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(track.id))
+    assert wizard.go_next()
+    wizard.laps_spin.setValue(2)
+    assert wizard.go_next()
+    for driver in (anna, ben):
+        wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(driver.id))
+        assert wizard.add_participant()
+    assert wizard.go_next()
+    QApplication.processEvents()
+    assert wizard.overview_label.isHidden()
+    assert "Anna mit Porsche 911" in wizard.overview_label.text()
+    names = [
+        label
+        for label in wizard.overview_board.findChildren(QLabel)
+        if label.isVisible() and "Anna mit Porsche 911" in label.text()
+    ]
+    assert names and names[0].wordWrap() and names[0].font().pixelSize() >= 22
+    titles = [
+        label
+        for label in wizard.overview_board.findChildren(QLabel)
+        if label.property("role") == "heat-title" and label.isVisible()
+    ]
+    assert titles
+    assert titles[0].wordWrap()
+    assert titles[0].font().pixelSize() >= 28
+    assert titles[0].text().startswith("Durchlauf")
+
+    assert wizard.go_next()
+    QApplication.processEvents()
+    assert wizard.start_button.objectName() == "race-start"
+    assert not wizard.next_button.isEnabled()
+    assert wizard.ready_label.isHidden()
+    assert "Bahn 1:" in wizard.ready_label.text()
+    title = wizard.briefing_board.title
+    assert title.isVisible() and title.wordWrap()
+    assert title.font().pixelSize() >= 28
+    assert title.text().startswith("Durchlauf")
+    seat = wizard.briefing_board.findChild(QLabel, "heat-seat-driver-1")
+    lane = wizard.briefing_board.findChild(QLabel, "heat-seat-lane-1")
+    assert seat is not None and lane is not None
+    assert seat.isVisible() and seat.wordWrap() and seat.font().pixelSize() >= 22
+    assert lane.wordWrap() and lane.text().startswith("Bahn")
+
+
+def test_the_heat_change_briefing_uses_large_blocks(qtbot: QtBot, env: Env) -> None:
+    gate = HeatGate(env.runtime.translator)
+    qtbot.addWidget(gate)
+    gate.resize(1000, 720)
+    gate.show()
+    gate.show_briefing(
+        HeatBriefing(
+            race_id=RaceId(1),
+            sequence=2,
+            heat_count=2,
+            seats=(HeatSeat(1, 10, "Anna"), HeatSeat(2, 11, "Ben")),
+            changes=(LaneChange("Anna", 2, 1), LaneChange("Ben", 1, 2)),
+            drivers=((10, "Anna"), (11, "Ben")),
+        )
+    )
+    QApplication.processEvents()
+    assert gate.title_label.isHidden()
+    assert gate.body_label.isHidden()
+    assert gate.body_label.wordWrap()
+    assert "Spurwechsel" in gate.body_label.text()
+    assert "Bahn 1: Anna" in gate.body_label.text()
+    assert gate.board.title.text() == "Durchlauf 2"
+    assert gate.board.title.wordWrap()
+    assert gate.board.title.font().pixelSize() >= 28
+    anna = gate.findChild(QLabel, "heat-seat-driver-1")
+    lane = gate.findChild(QLabel, "heat-seat-lane-1")
+    assert anna is not None and lane is not None
+    assert anna.text() == "Anna" and anna.wordWrap() and anna.font().pixelSize() >= 22
+    assert lane.text() == "Bahn 1" and lane.wordWrap()
+    change = gate.findChild(QLabel, "heat-change")
+    assert change is not None and change.isVisible() and change.wordWrap()
+    assert "Anna" in change.text() and "Bahn 2" in change.text()
+    assert change.font().pixelSize() >= 18
+    assert gate.start_button.objectName() == "heat-start"
+    assert gate.postpone_button.objectName() == "heat-postpone"
+    assert gate.disqualify_button.objectName() == "heat-disqualify"
 
 
 def test_postponing_and_disqualifying_from_the_waiting_window(qtbot: QtBot, env: Env) -> None:

@@ -55,19 +55,22 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert live.time_label.text() == format_duration(runner.snapshot().elapsed_ns)
     assert live.time_label.text() == "0:03.000"
 
-    env.clock.advance(2 * NANOS_PER_SECOND)
-    live.refresh()
-    assert column_text(live.table, 0, "Fahrer") == "Zoe"
-    assert column_text(live.table, 0, "Runden") == "1"
+    _advance_until_lap(env, live)
+    leader = runner.snapshot().rows[0]
+    assert leader.laps_completed >= 1
+    assert column_text(live.table, 0, "Fahrer") == leader.driver_label
+    assert column_text(live.table, 0, "Runden") == str(leader.laps_completed)
     assert column_text(live.table, 0, "Platz") == "1"
-    assert live.lanes.cards[1].lap_label.text() == "2 / 2"
+    card = live.lanes.cards[leader.lane]
     last = column_text(live.table, 0, "Letzte Runde")
     assert last != "-"
-    assert live.lanes.cards[1].last_label.text() == last
-    assert live.lanes.cards[1].driver_label.text() == "Zoe"
-    assert live.lanes.cards[1].best_label.text() == last
+    assert card.last_label.text() == last
+    assert card.driver_label.text() == leader.driver_label
+    assert card.best_label.text() == last
+    assert card.lap_label.text() == f"{leader.current_lap} / {runner.snapshot().laps}"
 
     frozen = live.time_label.text()
+    frozen_laps = [column_text(live.table, index, "Runden") for index in range(2)]
     live.pause_button.click()
     assert live.status_label.text() == "● Pausiert"
     assert live.messages.message_label.text() == "Rennen pausiert"
@@ -77,14 +80,15 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     env.clock.advance(5 * NANOS_PER_SECOND)
     live.refresh()
     assert live.time_label.text() == frozen
-    assert column_text(live.table, 0, "Runden") == "1"
+    assert [column_text(live.table, index, "Runden") for index in range(2)] == frozen_laps
 
+    elapsed = runner.snapshot().elapsed_ns
     live.resume_button.click()
     assert live.status_label.text() == "● Läuft"
     assert live.messages.message_label.text() == "Rennen fortgesetzt"
     env.clock.advance(NANOS_PER_SECOND)
     live.refresh()
-    assert live.time_label.text() == "0:06.000"
+    assert live.time_label.text() == format_duration(elapsed + NANOS_PER_SECOND)
 
     for _ in range(120):
         if isinstance(page.current_view(), ResultsView):
@@ -170,6 +174,17 @@ def test_showing_the_start_lights_does_not_move_the_hud(qtbot: QtBot, env: Env) 
     QApplication.processEvents()
     assert live.start_lights.isHidden()
     assert _surface(live) == resized
+
+
+def _advance_until_lap(env: Env, live: LiveRaceView) -> None:
+    runner = live.runner
+    assert runner is not None
+    for _ in range(80):
+        if any(row.laps_completed >= 1 for row in runner.snapshot().rows):
+            return
+        env.clock.advance(100_000_000)
+        live.refresh()
+    raise AssertionError("the simulation did not complete a lap")
 
 
 def _surface(live: LiveRaceView) -> tuple[object, ...]:

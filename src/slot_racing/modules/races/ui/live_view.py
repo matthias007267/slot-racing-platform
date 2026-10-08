@@ -130,7 +130,7 @@ class LiveRaceView(QWidget):
         layout = QVBoxLayout(self)
         configure_page(layout)
         layout.setSpacing(0)
-        layout.addWidget(self.heat_gate)
+        layout.addWidget(self.heat_gate, 1)
         layout.addWidget(self.stage, 1)
         layout.addWidget(self.board, 1)
 
@@ -519,6 +519,8 @@ class LiveRaceView(QWidget):
         if briefing is None:
             self.heat_gate.hide()
             return
+        self.stage.hide()
+        self.board.hide()
         self.heat_gate.show_briefing(briefing)
 
     def _start_next_heat(self) -> None:

@@ -8,7 +8,7 @@ from slot_racing.core.clock import format_duration
 from slot_racing.core.i18n import Translator
 from slot_racing.core.statistics import HistoryRace, RaceReport, ReportLine, race_report
 from slot_racing.uikit.career import MISSING
-from slot_racing.uikit.chart import ChartPoint, ChartSeries, LineChart, series_color
+from slot_racing.uikit.chart import ChartPoint, ChartSeries, LineChart, driver_color
 from slot_racing.uikit.theme import set_role
 from slot_racing.uikit.widgets import fill_sortable, make_table
 
@@ -82,14 +82,14 @@ class RaceReportView(QWidget):
 
     def _build_checks(self, report: RaceReport) -> None:
         self._clear_checks()
-        for index, series in enumerate(report.series):
+        for series in report.series:
             box = QCheckBox(series.label)
             box.setObjectName(f"race-report-series-{series.participant_id}")
             box.setChecked(True)
             box.toggled.connect(lambda _checked: self._draw())
             self._boxes.append(box)
             self._checks.addWidget(box)
-            box.setStyleSheet(f"color: {series_color(index)};")
+            box.setStyleSheet(f"color: {driver_color(series.participant_id)};")
         self.chart.setVisible(bool(report.series))
 
     def _clear_checks(self) -> None:
@@ -118,6 +118,7 @@ class RaceReportView(QWidget):
                         ChartPoint(point.lap_number, point.time_ns / 1_000_000_000, point.outlier)
                         for point in series.points
                     ),
+                    driver_color(series.participant_id),
                 )
             )
         self.chart.set_series(tuple(shown), empty=self._translator.translate("report.no_laps"))

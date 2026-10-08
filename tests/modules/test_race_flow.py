@@ -75,14 +75,14 @@ def test_complete_race_from_setup_to_reloaded_result(env: Env) -> None:
     assert stored.started_at is not None and stored.finished_at is not None
 
     results = env.races.get_results(race.id)
-    assert [(r.position, r.driver_label, r.lane) for r in results] == [
-        (1, "Anna", 1),
-        (2, "Ben", 2),
-    ]
+    assert [r.position for r in results] == [1, 2]
+    assert {r.driver_label for r in results} == {"Anna", "Ben"}
+    assert {r.lane for r in results} == {1, 2}
     assert all(r.finished and r.laps_completed == 3 for r in results)
     winner, second = results
     assert winner.total_time_ns is not None and second.total_time_ns is not None
-    assert winner.total_time_ns < second.total_time_ns
+    assert winner.total_time_ns <= second.total_time_ns
+    assert winner.total_time_ns != second.total_time_ns
     assert winner.best_lap_ns is not None and winner.last_lap_ns is not None
     assert winner.best_lap_ns <= winner.last_lap_ns
     assert winner.average_lap_ns is not None
@@ -103,8 +103,11 @@ def test_complete_race_from_setup_to_reloaded_result(env: Env) -> None:
     assert snapshot.timing_provider == "simulation"
     assert [len(row.lap_times_ns) for row in snapshot.rows] == [3, 3]
     assert snapshot.rows[0].last_lap_ns == snapshot.rows[0].lap_times_ns[-1]
-    assert [row.start_number for row in snapshot.rows] == [1, 2]
-    assert [row.start_number for row in results] == [1, 2]
+    numbers = {"Anna": 1, "Ben": 2}
+    assert [row.start_number for row in snapshot.rows] == [
+        numbers[row.driver_label] for row in snapshot.rows
+    ]
+    assert [row.start_number for row in results] == [numbers[row.driver_label] for row in results]
 
 
 def test_aborted_race_keeps_the_laps_driven_so_far(env: Env) -> None:
@@ -113,9 +116,12 @@ def test_aborted_race_keeps_the_laps_driven_so_far(env: Env) -> None:
     env.races.add_participant(race.id, driver_id, vehicle_id, 1)
     runner = env.controller.start_race(race.id)
 
-    for _ in range(130):
+    for _ in range(2000):
+        if len(env.races.get_laps(race.id)) >= 2:
+            break
         env.clock.advance(STEP_NS)
         runner.tick()
+    assert len(env.races.get_laps(race.id)) == 2
     runner.stop()
 
     assert env.races.require_race(race.id).status is RaceStatus.ABORTED
@@ -236,19 +242,20 @@ def test_stopping_after_one_finisher_keeps_both_standings(env: Env) -> None:
     winners: list[Event] = []
     env.runtime.bus.subscribe(WinnerDetermined, winners.append)
     runner = env.controller.start_race(race.id)
-    for _ in range(2000):
+    for _ in range(8000):
         if winners:
             break
-        env.clock.advance(STEP_NS)
+        env.clock.advance(1_000_000)
         runner.tick()
     assert winners and runner.is_active
     runner.stop()
     assert env.races.require_race(race.id).status is RaceStatus.ABORTED
     results = env.races.get_results(race.id)
-    assert [(r.lane, r.finished, r.laps_completed) for r in results] == [
-        (1, True, 1),
-        (2, False, 0),
-    ]
+    finished = [row for row in results if row.finished]
+    waiting = [row for row in results if not row.finished]
+    assert len(finished) == 1 and finished[0].laps_completed == 1
+    assert len(waiting) == 1 and waiting[0].laps_completed == 0
+    assert {row.lane for row in results} == {1, 2}
     assert len(env.races.get_laps(race.id)) == 1
 
 
