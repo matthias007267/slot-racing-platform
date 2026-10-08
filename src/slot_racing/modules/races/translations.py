@@ -163,7 +163,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hud.lights.y": "Position Y",
         "hud.lights.scale": "Ampelgröße",
         "hud.lights.reset": "Ampel zurücksetzen",
-        "hud.lights.preview": "Startsequenz testen",
         "hud.layout.new": "Neues Layout",
         "hud.layout.delete": "Layout löschen",
         "hud.layout.default": "Als Standardlayout festlegen",

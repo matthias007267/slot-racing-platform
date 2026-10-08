@@ -167,7 +167,7 @@ def test_the_preview_simulates_race_states_on_the_live_surface(qtbot: QtBot) -> 
     assert editor.stage.lanes.cards[4].lane == 4
 
 
-def test_the_light_overlay_can_be_moved_resized_and_previewed(qtbot: QtBot) -> None:
+def test_the_light_overlay_can_be_moved_and_resized(qtbot: QtBot) -> None:
     editor = _shown(qtbot)
     editor.set_light_frame(LightFrame(True, 0.10, 0.20, 0.40, 0.25))
     QApplication.processEvents()
@@ -222,21 +222,7 @@ def test_the_light_overlay_can_be_moved_resized_and_previewed(qtbot: QtBot) -> N
     assert not editor.lights.isHidden()
     assert editor.lights.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     assert _surface(editor) == surface
-
-    editor.preview_start_sequence()
-    assert editor.lights.lit_lights == 1
-    assert editor.light_preview_started is False
-    for expected in (2, 3, 4, 5):
-        editor.advance_light_preview()
-        assert editor.lights.lit_lights == expected
-        assert _surface(editor) == surface
-    editor.advance_light_preview()
-    assert editor.lights.showing_go is True
-    assert editor.light_preview_started is True
-    assert _surface(editor) == surface
-    editor.advance_light_preview()
-    assert editor.lights.showing_go is False
-    assert editor.light_preview_started is True
+    assert editor.findChild(QPushButton, "hud-lights-preview") is None
 
 
 def test_settings_page_opens_the_hud_editor_window(qtbot: QtBot, env: Env) -> None:
@@ -415,12 +401,6 @@ def test_preview_lanes_fill_the_row_again_when_the_count_drops(qtbot: QtBot, env
         QApplication.processEvents()
         _assert_preview_lanes(editor, count)
     assert editor.stage.lanes.cards[1].driver_label.font().pixelSize() == font
-    surface = _surface(editor)
-    positions = _card_boxes(editor)
-    editor.preview_start_sequence()
-    editor.advance_light_preview()
-    assert _surface(editor) == surface
-    assert _card_boxes(editor) == positions
 
 
 def test_save_and_close_stores_the_layout_and_closes_the_editor(qtbot: QtBot, env: Env) -> None:
@@ -603,20 +583,7 @@ def test_the_light_overlay_stays_on_the_editor_stage(qtbot: QtBot, env: Env) -> 
     QApplication.processEvents()
     _assert_placed(editor)
     assert _surface(editor) == surface
-    editor.preview_start_sequence()
-    assert editor.lights.lit_lights == 1
-    assert editor.light_preview_started is False
-    assert _surface(editor) == surface
-    for expected in (2, 3, 4, 5):
-        editor.advance_light_preview()
-        assert editor.lights.lit_lights == expected
-    editor.advance_light_preview()
-    assert editor.lights.showing_go is True
-    assert editor.light_preview_started is True
-    assert _surface(editor) == surface
-    editor.advance_light_preview()
-    assert editor.lights.showing_go is False
-    assert _surface(editor) == surface
+    assert editor.findChild(QPushButton, "hud-lights-preview") is None
 
 
 def _assert_preview_lanes(editor: HudEditor, count: int) -> None:

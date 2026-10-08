@@ -75,7 +75,6 @@ from slot_racing.modules.races.hud import (
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
-from slot_racing.modules.races.ui.start_cue import StartCue, StartCueStep
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
@@ -346,8 +345,6 @@ class HudEditor(QWidget):
         self._store = store
         self._config = store.load()
         self._filling = False
-        self._cue: StartCue | None = None
-        self._sequence_started = False
         self._preview_status = "running"
         self._preview_lanes = 2
         self.preview = HudPreviewHost(translator, self._place_lights, self._on_handle)
@@ -359,7 +356,6 @@ class HudEditor(QWidget):
         self._fill_form()
         self._show_sample()
         self._place_lights()
-        self.destroyed.connect(lambda *_args: self._stop_cue(restore=False))
 
     def configuration(self) -> HudConfiguration:
         return self._config
@@ -367,15 +363,9 @@ class HudEditor(QWidget):
     def selected_layout(self) -> HudLayout:
         return self._config.selected()
 
-    @property
-    def light_preview_started(self) -> bool:
-        """True once the preview sequence has reached the lights-out start signal."""
-        return self._sequence_started
-
     def select_layout(self, layout_id: str) -> None:
         if self._config.layout(layout_id) is None:
             return
-        self._stop_cue()
         self._config = replace(self._config, selected_id=layout_id)
         self._apply_preview()
         self._fill_form()
@@ -395,7 +385,6 @@ class HudEditor(QWidget):
         current = self.selected_layout()
         if current.builtin:
             return
-        self._stop_cue()
         self._config = self._store.save(delete_layout(self._config, current.id))
         self._apply_preview()
         self._fill_form()
@@ -480,7 +469,6 @@ class HudEditor(QWidget):
         box.exec()
 
     def revert(self) -> None:
-        self._stop_cue()
         self._config = self._store.load()
         self._apply_preview()
         self._fill_form()
@@ -517,21 +505,6 @@ class HudEditor(QWidget):
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
         self.sync_chrome()
-
-    def preview_start_sequence(self) -> None:
-        """Play the existing start cue in the preview. It does not start a race."""
-        self._stop_cue()
-        self._sequence_started = False
-        cue = StartCue(self._note_sequence_started, interval_ms=60_000, parent=self)
-        cue.changed.connect(self._show_preview_step)
-        cue.finished.connect(self._finish_preview_sequence)
-        self._cue = cue
-        cue.begin()
-
-    def advance_light_preview(self) -> None:
-        cue = self._cue
-        if cue is not None:
-            cue.advance()
 
     def _build(self) -> None:
         tr = self._translator.translate
@@ -635,9 +608,6 @@ class HudEditor(QWidget):
         scale_line.addWidget(self._light_readout)
         _row(column, tr("hud.lights.scale"), scale_row)
         column.addWidget(_button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights))
-        column.addWidget(
-            _button("hud-lights-preview", tr("hud.lights.preview"), self.preview_start_sequence)
-        )
 
         _heading(column, tr("hud.group.preview"))
         self._status = QComboBox()
@@ -786,9 +756,8 @@ class HudEditor(QWidget):
             self.lights.setGeometry(placed)
         if move_handle and self.handle.geometry() != placed:
             self.handle.setGeometry(placed)
-        sequence = self._cue is not None
-        if frame.visible or sequence:
-            if not sequence and self.lights.isHidden():
+        if frame.visible:
+            if self.lights.isHidden():
                 self.lights.show_lights(0)
             self.lights.raise_()
         elif not self.lights.isHidden():
@@ -923,35 +892,6 @@ class HudEditor(QWidget):
         self._preview_lanes = value
         self._show_sample()
 
-    def _show_preview_step(self, step: object) -> None:
-        if isinstance(step, StartCueStep):
-            self.lights.show_step(step)
-            self._place_lights()
-
-    def _finish_preview_sequence(self) -> None:
-        self._cue = None
-        self._restore_idle_lights()
-
-    def _note_sequence_started(self) -> None:
-        self._sequence_started = True
-
-    def _stop_cue(self, *, restore: bool = True) -> None:
-        cue = self._cue
-        self._cue = None
-        if cue is not None:
-            cue.blockSignals(True)
-            cue.stop()
-        if restore:
-            self._restore_idle_lights()
-
-    def _restore_idle_lights(self) -> None:
-        frame = self.selected_layout().lights
-        if frame.visible:
-            self.lights.show_lights(0)
-        elif not self.lights.isHidden():
-            self.lights.clear()
-        self._place_lights()
-
 
 def _scale_spin(object_name: str) -> QSpinBox:
     spin = QSpinBox()
@@ -1057,7 +997,6 @@ class HudEditorWindow(QMainWindow):
                 self.editor.save()
             else:
                 self.editor.revert()
-        self.editor._stop_cue()
         self._remember_geometry()
         super().closeEvent(event)
 
