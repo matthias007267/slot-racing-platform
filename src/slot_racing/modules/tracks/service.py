@@ -13,7 +13,7 @@ from slot_racing.core.domain import TrackId
 from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
-from slot_racing.modules.tracks.models import Track
+from slot_racing.modules.tracks.models import Track, TrackLayout
 
 MIN_LANES = MIN_LANE_COUNT
 MAX_LANES = MAX_LANE_COUNT
@@ -55,6 +55,17 @@ class TrackService(TrackCatalog):
         with self._database.session() as session:
             track = session.get(Track, track_id)
             return None if track is None else _track_info(track)
+
+    def current_layout_id(self, track_id: TrackId) -> int | None:
+        """The plan row named ``plan``. Older revisions keep their own ids and are not returned."""
+        with self._database.session() as session:
+            layout_id = session.scalar(
+                select(TrackLayout.id)
+                .where(TrackLayout.track_id == int(track_id), TrackLayout.name == "plan")
+                .order_by(TrackLayout.id)
+                .limit(1)
+            )
+            return None if layout_id is None else int(layout_id)
 
     def create_track(self, data: TrackInput) -> TrackInfo:
         values = self._validate(data)

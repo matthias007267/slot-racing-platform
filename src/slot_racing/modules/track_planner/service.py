@@ -155,20 +155,33 @@ class TrackPlannerService:
         ).scalar_one_or_none()
 
     def _write(self, session: Session, track_id: int, document: dict[str, Any]) -> None:
+        """Keep one current ``plan`` row.
+
+        A changed document becomes a new row. The previous row is renamed so its id still
+        names the layout a race already stored. An identical save does not create a revision.
+        """
         table = _layouts()
-        ids = list(
+        rows = list(
             session.execute(
-                select(table.c.id)
+                select(table.c.id, table.c.data)
                 .where(table.c.track_id == track_id, table.c.name == PLAN_NAME)
                 .order_by(table.c.id)
-            ).scalars()
+            )
         )
-        if not ids:
+        if not rows:
             session.execute(insert(table).values(track_id=track_id, name=PLAN_NAME, data=document))
             return
-        session.execute(update(table).where(table.c.id == ids[0]).values(data=document))
-        if len(ids) > 1:
-            session.execute(delete(table).where(table.c.id.in_(ids[1:])))
+        current = rows[0]
+        if current.data == document and len(rows) == 1:
+            return
+        for row in rows:
+            session.execute(
+                update(table).where(table.c.id == row.id).values(name=f"archive-{row.id}")
+            )
+        if current.data == document:
+            session.execute(update(table).where(table.c.id == current.id).values(name=PLAN_NAME))
+            return
+        session.execute(insert(table).values(track_id=track_id, name=PLAN_NAME, data=document))
 
 
 def _layouts() -> Any:

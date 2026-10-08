@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 from slot_racing.core.catalog import (
     DriverCatalog,
     RaceCatalog,
+    RaceHistoryCatalog,
     TimeMeasurementCatalog,
     TrackCatalog,
     VehicleCatalog,
@@ -77,6 +78,7 @@ class RacesPlugin(Plugin):
             PersistentStoreReplacing, lambda _event: controller.release_for_restore()
         )
         context.register_service(RaceService, service)
+        context.register_service(RaceHistoryCatalog, service)
         context.register_service(RaceController, controller)
         context.register_service(RaceCatalog, RaceOverview(service, controller))
         context.register_service(TimeMeasurementCatalog, StoredTimeMeasurements(service))

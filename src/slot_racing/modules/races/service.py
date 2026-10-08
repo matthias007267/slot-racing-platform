@@ -9,7 +9,13 @@ from datetime import datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from slot_racing.core.catalog import DriverCatalog, TrackCatalog, TrackInfo, VehicleCatalog
+from slot_racing.core.catalog import (
+    DriverCatalog,
+    RaceHistoryCatalog,
+    TrackCatalog,
+    TrackInfo,
+    VehicleCatalog,
+)
 from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import (
     DriverId,
@@ -22,9 +28,11 @@ from slot_racing.core.domain import (
 )
 from slot_racing.core.domain.scoring import scoring_for, time_trial_stored_key
 from slot_racing.core.errors import ValidationError
+from slot_racing.core.statistics import HistoryRace, LayoutRevision
 from slot_racing.core.storage import Database, utc_now
 from slot_racing.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProviderRegistry
 from slot_racing.modules.races import heats
+from slot_racing.modules.races.history import load_completed, load_layouts, load_one
 from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector, TimeMeasurement
 from slot_racing.modules.races.types import (
     HeatBriefing,
@@ -107,7 +115,7 @@ def _stored_standing_key(
     return (1, -completed, last_time, lane)
 
 
-class RaceService:
+class RaceService(RaceHistoryCatalog):
     """Owns the race data. Drivers, vehicles and tracks are only read through their catalogs."""
 
     def __init__(
@@ -148,6 +156,7 @@ class RaceService:
             race = Race(
                 name=clean_name,
                 track_id=track_id,
+                track_layout_id=self._tracks.current_layout_id(track_id),
                 target_laps=laps,
                 mode=RaceMode.LAPS.value,
                 timing_provider=provider,
@@ -179,6 +188,7 @@ class RaceService:
             race = Race(
                 name=clean_name,
                 track_id=track_id,
+                track_layout_id=self._tracks.current_layout_id(track_id),
                 target_laps=0,
                 mode=RaceMode.TIME_TRIAL.value,
                 timing_provider=provider,
@@ -226,6 +236,7 @@ class RaceService:
                 if too_many or any(lane > track.lane_count for lane in lanes):
                     raise ValidationError("error.race.track_too_small", lanes=track.lane_count)
                 race.track_id = track_id
+                race.track_layout_id = self._tracks.current_layout_id(track_id)
             race.name = clean_name
             race.mode = chosen.value
             race.target_laps = laps if chosen is RaceMode.LAPS else 0
@@ -586,6 +597,20 @@ class RaceService:
         rows.sort(key=lambda row: (row.position is None, row.position or 0, row.lane))
         return rows
 
+    def list_completed(self) -> tuple[HistoryRace, ...]:
+        tracks = {int(track.id): track.name for track in self._tracks.list_tracks()}
+        with self._database.session() as session:
+            return load_completed(session, self._drivers, self._vehicles, tracks)
+
+    def get_completed(self, race_id: RaceId) -> HistoryRace | None:
+        tracks = {int(track.id): track.name for track in self._tracks.list_tracks()}
+        with self._database.session() as session:
+            return load_one(session, race_id, self._drivers, self._vehicles, tracks)
+
+    def list_layouts(self, track_id: TrackId) -> tuple[LayoutRevision, ...]:
+        with self._database.session() as session:
+            return load_layouts(session, track_id)
+
     def get_laps(self, race_id: RaceId) -> list[LapRecord]:
         with self._database.session() as session:
             self._load(session, race_id)
@@ -753,6 +778,7 @@ class RaceService:
                     TimeMeasurement(
                         race_id=race.id,
                         track_id=race.track_id,
+                        track_layout_id=race.track_layout_id,
                         driver_id=participant.driver_id,
                         vehicle_id=participant.vehicle_id,
                         lane=lane,

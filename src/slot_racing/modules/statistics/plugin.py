@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from slot_racing.core.catalog import TimeMeasurementCatalog, TrackCatalog
+from slot_racing.core.catalog import (
+    DriverCatalog,
+    RaceHistoryCatalog,
+    TimeMeasurementCatalog,
+    TrackCatalog,
+    VehicleCatalog,
+)
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
+from slot_racing.uikit import UIKIT_TRANSLATIONS
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
@@ -19,6 +26,7 @@ class StatisticsPlugin(Plugin):
     )
     translations: ClassVar[dict[str, dict[str, str]]] = {
         "de": {
+            **UIKIT_TRANSLATIONS["de"],
             "plugin.statistics.title": "Statistiken",
             "nav.statistics": "Statistiken",
             "statistics.track": "Strecke",
@@ -41,6 +49,9 @@ class StatisticsPlugin(Plugin):
                 translator,
                 context.get_service(TrackCatalog),
                 lambda: context.find_service(TimeMeasurementCatalog),
+                lambda: context.find_service(RaceHistoryCatalog),
+                lambda: _driver_labels(context.find_service(DriverCatalog)),
+                lambda: _vehicle_labels(context.find_service(VehicleCatalog)),
             )
 
         context.add_navigation(
@@ -51,3 +62,15 @@ class StatisticsPlugin(Plugin):
                 page_factory=statistics_page,
             )
         )
+
+
+def _driver_labels(catalog: DriverCatalog | None) -> tuple[tuple[int, str], ...]:
+    if catalog is None:
+        return ()
+    return tuple((int(driver.id), driver.label) for driver in catalog.list_drivers())
+
+
+def _vehicle_labels(catalog: VehicleCatalog | None) -> tuple[tuple[int, str], ...]:
+    if catalog is None:
+        return ()
+    return tuple((int(vehicle.id), vehicle.label) for vehicle in catalog.list_vehicles())
