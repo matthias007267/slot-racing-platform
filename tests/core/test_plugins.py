@@ -325,4 +325,5 @@ def test_all_builtin_modules_are_discovered() -> None:
         "track_planner",
         "audio_animation",
         "statistics",
+        "championships",
     }

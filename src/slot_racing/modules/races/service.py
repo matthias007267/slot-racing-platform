@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from slot_racing.core.catalog import (
     DriverCatalog,
     RaceHistoryCatalog,
+    RaceIndexEntry,
     TrackCatalog,
     TrackInfo,
     VehicleCatalog,
@@ -610,6 +611,19 @@ class RaceService(RaceHistoryCatalog):
     def list_layouts(self, track_id: TrackId) -> tuple[LayoutRevision, ...]:
         with self._database.session() as session:
             return load_layouts(session, track_id)
+
+    def list_index(self) -> tuple[RaceIndexEntry, ...]:
+        with self._database.session() as session:
+            races = session.scalars(select(Race).order_by(Race.id)).all()
+            return tuple(
+                RaceIndexEntry(
+                    race_id=int(race.id),
+                    name=race.name,
+                    status=RaceStatus(race.status),
+                    finished_at=race.finished_at,
+                )
+                for race in races
+            )
 
     def get_laps(self, race_id: RaceId) -> list[LapRecord]:
         with self._database.session() as session:

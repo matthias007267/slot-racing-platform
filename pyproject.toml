@@ -31,6 +31,7 @@ timing_sensor = "slot_racing.modules.timing_sensor.plugin:SensorTimingPlugin"
 track_planner = "slot_racing.modules.track_planner.plugin:TrackPlannerPlugin"
 audio_animation = "slot_racing.modules.audio_animation.plugin:AudioAnimationPlugin"
 statistics = "slot_racing.modules.statistics.plugin:StatisticsPlugin"
+championships = "slot_racing.modules.championships.plugin:ChampionshipsPlugin"
 
 [dependency-groups]
 dev = [
@@ -108,6 +109,7 @@ modules = [
     "slot_racing.modules.track_planner",
     "slot_racing.modules.audio_animation",
     "slot_racing.modules.statistics",
+    "slot_racing.modules.championships",
 ]
 
 [[tool.importlinter.contracts]]
