@@ -297,7 +297,7 @@ class RaceService(RaceHistoryCatalog):
     def enroll_driver(
         self, race_id: RaceId, driver_id: DriverId, vehicle_id: VehicleId
     ) -> ParticipantInfo:
-        """Add a driver without a lane. The heat plan assigns every lane later."""
+        """Add a driver without a lane. An existing heat plan is rebuilt from the new roster."""
         driver = self._drivers.get_driver(driver_id)
         if driver is None:
             raise ValidationError("error.race.driver_unknown")
@@ -322,6 +322,7 @@ class RaceService(RaceHistoryCatalog):
             )
             session.add(participant)
             session.flush()
+            self._replan_open_heats(session, race)
             self._update_readiness(session, race)
             return self._participant_info(participant)
 
@@ -371,6 +372,15 @@ class RaceService(RaceHistoryCatalog):
                 raise ValidationError("error.race.no_track")
             heats.replace_open_plan(session, race, track.lane_count)
             return heats.list_heats(session, race.id)
+
+    def _replan_open_heats(self, session: Session, race: Race) -> None:
+        """Keep a roster change on the same rotation. Races without heats are left alone."""
+        if not heats.uses_heats(session, race.id) or race.track_id is None:
+            return
+        track = self._tracks.get_track(TrackId(race.track_id))
+        if track is None:
+            return
+        heats.replace_open_plan(session, race, track.lane_count)
 
     def heat_plan(self, race_id: RaceId) -> list[HeatInfo]:
         with self._database.session() as session:
@@ -496,6 +506,7 @@ class RaceService(RaceHistoryCatalog):
                 raise ValidationError("error.race.participant_unknown")
             session.delete(participant)
             session.flush()
+            self._replan_open_heats(session, race)
             self._update_readiness(session, race)
 
     def delete_race(self, race_id: RaceId) -> None:

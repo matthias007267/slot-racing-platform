@@ -8,7 +8,15 @@ from pytestqt.qtbot import QtBot
 
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.errors import ValidationError
-from slot_racing.modules.races.planning import build_rotation, plan_remaining, rotation_is_complete
+from slot_racing.modules.races.planning import (
+    build_rotation,
+    pairwise_cycle,
+    pairwise_heats,
+    pairwise_period,
+    pending_pairwise,
+    plan_remaining,
+    rotation_is_complete,
+)
 from slot_racing.modules.races.runner import LiveRow
 from slot_racing.modules.races.service import parse_duration_minutes
 from slot_racing.modules.races.types import HeatBriefing, HeatSeat, LaneChange, RaceInfo
@@ -23,12 +31,65 @@ from tests.support.start_sequence import release_start_lights
 
 
 def test_rotation_gives_every_driver_every_lane_once() -> None:
-    for drivers, lanes in ((2, 2), (2, 3), (2, 4), (4, 2), (5, 2), (3, 3), (1, 4), (4, 4)):
+    for drivers, lanes in ((2, 3), (2, 4), (5, 2), (3, 3), (1, 4), (4, 4)):
         heats = build_rotation(list(range(drivers)), lanes)
         assert rotation_is_complete(heats, list(range(drivers)), lanes)
         for heat in heats:
             assert len(heat) == min(drivers, lanes)
             assert len({lane for _driver, lane in heat}) == len(heat)
+
+
+def test_two_lanes_pair_drivers_and_then_repeat() -> None:
+    expected = {
+        2: (((1, 1), (2, 2)),),
+        3: (
+            ((1, 1), (2, 2)),
+            ((3, 1), (1, 2)),
+            ((2, 1), (3, 2)),
+        ),
+        4: (
+            ((1, 1), (2, 2)),
+            ((3, 1), (4, 2)),
+        ),
+        5: (
+            ((1, 1), (2, 2)),
+            ((3, 1), (4, 2)),
+            ((5, 1), (1, 2)),
+            ((2, 1), (3, 2)),
+            ((4, 1), (5, 2)),
+        ),
+        6: (
+            ((1, 1), (2, 2)),
+            ((3, 1), (4, 2)),
+            ((5, 1), (6, 2)),
+        ),
+        7: (
+            ((1, 1), (2, 2)),
+            ((3, 1), (4, 2)),
+            ((5, 1), (6, 2)),
+            ((7, 1), (1, 2)),
+            ((2, 1), (3, 2)),
+            ((4, 1), (5, 2)),
+            ((6, 1), (7, 2)),
+        ),
+    }
+    for count, cycle in expected.items():
+        drivers = list(range(1, count + 1))
+        assert pairwise_period(count) == len(cycle)
+        assert pairwise_cycle(drivers) == cycle
+        assert build_rotation(drivers, 2) == cycle
+        repeated = pairwise_heats(drivers, len(cycle) * 2)
+        assert repeated[: len(cycle)] == cycle
+        assert repeated[len(cycle) :] == cycle
+        for heat in cycle:
+            assert [lane for _driver, lane in heat] == [1, 2]
+        if count % 2 == 0:
+            seated: list[int] = []
+            for heat in cycle:
+                for driver, _lane in heat:
+                    assert driver not in seated
+                    seated.append(driver)
+            assert seated == drivers
 
 
 def test_more_drivers_than_lanes_need_more_than_one_heat() -> None:
@@ -90,34 +151,60 @@ def test_duration_accepts_whole_minutes_and_rejects_anything_else() -> None:
 def test_enrolling_drivers_plans_a_heat_for_every_lane(env: Env, lanes: int) -> None:
     race = _enrolled(env, lanes=lanes, drivers=lanes)
     plan = env.races.heat_plan(race.id)
-    assert rotation_is_complete(
-        [heat.seats for heat in plan],
-        [participant.id for participant in race.participants],
-        lanes,
-    )
+    ids = [participant.id for participant in race.participants]
+    if lanes == 2:
+        assert [heat.seats for heat in plan] == [((ids[0], 1), (ids[1], 2))]
+    else:
+        assert rotation_is_complete([heat.seats for heat in plan], ids, lanes)
     assert env.races.require_race(race.id).participants[0].lane is None
 
 
 def test_five_drivers_on_two_lanes_are_not_cut_down_to_one_heat(env: Env) -> None:
     race = _enrolled(env, lanes=2, drivers=5)
     plan = env.races.heat_plan(race.id)
+    ids = [participant.id for participant in race.participants]
+    assert [heat.seats for heat in plan] == list(pairwise_cycle(ids))
     assert len(plan) == 5
-    assert rotation_is_complete(
-        [heat.seats for heat in plan],
-        [participant.id for participant in race.participants],
-        2,
-    )
+    assert rotation_is_complete([heat.seats for heat in plan], ids, 2)
+
+
+def test_the_next_heat_continues_the_pairwise_cycle(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=6, laps=1)
+    ids = [participant.id for participant in race.participants]
+    _finish_heat(env, race.id)
+    assert env.races.require_race(race.id).status is RaceStatus.READY
+    planned = [heat for heat in env.races.heat_plan(race.id) if heat.status == "planned"]
+    assert planned[0].seats == ((ids[2], 1), (ids[3], 2))
+    assert [heat.seats for heat in planned] == list(pairwise_cycle(ids)[1:])
+
+
+def test_adding_and_removing_drivers_rebuilds_the_pairs(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=4)
+    ids = [participant.id for participant in race.participants]
+    assert [heat.seats for heat in env.races.heat_plan(race.id)] == list(pairwise_cycle(ids))
+    removed = ids[-1]
+    env.races.remove_participant(race.id, removed)
+    shortened = ids[:-1]
+    assert [heat.seats for heat in env.races.heat_plan(race.id)] == list(pairwise_cycle(shortened))
+    added, vehicle = env.pair(9)
+    env.races.enroll_driver(race.id, added, vehicle)
+    current = env.races.require_race(race.id)
+    assert [participant.driver_id for participant in current.participants][-1] == added
+    restored = [participant.id for participant in current.participants]
+    assert [heat.seats for heat in env.races.heat_plan(race.id)] == list(pairwise_cycle(restored))
+    assert pending_pairwise(restored, {(restored[0], 1)})[0] == ((restored[1], 2),)
 
 
 def test_two_heats_combine_laps_and_rank_the_race(env: Env) -> None:
-    race = _enrolled(env, lanes=2, drivers=2, laps=1)
+    race = _enrolled(env, lanes=2, drivers=3, laps=1)
     _finish_heat(env, race.id)
     assert env.races.require_race(race.id).status is RaceStatus.READY
+    _finish_heat(env, race.id)
     _finish_heat(env, race.id)
     stored = env.races.require_race(race.id)
     assert stored.status is RaceStatus.FINISHED
     results = env.races.get_results(race.id)
-    assert [row.position for row in results] == [1, 2]
+    assert [row.position for row in results] == [1, 2, 3]
     assert {row.laps_completed for row in results} == {2}
 
 
@@ -187,7 +274,7 @@ def test_a_time_trial_stores_and_uses_its_duration(env: Env) -> None:
 def test_each_time_trial_heat_lasts_the_configured_minutes(env: Env) -> None:
     track = env.track(lanes=2)
     race = env.races.create_time_trial("Qualifying", track.id, duration_minutes=1)
-    for index in (1, 2):
+    for index in (1, 2, 3, 4):
         driver, vehicle = env.pair(index)
         env.races.enroll_driver(race.id, driver, vehicle)
     env.races.plan_heats(race.id)

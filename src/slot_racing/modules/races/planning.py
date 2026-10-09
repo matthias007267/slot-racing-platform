@@ -1,11 +1,14 @@
 """Automatic lane rotation for lap races and time trials.
 
-A driver who is still in the race drives every lane of the track once. The order of the heats
-may change when somebody cannot start or is disqualified; the lane obligation does not.
+Two-lane races pair drivers from a circular list. The index advances by two after every
+heat, so an even field is consecutive pairs and an odd field keeps sharing the spare driver.
+Three and four lanes still give every driver one visit to every lane. The order of those
+heats may change when somebody cannot start or is disqualified; the lane obligation does not.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 
@@ -14,14 +17,17 @@ def build_rotation(
 ) -> tuple[tuple[tuple[int, int], ...], ...]:
     """One heat per entry. Each item is ``(driver_id, lane)`` with lanes starting at 1.
 
-    With at most as many drivers as lanes, the field rotates together and empty lanes stay
-    empty. With more drivers than lanes, consecutive drivers fill each heat and the window
-    moves by one driver, so everybody still visits every lane once.
+    Two lanes use :func:`pairwise_cycle`. With at most as many drivers as lanes, the field
+    rotates together and empty lanes stay empty. With more drivers than lanes, consecutive
+    drivers fill each heat and the window moves by one driver, so everybody still visits
+    every lane once.
     """
     drivers = list(driver_ids)
     count = len(drivers)
     if count == 0 or lane_count < 1:
         return ()
+    if lane_count == 2 and count >= 2:
+        return pairwise_cycle(drivers)
     if count <= lane_count:
         heats = [
             tuple(
@@ -44,6 +50,68 @@ def build_rotation(
         )
         heats.append(heat)
     return tuple(heats)
+
+
+def pairwise_period(driver_count: int) -> int:
+    """Heats until the circular index is back at the first driver.
+
+    Even fields return after ``driver_count / 2`` heats. Odd fields need one heat per driver,
+    because stepping by two only then lands on every index.
+    """
+    if driver_count < 2:
+        return 0
+    return driver_count // math.gcd(driver_count, 2)
+
+
+def pairwise_heats(
+    driver_ids: Sequence[int], heat_count: int
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """``heat_count`` pairs. Lane 1 is the driver at the index, lane 2 is the next one.
+
+    The index starts at zero and moves two places after each pair. It wraps around the list.
+    """
+    drivers = list(driver_ids)
+    count = len(drivers)
+    if count < 2 or heat_count < 1:
+        return ()
+    heats: list[tuple[tuple[int, int], ...]] = []
+    index = 0
+    for _ in range(heat_count):
+        heats.append(((drivers[index], 1), (drivers[(index + 1) % count], 2)))
+        index = (index + 2) % count
+    return tuple(heats)
+
+
+def pairwise_cycle(
+    driver_ids: Sequence[int],
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """One full pass of :func:`pairwise_heats`. The next pass repeats this sequence."""
+    return pairwise_heats(driver_ids, pairwise_period(len(driver_ids)))
+
+
+def pending_pairwise(
+    driver_ids: Sequence[int],
+    completed: set[tuple[int, int]],
+    *,
+    deferred: frozenset[int] = frozenset(),
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """The open seats of one pairwise cycle.
+
+    A seat that was already driven is left out. ``deferred`` drivers sit out the next heat
+    only; their heats stay in the plan after that heat.
+    """
+    pending: list[tuple[tuple[int, int], ...]] = []
+    for heat in pairwise_cycle(driver_ids):
+        open_seats = tuple(seat for seat in heat if seat not in completed)
+        if open_seats:
+            pending.append(open_seats)
+    if not deferred or not pending:
+        return tuple(pending)
+    ready = [heat for heat in pending if all(driver not in deferred for driver, _lane in heat)]
+    held = [heat for heat in pending if any(driver in deferred for driver, _lane in heat)]
+    if not ready:
+        return tuple(pending)
+    return (ready[0], *held, *ready[1:])
 
 
 def plan_remaining(
