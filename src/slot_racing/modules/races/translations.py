@@ -110,16 +110,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hud.window.title": "HUD-Editor",
         "hud.group.surface": "Fläche",
         "hud.group.layout": "Layout",
-        "hud.group.text": "Schrift",
+        "hud.group.text": "Schriftgrößen",
+        "hud.group.alignment": "Ausrichtung",
+        "hud.group.actions": "Aktionen",
         "hud.group.fields": "Anzeigen",
         "hud.group.shares": "Bereiche",
         "hud.group.lights": "Startampel",
         "hud.group.preview": "Simulation",
         "hud.match_live": "1:1-Vorschau",
         "hud.match_live.hint": (
-            "Die HUD-Fläche behält die Größe aus dem Live-Betrieb, "
-            "inklusive Navigation und Seitenabständen."
+            "Die Vorschau übernimmt die äußeren Abstände des Live-Betriebs. "
+            "Die Einstellungen bleiben daneben vollständig bedienbar."
         ),
+        "hud.layout.name": "Name",
         "hud.close.unsaved": "Das HUD-Layout enthält ungespeicherte Änderungen.",
         "hud.close.save": "Speichern",
         "hud.close.discard": "Verwerfen",
