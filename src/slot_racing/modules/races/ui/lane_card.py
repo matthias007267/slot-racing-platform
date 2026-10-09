@@ -20,10 +20,13 @@ from slot_racing.modules.races.hud import (
     FIELD_BASE_PX,
     FIELD_BEST,
     FIELD_DRIVER,
+    FIELD_IDS,
     FIELD_LANE,
     FIELD_LAP,
     FIELD_LAST,
     FIELD_POSITION,
+    FIELD_REMAINING_LAPS,
+    FIELD_REMAINING_TIME,
     FIELD_START,
     FIELD_STATUS,
     FIELD_TOTAL,
@@ -33,6 +36,7 @@ from slot_racing.modules.races.hud import (
     caption_px,
     effective_px,
     factory_layout,
+    field_shown,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.formatting import (
@@ -60,6 +64,8 @@ class LaneCard(QFrame):
         self.lane = lane
         self._style = factory_layout()
         self._mode = RaceMode.LAPS
+        self._remaining_laps: str | None = None
+        self._remaining_time: str | None = None
         self._fit_factor = 1.0
         self._fitting = False
         self.setObjectName(f"live-lane-{lane}")
@@ -74,6 +80,8 @@ class LaneCard(QFrame):
         self.vehicle_label = _value(f"live-lane-{lane}-vehicle", wrap=True)
         self.start_label = _value(f"live-lane-{lane}-start")
         self.lap_label = _value(f"live-lane-{lane}-lap", wrap=True)
+        self.remaining_laps_label = _value(f"live-lane-{lane}-remaining-laps")
+        self.remaining_time_label = _value(f"live-lane-{lane}-remaining-time")
         self.last_label = _value(f"live-lane-{lane}-last")
         self.best_label = _value(f"live-lane-{lane}-best")
         self.total_label = _value(f"live-lane-{lane}-total")
@@ -90,6 +98,14 @@ class LaneCard(QFrame):
         )
         self._start_box = _block(self._start_caption, self.start_label)
         self._lap_box = _block(self.lap_label)
+        self._remaining_laps_caption = _caption(
+            f"live-lane-{lane}-remaining-laps-caption", tr("race.column.remaining_laps")
+        )
+        self._remaining_time_caption = _caption(
+            f"live-lane-{lane}-remaining-time-caption", tr("race.column.remaining_time")
+        )
+        self._remaining_laps_box = _block(self._remaining_laps_caption, self.remaining_laps_label)
+        self._remaining_time_box = _block(self._remaining_time_caption, self.remaining_time_label)
         self._last_caption = _caption(f"live-lane-{lane}-last-caption", tr("race.column.last_lap"))
         self._best_caption = _caption(f"live-lane-{lane}-best-caption", tr("race.column.best_lap"))
         self._total_caption = _caption(
@@ -106,6 +122,8 @@ class LaneCard(QFrame):
             FIELD_VEHICLE: self._vehicle_box,
             FIELD_START: self._start_box,
             FIELD_LAP: self._lap_box,
+            FIELD_REMAINING_LAPS: self._remaining_laps_box,
+            FIELD_REMAINING_TIME: self._remaining_time_box,
             FIELD_LAST: self._last_box,
             FIELD_BEST: self._best_box,
             FIELD_TOTAL: self._total_box,
@@ -118,6 +136,8 @@ class LaneCard(QFrame):
             FIELD_VEHICLE: self.vehicle_label,
             FIELD_START: self.start_label,
             FIELD_LAP: self.lap_label,
+            FIELD_REMAINING_LAPS: self.remaining_laps_label,
+            FIELD_REMAINING_TIME: self.remaining_time_label,
             FIELD_LAST: self.last_label,
             FIELD_BEST: self.best_label,
             FIELD_TOTAL: self.total_label,
@@ -125,6 +145,8 @@ class LaneCard(QFrame):
         }
         self._captions = {
             FIELD_START: self._start_caption,
+            FIELD_REMAINING_LAPS: self._remaining_laps_caption,
+            FIELD_REMAINING_TIME: self._remaining_time_caption,
             FIELD_LAST: self._last_caption,
             FIELD_BEST: self._best_caption,
             FIELD_TOTAL: self._total_caption,
@@ -133,18 +155,7 @@ class LaneCard(QFrame):
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE.xs)
-        for field_id in (
-            FIELD_LANE,
-            FIELD_POSITION,
-            FIELD_DRIVER,
-            FIELD_VEHICLE,
-            FIELD_START,
-            FIELD_LAP,
-            FIELD_LAST,
-            FIELD_BEST,
-            FIELD_TOTAL,
-            FIELD_STATUS,
-        ):
+        for field_id in FIELD_IDS:
             column.addWidget(self._boxes[field_id])
         self._column = QWidget()
         self._column.setObjectName(f"live-lane-{lane}-stack")
@@ -173,13 +184,19 @@ class LaneCard(QFrame):
         mode: RaceMode,
         paused: bool,
         ended: bool,
+        elapsed_ns: int = 0,
+        duration_minutes: int | None = None,
     ) -> None:
         self._mode = mode
+        self._remaining_laps = _remaining_laps(row.laps_completed, laps)
+        self._remaining_time = _remaining_time(elapsed_ns, duration_minutes)
         self.position_label.setText(f"P{row.position}")
         self.driver_label.setText(row.driver_label)
         self.vehicle_label.setText(row.vehicle_label)
         self.start_label.setText(start_number_text(row.start_number))
         self.lap_label.setText(format_lap_progress(row.current_lap, laps))
+        self.remaining_laps_label.setText(self._remaining_laps or EMPTY_DISPLAY)
+        self.remaining_time_label.setText(self._remaining_time or EMPTY_DISPLAY)
         self.last_label.setText(format_duration(row.last_lap_ns))
         self.best_label.setText(format_duration(row.best_lap_ns))
         self.total_label.setText(format_duration(row.total_time_ns))
@@ -192,11 +209,15 @@ class LaneCard(QFrame):
 
     def show_free(self, free: str, *, show_total: bool = True) -> None:
         self._mode = RaceMode.LAPS if show_total else RaceMode.TIME_TRIAL
+        self._remaining_laps = None
+        self._remaining_time = None
         self.position_label.setText(EMPTY_DISPLAY)
         self.driver_label.setText(free)
         self.vehicle_label.setText(EMPTY_DISPLAY)
         self.start_label.setText(EMPTY_DISPLAY)
         self.lap_label.setText(EMPTY_DISPLAY)
+        self.remaining_laps_label.setText(EMPTY_DISPLAY)
+        self.remaining_time_label.setText(EMPTY_DISPLAY)
         self.last_label.setText("-")
         self.best_label.setText("-")
         self.total_label.setText("-")
@@ -219,12 +240,24 @@ class LaneCard(QFrame):
             return
         alignment = _ALIGN.get(self._style.alignment, _ALIGN["center"])
         for field_id, box in self._boxes.items():
-            style = self._style.field(field_id)
-            shown = style.visible and (field_id != FIELD_TOTAL or self._mode is RaceMode.LAPS)
-            box.setVisible(shown)
+            box.setVisible(
+                field_shown(
+                    self._style.field(field_id),
+                    field_id,
+                    self._mode,
+                    available=self._field_available(field_id),
+                )
+            )
         for label in (*self._values.values(), *self._captions.values()):
             label.setAlignment(alignment)
         self._apply_fonts(self._fit_factor)
+
+    def _field_available(self, field_id: str) -> bool:
+        if field_id == FIELD_REMAINING_LAPS:
+            return self._remaining_laps is not None
+        if field_id == FIELD_REMAINING_TIME:
+            return self._remaining_time is not None
+        return True
 
     def _apply_fonts(self, factor: float) -> None:
         sizes: dict[str, int] = {}
@@ -306,7 +339,14 @@ class LaneCardBoard(QWidget):
         for card in self._cards.values():
             card.apply_style(style)
 
-    def show_snapshot(self, snapshot: RaceSnapshot, *, lane_count: int, mode: RaceMode) -> None:
+    def show_snapshot(
+        self,
+        snapshot: RaceSnapshot,
+        *,
+        lane_count: int,
+        mode: RaceMode,
+        duration_minutes: int | None = None,
+    ) -> None:
         self._ensure(lane_count)
         by_lane = {row.lane: row for row in snapshot.rows}
         paused = snapshot.status is RaceStatus.PAUSED
@@ -317,7 +357,15 @@ class LaneCardBoard(QWidget):
             if row is None:
                 card.show_free(free, show_total=mode is RaceMode.LAPS)
             else:
-                card.show_driver(row, laps=snapshot.laps, mode=mode, paused=paused, ended=ended)
+                card.show_driver(
+                    row,
+                    laps=snapshot.laps,
+                    mode=mode,
+                    paused=paused,
+                    ended=ended,
+                    elapsed_ns=snapshot.elapsed_ns,
+                    duration_minutes=duration_minutes,
+                )
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -366,6 +414,19 @@ class LaneCardBoard(QWidget):
             self._grid.setColumnStretch(column, 1)
         self._columns = columns
         self._grid.activate()
+
+
+def _remaining_laps(completed: int, target: int) -> str | None:
+    if target < 1:
+        return None
+    return str(max(0, target - completed))
+
+
+def _remaining_time(elapsed_ns: int, duration_minutes: int | None) -> str | None:
+    if duration_minutes is None or duration_minutes < 1:
+        return None
+    left = duration_minutes * 60 * 1_000_000_000 - max(0, elapsed_ns)
+    return format_duration(max(0, left))
 
 
 def _columns_for(lanes: int, width: int) -> int:

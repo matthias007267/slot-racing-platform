@@ -65,6 +65,7 @@ from slot_racing.modules.timing_camera.lease import CameraBusyError
 from slot_racing.modules.timing_camera.store import CameraConfigurationError
 from slot_racing.modules.timing_camera.ui.stage import CameraStage
 from slot_racing.uikit import StatusLabel, describe_error
+from slot_racing.uikit.enter import bind_enter
 from slot_racing.uikit.theme import configure_page, set_role, set_tone
 
 logger = logging.getLogger(__name__)
@@ -264,6 +265,7 @@ class CameraSetupPage(QWidget):
         self.diagnostic.clicked.connect(self._open_diagnostic)
         self.cancel.clicked.connect(self._on_cancel)
         self.save.clicked.connect(self._on_save)
+        bind_enter(self, self._on_save)
         self.stage.selection_changed.connect(self._on_stage_selection)
         self.stage.geometry_changed.connect(self._on_geometry)
         self.stage.zone_drawn.connect(self._on_zone_drawn)

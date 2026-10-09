@@ -105,9 +105,11 @@ class RacesPage(QWidget):
         list_layout.addWidget(self.table, 1)
         list_layout.addWidget(self.status)
 
-        self.wizard = RaceWizard(translator, service, drivers, vehicles, tracks, providers)
+        self.wizard = RaceWizard(
+            translator, service, drivers, vehicles, tracks, providers, hud_store
+        )
         self.live = LiveRaceView(translator, controller, hud_store, service, config)
-        self.results = ResultsView(translator, service)
+        self.results = ResultsView(translator, service, hud_store)
         self.stack = QStackedWidget()
         # The list's preferred width must not stop the live race from using a small window.
         shrink = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)

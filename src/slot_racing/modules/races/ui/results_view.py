@@ -8,11 +8,24 @@ lanes.
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHeaderView, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QHeaderView, QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
 
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, RaceMode, TrackId
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud import (
+    TEXT_DRIVER,
+    TEXT_HEADER,
+    TEXT_PLACE,
+    TEXT_ROW,
+    TEXT_TIME,
+    TEXT_VEHICLE,
+    VIEW_RESULTS,
+    HudConfigurationStore,
+    ViewStyle,
+    effective_px,
+)
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.time_trial_board import build_time_trial_board, format_lap_seconds
 from slot_racing.modules.races.types import RaceInfo, TimeBest
@@ -27,10 +40,16 @@ from slot_racing.uikit.widgets import format_datetime
 class ResultsView(QWidget):
     back_requested = Signal()
 
-    def __init__(self, translator: Translator, service: RaceService) -> None:
+    def __init__(
+        self,
+        translator: Translator,
+        service: RaceService,
+        hud_store: HudConfigurationStore | None = None,
+    ) -> None:
         super().__init__()
         self.translator = translator
         self._service = service
+        self._hud_store = hud_store
         tr = translator.translate
         self.header = heading(tr("race.results.title"))
         self.header.setObjectName("results-header")
@@ -152,9 +171,10 @@ class ResultsView(QWidget):
             widget.setVisible(time_trial)
         if time_trial:
             self._show_time_trial(race)
-            return
-        self.summary.setText(self._header(race))
-        self._show_lap_race(race_id, race.is_over)
+        else:
+            self.summary.setText(self._header(race))
+            self._show_lap_race(race_id, race.is_over)
+        self._apply_typography()
 
     def _header(self, race: RaceInfo) -> str:
         return self.translator.format(
@@ -293,3 +313,87 @@ class ResultsView(QWidget):
             ],
             keep_selection=False,
         )
+
+    def _apply_typography(self) -> None:
+        style = _results_style(self._hud_store)
+        if style.font_scale == 100 and not style.texts:
+            return
+        sizes = {
+            role: effective_px(18, style.font_scale, style.text_scale(role))
+            for role in (TEXT_HEADER, TEXT_DRIVER, TEXT_VEHICLE, TEXT_PLACE, TEXT_TIME, TEXT_ROW)
+        }
+        _label_px(self.header, sizes[TEXT_HEADER], bold=True)
+        _label_px(self.summary, sizes[TEXT_ROW], bold=False)
+        for title in (
+            self.laps_heading,
+            self.records_heading,
+            self.measurements_heading,
+            self.bests_heading,
+            self.ranking_heading,
+        ):
+            _label_px(title, sizes[TEXT_HEADER], bold=True)
+        _paint_table(
+            self.table,
+            sizes,
+            (
+                TEXT_PLACE,
+                TEXT_DRIVER,
+                TEXT_VEHICLE,
+                TEXT_ROW,
+                TEXT_ROW,
+                TEXT_ROW,
+                TEXT_TIME,
+                TEXT_TIME,
+                TEXT_TIME,
+                TEXT_TIME,
+                TEXT_ROW,
+            ),
+        )
+        _paint_table(
+            self.laps_table,
+            sizes,
+            (TEXT_ROW, TEXT_DRIVER, TEXT_ROW, TEXT_TIME, TEXT_TIME),
+        )
+        _paint_table(self.records_table, sizes, (TEXT_ROW, TEXT_DRIVER, TEXT_VEHICLE, TEXT_TIME))
+        _paint_table(
+            self.measurements_table,
+            sizes,
+            (TEXT_DRIVER, TEXT_VEHICLE, TEXT_ROW, TEXT_TIME, TEXT_ROW),
+        )
+        _paint_table(
+            self.bests_table,
+            sizes,
+            (TEXT_ROW, TEXT_DRIVER, TEXT_VEHICLE, TEXT_TIME, TEXT_ROW),
+        )
+        _paint_table(
+            self.ranking_table,
+            sizes,
+            (TEXT_ROW, TEXT_PLACE, TEXT_DRIVER, TEXT_VEHICLE, TEXT_TIME),
+        )
+
+
+def _results_style(store: HudConfigurationStore | None) -> ViewStyle:
+    if store is None:
+        return ViewStyle()
+    return store.load_default_layout().view(VIEW_RESULTS)
+
+
+def _label_px(label: QLabel, pixels: int, *, bold: bool) -> None:
+    font = label.font()
+    font.setPixelSize(pixels)
+    font.setBold(bold)
+    label.setFont(font)
+
+
+def _paint_table(table: QTableWidget, sizes: dict[str, int], columns: tuple[str, ...]) -> None:
+    header_font = QFont(table.horizontalHeader().font())
+    header_font.setPixelSize(sizes[TEXT_HEADER])
+    table.horizontalHeader().setFont(header_font)
+    for row in range(table.rowCount()):
+        for column, role in enumerate(columns):
+            item = table.item(row, column)
+            if item is None:
+                continue
+            font = QFont(item.font())
+            font.setPixelSize(sizes[role])
+            item.setFont(font)

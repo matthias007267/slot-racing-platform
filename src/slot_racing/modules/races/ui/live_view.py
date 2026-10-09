@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QHideEvent, QResizeEvent
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 
 from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
@@ -26,6 +26,11 @@ from slot_racing.core.events import (
 )
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
+    DISPLAY_ALWAYS,
+    DISPLAY_HIDE,
+    PANEL_RECORDS,
+    VIEW_BETWEEN,
+    VIEW_LIVE,
     HudConfigurationStore,
     HudLayout,
     LightFrame,
@@ -123,6 +128,11 @@ class LiveRaceView(QWidget):
 
         self.board = TimeTrialBoardView(translator)
         self.board.hide()
+        # The records panel shares the window with the lane HUD. Ignoring the
+        # stage's large hint keeps the panel wide enough to lay its cards out.
+        self.stage.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.board.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.board.setMinimumHeight(240)
         self.heat_gate = HeatGate(translator)
         self.start_lights = StartLightWidget(self)
         self.start_lights.use_as_overlay()
@@ -395,7 +405,10 @@ class LiveRaceView(QWidget):
         self._snapshot = snapshot
         tr = self.translator.translate
         status_text, tone = self.stage.show_standings(
-            snapshot, mode=runner.race.mode, lane_count=runner.race.lane_count
+            snapshot,
+            mode=runner.race.mode,
+            lane_count=runner.race.lane_count,
+            duration_minutes=runner.race.duration_minutes,
         )
         if self.table.rowCount() and self.table.currentRow() < 0:
             self.table.selectRow(0)
@@ -413,8 +426,8 @@ class LiveRaceView(QWidget):
                 )
             )
         time_trial = runner.race.mode is RaceMode.TIME_TRIAL
-        self.stage.setVisible(not time_trial)
-        self.board.setVisible(time_trial)
+        self.stage.show()
+        self.board.setVisible(_show_records(self.bound_layout(), time_trial=time_trial))
         if time_trial:
             self._show_time_trial(runner, snapshot, status_text, tone)
         self._place_lights()
@@ -437,7 +450,7 @@ class LiveRaceView(QWidget):
     def _show_time_trial(
         self, runner: RaceRunner, snapshot: RaceSnapshot, status_text: str, tone: str
     ) -> None:
-        """Redraw the time-trial board from stored measurements. The lap HUD stays hidden."""
+        """Redraw the records panel. The shared lane HUD stays visible beside it."""
         race = runner.race
         measurements = (
             []
@@ -519,6 +532,7 @@ class LiveRaceView(QWidget):
         if briefing is None:
             self.heat_gate.hide()
             return
+        self.heat_gate.board.set_view_style(self.bound_layout().view(VIEW_BETWEEN))
         self.stage.hide()
         self.board.hide()
         self.heat_gate.show_briefing(briefing)
@@ -596,6 +610,16 @@ class LiveRaceView(QWidget):
         for subscription in self._subscriptions:
             subscription.cancel()
         self._subscriptions.clear()
+
+
+def _show_records(layout: HudLayout, *, time_trial: bool) -> bool:
+    """The records table is one block of the shared HUD, not a second race screen."""
+    mode = layout.view(VIEW_LIVE).panel(PANEL_RECORDS)
+    if mode == DISPLAY_HIDE:
+        return False
+    if mode == DISPLAY_ALWAYS:
+        return True
+    return time_trial
 
 
 def _status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> str:

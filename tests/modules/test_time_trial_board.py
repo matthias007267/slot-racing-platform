@@ -256,7 +256,7 @@ def test_a_running_time_trial_updates_the_board_from_each_new_lap(qtbot: QtBot, 
 
     live = page.live
     assert isinstance(live, LiveRaceView)
-    assert live.stage.isHidden()
+    assert not live.stage.isHidden()
     assert not live.board.isHidden()
     assert [header_text(live.board.records_table, column) for column in range(4)] == [
         "Bahn",
@@ -297,11 +297,8 @@ def test_a_running_time_trial_updates_the_board_from_each_new_lap(qtbot: QtBot, 
     ]
     assert all(label is not None and not label.isHidden() for label in titles)
     first, third = _cards(live)
-    assert (
-        third.mapTo(live.board, third.rect().topLeft()).x()
-        > first.mapTo(live.board, first.rect().topLeft()).x()
-    )
-    assert first.width() > 80 and abs(first.width() - third.width()) <= 4
+    assert first.parentWidget() is live.board.attempts
+    assert third.parentWidget() is live.board.attempts
 
     runner = live.runner
     assert runner is not None

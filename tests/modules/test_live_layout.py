@@ -324,7 +324,7 @@ def test_a_time_trial_keeps_its_board_and_controls(qtbot: QtBot, env: Env) -> No
     window.resize(1400, 860)
     window.show()
     QApplication.processEvents()
-    assert live.stage.isHidden()
+    assert not live.stage.isHidden()
     assert not live.board.isHidden()
     board = live.board.geometry()
     live.start_lights.show_lights(3)

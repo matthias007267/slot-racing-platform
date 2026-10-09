@@ -24,6 +24,13 @@ from slot_racing.core.domain import DriverId, RaceId, RaceMode, TrackId, Vehicle
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing_registry import TimingProviderRegistry
+from slot_racing.modules.races.hud import (
+    VIEW_BETWEEN,
+    VIEW_PRESTART,
+    HudConfigurationStore,
+    ViewStyle,
+)
+from slot_racing.modules.races.naming import suggest_race_name
 from slot_racing.modules.races.service import MAX_LAPS, RaceService, parse_duration_minutes
 from slot_racing.modules.races.types import RaceInfo
 from slot_racing.modules.races.ui.race_briefing import (
@@ -42,6 +49,7 @@ from slot_racing.uikit import (
     provider_label,
     selected_id,
 )
+from slot_racing.uikit.enter import bind_enter
 from slot_racing.uikit.errors import is_expected
 from slot_racing.uikit.theme import FONT_CAPTION, FONT_STEP, SPACE, configure_page, set_role
 
@@ -70,6 +78,7 @@ class RaceWizard(QWidget):
         vehicles: VehicleCatalog,
         tracks: TrackCatalog,
         providers: TimingProviderRegistry,
+        hud_store: HudConfigurationStore | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("race-wizard")
@@ -79,6 +88,7 @@ class RaceWizard(QWidget):
         self._vehicles = vehicles
         self._tracks = tracks
         self._providers = providers
+        self._hud_store = hud_store
         self._race: RaceInfo | None = None
         self._editing_participant_id: int | None = None
         tr = translator.translate
@@ -198,6 +208,7 @@ class RaceWizard(QWidget):
         self.mode_combo.currentIndexChanged.connect(lambda _: self._sync_lap_target())
         self.postpone_button.clicked.connect(lambda: self._guard(self._postpone_selected))
         self.disqualify_button.clicked.connect(lambda: self._guard(self._disqualify_selected))
+        bind_enter(self, self._confirm_step)
         self._show_step(NAME)
 
     @property
@@ -214,7 +225,9 @@ class RaceWizard(QWidget):
         self._race = None if race_id is None else self._service.require_race(race_id)
         self._reload_choices()
         if self._race is None:
-            self.name_edit.clear()
+            self.name_edit.setText(
+                suggest_race_name(race.name for race in self._service.list_races())
+            )
             self.mode_combo.setCurrentIndex(self.mode_combo.findData(RaceMode.LAPS.value))
             self.laps_spin.setValue(5)
             self.duration_edit.setText("5")
@@ -254,6 +267,13 @@ class RaceWizard(QWidget):
 
     def request_start(self) -> bool:
         return self._guard(self._request_start)
+
+    def _confirm_step(self) -> None:
+        """Enter uses the same check as Weiter, and on the last step the same check as Start."""
+        if self.step >= START:
+            self.request_start()
+        else:
+            self.go_next()
 
     def show_error(self, message: str) -> None:
         """Show a reason that appeared after the start was handed to the race page."""
@@ -407,9 +427,22 @@ class RaceWizard(QWidget):
             self._reload_providers()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
+            self._apply_board_style(VIEW_PRESTART)
             self._show_overview_board()
         if step == START:
+            self._apply_board_style(VIEW_BETWEEN)
             self._show_start_briefing()
+
+    def _apply_board_style(self, view_id: str) -> None:
+        style = (
+            ViewStyle()
+            if self._hud_store is None
+            else self._hud_store.load_default_layout().view(view_id)
+        )
+        if view_id == VIEW_PRESTART:
+            self.overview_board.set_view_style(style)
+        else:
+            self.briefing_board.set_view_style(style)
 
     def _advance(self) -> None:
         step = self.step

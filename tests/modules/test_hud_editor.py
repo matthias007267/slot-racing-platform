@@ -9,7 +9,6 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QLabel,
     QMessageBox,
@@ -67,8 +66,8 @@ def test_visibility_alignment_and_shares_change_the_live_surface(qtbot: QtBot) -
     editor = _shown(qtbot)
     editor.set_field_visible(FIELD_DRIVER, False)
     card = editor.stage.lanes.cards[1]
-    checkbox = editor.findChild(QCheckBox, "hud-visible-driver")
-    assert checkbox is not None and checkbox.isChecked() is False
+    display = editor.findChild(QComboBox, "hud-display-driver")
+    assert display is not None and display.currentData() == "hide"
     assert not card.driver_label.isVisibleTo(card)
     editor.set_field_visible(FIELD_DRIVER, True)
     assert card.driver_label.isVisibleTo(card)

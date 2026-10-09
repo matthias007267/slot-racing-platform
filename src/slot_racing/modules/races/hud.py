@@ -16,13 +16,15 @@ from typing import Any
 
 from sqlalchemy.orm.attributes import flag_modified
 
+from slot_racing.core.domain import RaceMode
 from slot_racing.core.storage import Database, Setting
 
 logger = logging.getLogger(__name__)
 
 HUD_CONFIGURATION_KEY = "ui.race_hud.configuration"
 HUD_WINDOW_KEY = "ui.race_hud.window"
-HUD_VERSION = 2
+HUD_VERSION = 3
+"""Version 2 is the live layout without per-view text. It still loads."""
 MIN_SPAN = 0.06
 """Smallest width or height, as a fraction of the display, so a frame stays usable."""
 
@@ -79,6 +81,8 @@ FIELD_LAST = "last"
 FIELD_BEST = "best"
 FIELD_TOTAL = "total"
 FIELD_STATUS = "status"
+FIELD_REMAINING_LAPS = "remaining_laps"
+FIELD_REMAINING_TIME = "remaining_time"
 
 FIELD_IDS: tuple[str, ...] = (
     FIELD_LANE,
@@ -87,11 +91,40 @@ FIELD_IDS: tuple[str, ...] = (
     FIELD_VEHICLE,
     FIELD_START,
     FIELD_LAP,
+    FIELD_REMAINING_LAPS,
+    FIELD_REMAINING_TIME,
     FIELD_LAST,
     FIELD_BEST,
     FIELD_TOTAL,
     FIELD_STATUS,
 )
+
+VIEW_PRESTART = "prestart"
+VIEW_LIVE = "live"
+VIEW_BETWEEN = "between"
+VIEW_RESULTS = "results"
+VIEW_IDS: tuple[str, ...] = (VIEW_PRESTART, VIEW_LIVE, VIEW_BETWEEN, VIEW_RESULTS)
+
+TEXT_DRIVER = "driver"
+TEXT_VEHICLE = "vehicle"
+TEXT_PLACE = "place"
+TEXT_TIME = "time"
+TEXT_HEADER = "header"
+TEXT_ROW = "row"
+TEXT_ROLES: tuple[str, ...] = (
+    TEXT_DRIVER,
+    TEXT_VEHICLE,
+    TEXT_PLACE,
+    TEXT_TIME,
+    TEXT_HEADER,
+    TEXT_ROW,
+)
+
+DISPLAY_AUTO = "auto"
+DISPLAY_ALWAYS = "always"
+DISPLAY_HIDE = "hide"
+DISPLAY_MODES: tuple[str, ...] = (DISPLAY_AUTO, DISPLAY_ALWAYS, DISPLAY_HIDE)
+PANEL_RECORDS = "records"
 
 FIELD_BASE_PX: dict[str, int] = {
     FIELD_DRIVER: 36,
@@ -104,6 +137,8 @@ FIELD_BASE_PX: dict[str, int] = {
     FIELD_BEST: 22,
     FIELD_TOTAL: 22,
     FIELD_STATUS: 20,
+    FIELD_REMAINING_LAPS: 22,
+    FIELD_REMAINING_TIME: 22,
 }
 CAPTION_RATIO = 0.55
 
@@ -135,6 +170,7 @@ class PixelRect:
 class FieldStyle:
     visible: bool = True
     scale: int = 100
+    display: str = DISPLAY_AUTO
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +197,32 @@ class LightFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewStyle:
+    """Typography for one race surface. 100 is the size that surface already used.
+
+    ``panels`` holds display modes for blocks that are not a lane field, such as
+    the time-trial records table. A missing panel stays automatic.
+    Named layouts remain the place for a later optional HUD profile.
+    """
+
+    font_scale: int = 100
+    texts: tuple[tuple[str, int], ...] = ()
+    panels: tuple[tuple[str, str], ...] = ()
+
+    def text_scale(self, role: str) -> int:
+        for key, scale in self.texts:
+            if key == role:
+                return snap_scale(scale)
+        return 100
+
+    def panel(self, panel_id: str) -> str:
+        for key, mode in self.panels:
+            if key == panel_id and mode in DISPLAY_MODES:
+                return mode
+        return DISPLAY_AUTO
+
+
+@dataclass(frozen=True, slots=True)
 class HudLayout:
     """One named presentation of the fixed live HUD."""
 
@@ -175,12 +237,19 @@ class HudLayout:
     lanes_share: int = 3
     ranking_share: int = 1
     lights: LightFrame = LightFrame()
+    views: tuple[tuple[str, ViewStyle], ...] = ()
 
     def field(self, field_id: str) -> FieldStyle:
         for key, style in self.fields:
             if key == field_id:
                 return style
         return FieldStyle()
+
+    def view(self, view_id: str) -> ViewStyle:
+        for key, style in self.views:
+            if key == view_id:
+                return style
+        return ViewStyle()
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +291,7 @@ def factory_layout() -> HudLayout:
         lanes_share=3,
         ranking_share=1,
         lights=LightFrame(),
+        views=tuple((view_id, ViewStyle()) for view_id in VIEW_IDS),
     )
 
 
@@ -263,6 +333,47 @@ def snap_alignment(value: object) -> str:
     if isinstance(value, str) and value in ALIGNMENTS:
         return value
     return "center"
+
+
+def snap_display(value: object) -> str:
+    if isinstance(value, str) and value in DISPLAY_MODES:
+        return value
+    return DISPLAY_AUTO
+
+
+def field_shown(style: FieldStyle, field_id: str, mode: RaceMode, *, available: bool) -> bool:
+    """Whether one lane field is drawn.
+
+    ``auto`` follows the race mode. ``always`` draws the field when a real value
+    exists. ``hide``, and a legacy ``visible`` of false, draw nothing.
+    A missing value is never replaced with a made-up number.
+    """
+    if style.display == DISPLAY_HIDE or not style.visible or not available:
+        return False
+    if style.display == DISPLAY_ALWAYS:
+        return True
+    if field_id in (FIELD_TOTAL, FIELD_REMAINING_LAPS):
+        return mode is RaceMode.LAPS
+    if field_id == FIELD_REMAINING_TIME:
+        return mode is RaceMode.TIME_TRIAL
+    return True
+
+
+def with_view(layout: HudLayout, view_id: str, style: ViewStyle) -> HudLayout:
+    """Replace one surface on a layout. The other surfaces stay as they are."""
+    if view_id not in VIEW_IDS:
+        return layout
+    found = False
+    views: list[tuple[str, ViewStyle]] = []
+    for key, item in layout.views:
+        if key == view_id:
+            views.append((view_id, style))
+            found = True
+        else:
+            views.append((key, item))
+    if not found:
+        views.append((view_id, style))
+    return replace(layout, views=tuple(views))
 
 
 def clamp_widget(widget: HudWidgetConfig) -> HudWidgetConfig:
@@ -481,7 +592,7 @@ def coerce(payload: object) -> HudConfiguration:
     version = payload.get("version")
     if version == 1:
         return default_hud_configuration()
-    if version != HUD_VERSION:
+    if version not in (2, HUD_VERSION):
         raise ValueError("unsupported HUD configuration version")
     raw_layouts = payload.get("layouts")
     if not isinstance(raw_layouts, list):
@@ -608,9 +719,15 @@ def _layout_document(layout: HudLayout) -> dict[str, Any]:
         "lanes_share": layout.lanes_share,
         "ranking_share": layout.ranking_share,
         "fields": [
-            {"id": field_id, "visible": style.visible, "scale": style.scale}
+            {
+                "id": field_id,
+                "visible": style.visible,
+                "scale": style.scale,
+                "display": style.display,
+            }
             for field_id, style in layout.fields
         ],
+        "views": [_view_document(view_id, style) for view_id, style in layout.views],
         "lights": {
             "visible": lights.visible,
             "x": lights.x,
@@ -645,7 +762,68 @@ def _layout(value: object) -> HudLayout | None:
         lanes_share=snap_share(value.get("lanes_share"), base.lanes_share),
         ranking_share=snap_share(value.get("ranking_share"), base.ranking_share),
         lights=_lights(value.get("lights")),
+        views=_views(value.get("views")),
     )
+
+
+def _view_document(view_id: str, style: ViewStyle) -> dict[str, Any]:
+    return {
+        "id": view_id,
+        "font_scale": style.font_scale,
+        "texts": [{"id": role, "scale": scale} for role, scale in style.texts],
+        "panels": [{"id": panel_id, "display": mode} for panel_id, mode in style.panels],
+    }
+
+
+def _views(value: object) -> tuple[tuple[str, ViewStyle], ...]:
+    parsed: dict[str, ViewStyle] = {}
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            view_id = item.get("id")
+            if not isinstance(view_id, str) or view_id not in VIEW_IDS:
+                continue
+            parsed[view_id] = ViewStyle(
+                font_scale=snap_scale(item.get("font_scale", 100)),
+                texts=_text_scales(item.get("texts")),
+                panels=_panels(item.get("panels")),
+            )
+    if not parsed:
+        return ()
+    return tuple((view_id, parsed[view_id]) for view_id in VIEW_IDS if view_id in parsed)
+
+
+def _text_scales(value: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, list):
+        return ()
+    found: dict[str, int] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("id")
+        if isinstance(role, str) and role in TEXT_ROLES:
+            found[role] = snap_scale(item.get("scale", 100))
+    return tuple((role, found[role]) for role in TEXT_ROLES if role in found)
+
+
+def _panels(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    found: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        panel_id = item.get("id")
+        mode = item.get("display")
+        if (
+            isinstance(panel_id, str)
+            and panel_id
+            and isinstance(mode, str)
+            and mode in DISPLAY_MODES
+        ):
+            found.append((panel_id, mode))
+    return tuple(found)
 
 
 def _fields(value: object) -> tuple[tuple[str, FieldStyle], ...]:
@@ -658,9 +836,11 @@ def _fields(value: object) -> tuple[tuple[str, FieldStyle], ...]:
             if not isinstance(field_id, str) or field_id not in FIELD_BASE_PX:
                 continue
             visible = item.get("visible")
+            shown = visible if isinstance(visible, bool) else True
             parsed[field_id] = FieldStyle(
-                visible=visible if isinstance(visible, bool) else True,
+                visible=shown,
                 scale=snap_scale(item.get("scale", 100)),
+                display=snap_display(item.get("display")),
             )
     return tuple((field_id, parsed.get(field_id, FieldStyle())) for field_id in FIELD_IDS)
 

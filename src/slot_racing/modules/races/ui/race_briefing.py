@@ -6,6 +6,14 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QSizePolicy, QVBoxLay
 
 from slot_racing.core.domain import RaceMode
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud import (
+    TEXT_DRIVER,
+    TEXT_HEADER,
+    TEXT_PLACE,
+    TEXT_ROW,
+    TEXT_TIME,
+    ViewStyle,
+)
 from slot_racing.modules.races.types import HeatBriefing, HeatInfo, RaceInfo
 from slot_racing.uikit.theme import (
     FONT_CAPTION,
@@ -18,14 +26,15 @@ from slot_racing.uikit.theme import (
 )
 
 
-def apply_text_size(label: QLabel, base: int, width: int, *, bold: bool) -> None:
+def apply_text_size(label: QLabel, base: int, width: int, *, bold: bool, scale: int = 100) -> None:
     """Grow with the window, and stay large enough to read on a narrow one.
 
     The size is a theme step. A widget stylesheet keeps it, because the application
     sheet otherwise replaces a font that was only set on the label.
+    ``scale`` is a percent. 100 keeps the size this board already used.
     """
     factor = min(1.3, max(0.85, width / 960))
-    pixels = max(16, round(base * factor))
+    pixels = min(96, max(16, round(base * factor * scale / 100)))
     font = label.font()
     font.setPixelSize(pixels)
     font.setBold(bold)
@@ -56,9 +65,9 @@ class SeatCard(QFrame):
         layout.addWidget(self.lane_label)
         layout.addWidget(self.driver_label)
 
-    def fit(self, width: int) -> None:
-        apply_text_size(self.lane_label, FONT_CAPTION, width, bold=True)
-        apply_text_size(self.driver_label, FONT_LANE, width, bold=True)
+    def fit(self, width: int, *, lane_scale: int = 100, driver_scale: int = 100) -> None:
+        apply_text_size(self.lane_label, FONT_CAPTION, width, bold=True, scale=lane_scale)
+        apply_text_size(self.driver_label, FONT_LANE, width, bold=True, scale=driver_scale)
 
 
 class BriefingBoard(QWidget):
@@ -67,6 +76,7 @@ class BriefingBoard(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("heat-briefing")
+        self._view = ViewStyle()
         self.title = _wrapped("", "heat-title")
         self.title.setObjectName("heat-briefing-title")
         self.changes_caption = _wrapped("", "wizard-caption")
@@ -90,6 +100,10 @@ class BriefingBoard(QWidget):
         layout.addWidget(self._change_host)
         layout.addWidget(self.hint)
         layout.addStretch(1)
+
+    def set_view_style(self, style: ViewStyle) -> None:
+        self._view = style
+        self.fit(self.width())
 
     def show_message(self, text: str) -> None:
         """A single large line when there is no heat to brief."""
@@ -140,19 +154,23 @@ class BriefingBoard(QWidget):
         self.fit(self.width())
 
     def fit(self, width: int) -> None:
-        apply_text_size(self.title, FONT_HEAT, width, bold=True)
-        apply_text_size(self.changes_caption, FONT_CAPTION, width, bold=True)
-        apply_text_size(self.hint, FONT_HINT, width, bold=False)
+        place = _percent(self._view, TEXT_PLACE)
+        header = _percent(self._view, TEXT_HEADER)
+        driver = _percent(self._view, TEXT_DRIVER)
+        time = _percent(self._view, TEXT_TIME)
+        apply_text_size(self.title, FONT_HEAT, width, bold=True, scale=place)
+        apply_text_size(self.changes_caption, FONT_CAPTION, width, bold=True, scale=header)
+        apply_text_size(self.hint, FONT_HINT, width, bold=False, scale=time)
         for index in range(self._seats.count()):
             item = self._seats.itemAt(index)
             widget = None if item is None else item.widget()
             if isinstance(widget, SeatCard):
-                widget.fit(width)
+                widget.fit(width, lane_scale=header, driver_scale=driver)
         for index in range(self._changes.count()):
             item = self._changes.itemAt(index)
             widget = None if item is None else item.widget()
             if isinstance(widget, QLabel):
-                apply_text_size(widget, FONT_VALUE, width, bold=True)
+                apply_text_size(widget, FONT_VALUE, width, bold=True, scale=driver)
 
 
 class OverviewBoard(QWidget):
@@ -161,9 +179,14 @@ class OverviewBoard(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("race-overview-board")
+        self._view = ViewStyle()
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(SPACE.md)
+
+    def set_view_style(self, style: ViewStyle) -> None:
+        self._view = style
+        self.fit(self.width())
 
     def show_race(
         self,
@@ -230,18 +253,26 @@ class OverviewBoard(QWidget):
         self.fit(self.width())
 
     def fit(self, width: int) -> None:
+        place = _percent(self._view, TEXT_PLACE)
+        header = _percent(self._view, TEXT_HEADER)
+        driver = _percent(self._view, TEXT_DRIVER)
+        row = _percent(self._view, TEXT_ROW)
         for label in self.findChildren(QLabel):
             role = label.property("role")
             if role == "heat-title":
-                apply_text_size(label, FONT_HEAT, width, bold=True)
+                apply_text_size(label, FONT_HEAT, width, bold=True, scale=place)
             elif role == "lane-name":
-                apply_text_size(label, FONT_LANE, width, bold=True)
+                apply_text_size(label, FONT_LANE, width, bold=True, scale=driver)
             elif role == "wizard-value":
-                apply_text_size(label, FONT_VALUE, width, bold=True)
+                apply_text_size(label, FONT_VALUE, width, bold=True, scale=row)
             else:
-                apply_text_size(label, FONT_CAPTION, width, bold=True)
+                apply_text_size(label, FONT_CAPTION, width, bold=True, scale=header)
         for card in self.findChildren(SeatCard):
-            card.fit(width)
+            card.fit(width, lane_scale=header, driver_scale=driver)
+
+
+def _percent(style: ViewStyle, role: str) -> int:
+    return round(style.font_scale * style.text_scale(role) / 100)
 
 
 def _clear(layout: QGridLayout | QVBoxLayout) -> None:
