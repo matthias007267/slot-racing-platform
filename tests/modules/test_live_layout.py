@@ -23,6 +23,7 @@ from slot_racing.modules.races.hud import (
     factory_layout,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
+from slot_racing.modules.races.ui.formatting import best_lap_display
 from slot_racing.modules.races.ui.lane_card import LaneCard, LaneCardBoard, _columns_for, card_top
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -58,6 +59,7 @@ def test_lane_cards_show_every_lane_for_both_modes(qtbot: QtBot) -> None:
     assert zoe.lap_label.text() == "1 / 8"
     assert zoe.last_label.text() == "-"
     assert zoe.best_label.text() == "-"
+    assert zoe.best_time_label.text() == "-"
     assert zoe.total_label.text() == "-"
     assert zoe.total_label.isVisibleTo(zoe)
     assert zoe.status_label.text() == "Fährt"
@@ -97,6 +99,7 @@ def test_lane_information_is_stacked_centered_and_scaled(qtbot: QtBot) -> None:
         "lap": card.lap_label,
         "last": card.last_label,
         "best": card.best_label,
+        "best_time": card.best_time_label,
         "total": card.total_label,
         "status": card.status_label,
     }
@@ -135,6 +138,7 @@ def test_two_lanes_stay_side_by_side_at_several_sizes(qtbot: QtBot, env: Env, at
     assert right.driver_label.text() == "Anna"
     assert left.last_label.text() == "-"
     assert left.best_label.text() == "-"
+    assert left.best_time_label.text() == "-"
     assert left.total_label.isVisibleTo(left)
     assert left.driver_label.font().pixelSize() >= left.lap_label.font().pixelSize()
     assert left.lap_label.font().pixelSize() >= left.position_label.font().pixelSize()
@@ -206,7 +210,9 @@ def test_cards_follow_the_race_without_being_rebuilt(qtbot: QtBot, env: Env) -> 
         assert card.position_label.text() == f"P{row.position}"
         assert card.driver_label.text() == row.driver_label
         assert card.last_label.text() == format_duration(row.last_lap_ns)
-        assert card.best_label.text() == format_duration(row.best_lap_ns)
+        number, best_time = best_lap_display(row.lap_times_ns)
+        assert card.best_label.text() == number
+        assert card.best_time_label.text() == best_time
         assert card.total_label.text() == format_duration(row.total_time_ns)
     leader = snapshot.rows[0]
     assert leader.laps_completed >= 1

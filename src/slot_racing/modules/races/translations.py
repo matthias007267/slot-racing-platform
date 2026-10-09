@@ -155,6 +155,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hud.field.start": "Startnummer",
         "hud.field.last": "Letzte Runde",
         "hud.field.best": "Beste Runde",
+        "hud.field.best_time": "Beste Rundenzeit",
         "hud.field.total": "Gesamtzeit",
         "hud.field.status": "Teilnehmerstatus",
         "hud.field.remaining_laps": "Verbleibende Runden",

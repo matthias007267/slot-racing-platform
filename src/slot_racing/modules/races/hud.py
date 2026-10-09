@@ -79,6 +79,7 @@ FIELD_VEHICLE = "vehicle"
 FIELD_START = "start"
 FIELD_LAST = "last"
 FIELD_BEST = "best"
+FIELD_BEST_TIME = "best_time"
 FIELD_TOTAL = "total"
 FIELD_STATUS = "status"
 FIELD_REMAINING_LAPS = "remaining_laps"
@@ -95,6 +96,7 @@ FIELD_IDS: tuple[str, ...] = (
     FIELD_REMAINING_TIME,
     FIELD_LAST,
     FIELD_BEST,
+    FIELD_BEST_TIME,
     FIELD_TOTAL,
     FIELD_STATUS,
 )
@@ -135,6 +137,7 @@ FIELD_BASE_PX: dict[str, int] = {
     FIELD_START: 20,
     FIELD_LAST: 22,
     FIELD_BEST: 22,
+    FIELD_BEST_TIME: 22,
     FIELD_TOTAL: 22,
     FIELD_STATUS: 20,
     FIELD_REMAINING_LAPS: 22,

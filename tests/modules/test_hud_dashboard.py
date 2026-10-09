@@ -9,6 +9,7 @@ from pytestqt.qtbot import QtBot
 
 from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
 from slot_racing.core.domain import RaceStatus
+from slot_racing.modules.races.time_trial_board import format_lap_seconds
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
 from slot_racing.modules.races.ui.hud_widgets import (
     COLUMN_BEST,
@@ -365,7 +366,8 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     assert last == format_duration(leader_row.last_lap_ns)
     assert card.last_label.text() == last
     assert card.driver_label.text() == leader_row.driver_label
-    assert card.best_label.text() == last
+    assert card.best_label.text() == "1"
+    assert card.best_time_label.text() == format_lap_seconds(leader_row.last_lap_ns)
     assert card.lap_label.text() == f"{leader_row.current_lap} / {snapshot.laps}"
     finished_names = {row.driver_label for row in snapshot.rows if row.laps_completed >= 1}
     assert live.messages.message_label.text() in {
@@ -427,6 +429,7 @@ def test_the_dashboard_follows_a_simulated_race_through_pause_and_finish(
     assert column_text(live.table, 0, "Platz") == "1"
     assert live.lanes.cards[1].driver_label.text() == "Zoe"
     assert live.lanes.cards[1].best_label.text() != "-"
+    assert live.lanes.cards[1].best_time_label.text() != "-"
     assert live.lanes.cards[1].last_label.text() != "-"
     env.clock.advance(5 * NANOS_PER_SECOND)
     live.refresh()

@@ -247,6 +247,7 @@ def test_a_partial_document_keeps_known_fields_and_the_factory_layout() -> None:
     assert custom.clock_share == 6
     assert custom.field("driver") == FieldStyle(False, 150)
     assert custom.field("lap") == FieldStyle()
+    assert custom.field("best_time") == FieldStyle()
     assert custom.lights.visible is False
     assert custom.lights.scale == LIGHT_SCALE_MIN
     assert custom.lights.width == pytest.approx(LIGHT_STANDARD_WIDTH * LIGHT_SCALE_MIN / 100)

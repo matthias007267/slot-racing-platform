@@ -19,6 +19,7 @@ from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
     FIELD_BASE_PX,
     FIELD_BEST,
+    FIELD_BEST_TIME,
     FIELD_DRIVER,
     FIELD_IDS,
     FIELD_LANE,
@@ -41,6 +42,7 @@ from slot_racing.modules.races.hud import (
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.formatting import (
     EMPTY_DISPLAY,
+    best_lap_display,
     format_lap_progress,
     participant_status_key,
     start_number_text,
@@ -84,6 +86,7 @@ class LaneCard(QFrame):
         self.remaining_time_label = _value(f"live-lane-{lane}-remaining-time")
         self.last_label = _value(f"live-lane-{lane}-last")
         self.best_label = _value(f"live-lane-{lane}-best")
+        self.best_time_label = _value(f"live-lane-{lane}-best-time")
         self.total_label = _value(f"live-lane-{lane}-total")
         self.status_label = _value(f"live-lane-{lane}-status", wrap=True)
         self.lane_label.setText(f"{translator.translate('race.live.lane')} {lane}")
@@ -107,12 +110,16 @@ class LaneCard(QFrame):
         self._remaining_laps_box = _block(self._remaining_laps_caption, self.remaining_laps_label)
         self._remaining_time_box = _block(self._remaining_time_caption, self.remaining_time_label)
         self._last_caption = _caption(f"live-lane-{lane}-last-caption", tr("race.column.last_lap"))
-        self._best_caption = _caption(f"live-lane-{lane}-best-caption", tr("race.column.best_lap"))
+        self._best_caption = _caption(f"live-lane-{lane}-best-caption", tr("hud.field.best"))
+        self._best_time_caption = _caption(
+            f"live-lane-{lane}-best-time-caption", tr("hud.field.best_time")
+        )
         self._total_caption = _caption(
             f"live-lane-{lane}-total-caption", tr("race.column.total_time")
         )
         self._last_box = _block(self._last_caption, self.last_label)
         self._best_box = _block(self._best_caption, self.best_label)
+        self._best_time_box = _block(self._best_time_caption, self.best_time_label)
         self._total_box = _block(self._total_caption, self.total_label)
         self._status_box = _block(self.status_label)
         self._boxes = {
@@ -126,6 +133,7 @@ class LaneCard(QFrame):
             FIELD_REMAINING_TIME: self._remaining_time_box,
             FIELD_LAST: self._last_box,
             FIELD_BEST: self._best_box,
+            FIELD_BEST_TIME: self._best_time_box,
             FIELD_TOTAL: self._total_box,
             FIELD_STATUS: self._status_box,
         }
@@ -140,6 +148,7 @@ class LaneCard(QFrame):
             FIELD_REMAINING_TIME: self.remaining_time_label,
             FIELD_LAST: self.last_label,
             FIELD_BEST: self.best_label,
+            FIELD_BEST_TIME: self.best_time_label,
             FIELD_TOTAL: self.total_label,
             FIELD_STATUS: self.status_label,
         }
@@ -149,12 +158,15 @@ class LaneCard(QFrame):
             FIELD_REMAINING_TIME: self._remaining_time_caption,
             FIELD_LAST: self._last_caption,
             FIELD_BEST: self._best_caption,
+            FIELD_BEST_TIME: self._best_time_caption,
             FIELD_TOTAL: self._total_caption,
         }
 
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(SPACE.xs)
+        # Tight gap so "Beste Rundenzeit" fits in the lane row. A looser gap
+        # made the canvas a few pixels too tall and the scrollbar moved the clock.
+        column.setSpacing(1)
         for field_id in FIELD_IDS:
             column.addWidget(self._boxes[field_id])
         self._column = QWidget()
@@ -198,7 +210,9 @@ class LaneCard(QFrame):
         self.remaining_laps_label.setText(self._remaining_laps or EMPTY_DISPLAY)
         self.remaining_time_label.setText(self._remaining_time or EMPTY_DISPLAY)
         self.last_label.setText(format_duration(row.last_lap_ns))
-        self.best_label.setText(format_duration(row.best_lap_ns))
+        number, best_time = best_lap_display(row.lap_times_ns)
+        self.best_label.setText(number)
+        self.best_time_label.setText(best_time)
         self.total_label.setText(format_duration(row.total_time_ns))
         self.status_label.setText(
             self._translator.translate(
@@ -220,6 +234,7 @@ class LaneCard(QFrame):
         self.remaining_time_label.setText(EMPTY_DISPLAY)
         self.last_label.setText("-")
         self.best_label.setText("-")
+        self.best_time_label.setText("-")
         self.total_label.setText("-")
         self.status_label.setText(EMPTY_DISPLAY)
         self._paint_style()

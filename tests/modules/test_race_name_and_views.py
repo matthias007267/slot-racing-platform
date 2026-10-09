@@ -21,6 +21,8 @@ from slot_racing.core.domain import RaceMode
 from slot_racing.modules.races.hud import (
     DISPLAY_ALWAYS,
     DISPLAY_HIDE,
+    FIELD_BEST,
+    FIELD_BEST_TIME,
     FIELD_DRIVER,
     FIELD_REMAINING_LAPS,
     FIELD_REMAINING_TIME,
@@ -197,6 +199,7 @@ def test_version_two_layouts_keep_their_fields_and_gain_view_defaults() -> None:
     )
     assert parsed.version == HUD_VERSION
     assert parsed.selected().field("driver") == FieldStyle(False, 120)
+    assert parsed.selected().field(FIELD_BEST_TIME) == FieldStyle()
     assert parsed.selected().view(VIEW_PRESTART).font_scale == 100
     assert parsed.selected().view(VIEW_RESULTS).text_scale(TEXT_DRIVER) == 100
 
@@ -214,6 +217,10 @@ def test_display_mode_follows_the_race_mode_unless_forced() -> None:
     assert field_shown(always, FIELD_REMAINING_TIME, RaceMode.TIME_TRIAL, available=False) is False
     assert field_shown(auto, FIELD_REMAINING_LAPS, RaceMode.LAPS, available=True) is True
     assert field_shown(auto, FIELD_DRIVER, RaceMode.TIME_TRIAL, available=True) is True
+    assert field_shown(auto, FIELD_BEST, RaceMode.LAPS, available=True) is True
+    assert field_shown(auto, FIELD_BEST, RaceMode.TIME_TRIAL, available=True) is True
+    assert field_shown(auto, FIELD_BEST_TIME, RaceMode.LAPS, available=True) is True
+    assert field_shown(auto, FIELD_BEST_TIME, RaceMode.TIME_TRIAL, available=True) is True
 
 
 def test_a_view_font_is_stored_for_every_race_and_the_editor_can_switch(

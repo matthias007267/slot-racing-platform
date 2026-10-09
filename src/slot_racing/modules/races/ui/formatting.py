@@ -6,6 +6,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from slot_racing.modules.races.runner import LiveRow
+from slot_racing.modules.races.time_trial_board import format_lap_seconds
+
+_MISSING_LAP = "-"
 
 
 def participant_status_key(*, finished: bool, paused: bool, ended: bool) -> str:
@@ -75,6 +78,30 @@ def lane_gaps(rows: Sequence[LiveRow], *, by_best_lap: bool) -> dict[int, LaneGa
 
 def _gap_time(row: LiveRow, *, by_best_lap: bool) -> int | None:
     return row.best_lap_ns if by_best_lap else row.total_time_ns
+
+
+def fastest_completed_lap(times: Sequence[int]) -> tuple[int, int] | None:
+    """1-based lap number and time of the fastest completed lap.
+
+    Equal times keep the earlier lap. An empty sequence means no valid lap.
+    The race engine still owns ``best_lap_ns``; this only reads the lap list.
+    """
+    if not times:
+        return None
+    fastest = min(times)
+    return times.index(fastest) + 1, fastest
+
+
+def best_lap_display(times: Sequence[int]) -> tuple[str, str]:
+    """Lap number and German lap time, for example ``7`` and ``3,026 s``.
+
+    Both texts are ``-`` until a valid lap exists.
+    """
+    found = fastest_completed_lap(times)
+    if found is None:
+        return _MISSING_LAP, _MISSING_LAP
+    number, time_ns = found
+    return str(number), format_lap_seconds(time_ns)
 
 
 def format_lap_progress(current: int, target: int) -> str:

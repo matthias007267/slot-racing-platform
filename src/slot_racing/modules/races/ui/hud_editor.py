@@ -250,7 +250,7 @@ def _sample(status_key: str, lanes: int) -> tuple[RaceSnapshot, str]:
                 total_time_ns=18_400_000_000,
                 best_lap_ns=4_050_000_000,
                 finished=status is RaceStatus.FINISHED and not aborted,
-                lap_times_ns=(4_200_000_000,),
+                lap_times_ns=(4_200_000_000, 4_050_000_000),
             )
         )
     if lanes >= 2:
