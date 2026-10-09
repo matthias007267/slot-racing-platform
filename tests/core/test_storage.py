@@ -13,14 +13,28 @@ from slot_racing.modules.drivers_vehicles.models import Driver, Vehicle
 from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector
 from slot_racing.modules.timing.models import TimingConfiguration, TimingSensor
 from slot_racing.modules.tracks.models import Track, TrackLayout
+from tests.database import migrated_database
 
 
 @pytest.fixture
 def db() -> Iterator[Database]:
-    database = Database.in_memory()
-    database.migrate()
+    database = migrated_database()
     yield database
     database.dispose()
+
+
+def test_copied_databases_do_not_share_rows() -> None:
+    first = migrated_database()
+    with first.session() as session:
+        session.add(Driver(name="Only here"))
+    second = migrated_database()
+    with second.session() as session:
+        assert session.scalars(select(Driver)).all() == []
+    first.migrate()
+    with first.session() as session:
+        assert session.scalars(select(Driver.name)).one() == "Only here"
+    first.dispose()
+    second.dispose()
 
 
 def test_migration_creates_all_domain_tables(db: Database) -> None:

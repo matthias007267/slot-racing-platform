@@ -42,6 +42,7 @@ from slot_racing.modules.races.hud import (
     to_pixels,
     window_placement,
 )
+from tests.database import migrated_database
 
 
 def test_the_factory_layout_is_selected_and_the_default() -> None:
@@ -343,9 +344,7 @@ def test_a_broken_editor_window_falls_back_to_the_default_placement() -> None:
 
 
 def _database() -> Database:
-    database = Database.in_memory()
-    database.migrate()
-    return database
+    return migrated_database()
 
 
 def _row(database: Database) -> Setting | None:

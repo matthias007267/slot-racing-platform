@@ -16,13 +16,13 @@ from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import AppConfig
 from slot_racing.core.diagnostics import current, install
-from slot_racing.core.storage import Database
 from tests.app.test_shell import make_window
+from tests.database import migrated_database
 
 
 @pytest.fixture
 def runtime() -> Iterator[Runtime]:
-    created = Runtime.create(AppConfig(), database=Database.in_memory())
+    created = Runtime.create(AppConfig(), database=migrated_database())
     yield created
     created.shutdown()
 

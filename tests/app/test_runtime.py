@@ -11,10 +11,11 @@ from slot_racing.core.plugin import (
     PluginState,
 )
 from slot_racing.core.storage import Database
+from tests.database import migrated_database
 
 
 def create(config: AppConfig | None = None, **kwargs: object) -> Runtime:
-    return Runtime.create(config or AppConfig(), database=Database.in_memory(), **kwargs)  # type: ignore[arg-type]
+    return Runtime.create(config or AppConfig(), database=migrated_database(), **kwargs)  # type: ignore[arg-type]
 
 
 def nav_ids(runtime: Runtime) -> list[str]:

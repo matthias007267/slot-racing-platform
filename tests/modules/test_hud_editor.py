@@ -42,6 +42,7 @@ from slot_racing.modules.races.translations import TRANSLATIONS
 from slot_racing.modules.races.ui.hud_editor import HudEditor, HudEditorWindow
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.live_view import LiveRaceView
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 
 
@@ -732,9 +733,7 @@ def _editor(qtbot: QtBot, store: HudConfigurationStore | None = None) -> HudEdit
 
 
 def _database() -> Database:
-    database = Database.in_memory()
-    database.migrate()
-    return database
+    return migrated_database()
 
 
 def _translator() -> Translator:

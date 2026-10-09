@@ -22,6 +22,7 @@ from slot_racing.core.errors import ValidationError
 logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_HEAD_REVISION: str | None = None
 
 
 class Database:
@@ -92,7 +93,13 @@ class Database:
             session.close()
 
     def migrate(self, revision: str = "head") -> None:
-        """Bring the schema to ``revision`` using the bundled Alembic migrations."""
+        """Bring the schema to ``revision`` using the bundled Alembic migrations.
+
+        A database that is already at head is left untouched. Applied revisions
+        are not run again, so repeating ``migrate()`` keeps stored rows.
+        """
+        if revision == "head" and self.schema_revision() == head_revision():
+            return
         record("DB_MIGRATION_START", module="storage", result="started")
         config = alembic_config()
         try:
@@ -130,6 +137,19 @@ def alembic_config() -> Config:
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     return config
+
+
+def head_revision() -> str:
+    """The single current Alembic head. Read once per process."""
+    global _HEAD_REVISION
+    if _HEAD_REVISION is None:
+        from alembic.script import ScriptDirectory
+
+        head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+        if not isinstance(head, str) or not head:
+            raise RuntimeError("migration history has no single head")
+        _HEAD_REVISION = head
+    return _HEAD_REVISION
 
 
 def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:

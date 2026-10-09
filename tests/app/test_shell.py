@@ -20,12 +20,12 @@ from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import AppConfig, load_config
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
-from slot_racing.core.storage import Database
+from tests.database import migrated_database
 
 
 @pytest.fixture
 def runtime() -> Iterator[Runtime]:
-    runtime = Runtime.create(AppConfig(), database=Database.in_memory())
+    runtime = Runtime.create(AppConfig(), database=migrated_database())
     yield runtime
     runtime.shutdown()
 
@@ -159,7 +159,7 @@ class _PagePlugin(Plugin):
 
 
 def test_broken_pages_are_isolated(qtbot: QtBot) -> None:
-    runtime = Runtime.create(AppConfig(), database=Database.in_memory(), plugins=[_PagePlugin()])
+    runtime = Runtime.create(AppConfig(), database=migrated_database(), plugins=[_PagePlugin()])
     try:
         window = make_window(qtbot, runtime)
         window.select("boom")

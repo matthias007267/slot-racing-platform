@@ -11,7 +11,6 @@ from slot_racing.core.catalog import DriverInfo, TrackInfo, VehicleInfo
 from slot_racing.core.clock import ManualClock
 from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import DriverId, TrackId, VehicleId
-from slot_racing.core.storage import Database
 from slot_racing.core.timing import TimingSourceFactory
 from slot_racing.modules.drivers_vehicles.service import (
     DriverInput,
@@ -23,6 +22,7 @@ from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.timing.simulation import SimulationTimingFactory
 from slot_racing.modules.tracks.service import TrackInput, TrackService
+from tests.database import migrated_database
 
 
 @dataclass
@@ -56,7 +56,7 @@ class Env:
 @pytest.fixture
 def env() -> Iterator[Env]:
     clock = ManualClock()
-    runtime = Runtime.create(AppConfig(), database=Database.in_memory(), clock=clock)
+    runtime = Runtime.create(AppConfig(), database=migrated_database(), clock=clock)
     factory = runtime.services.get(TimingSourceFactory, "simulation")
     assert isinstance(factory, SimulationTimingFactory)
     factory.bind_rng(random.Random(7))
