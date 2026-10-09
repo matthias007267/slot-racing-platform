@@ -15,7 +15,6 @@ from pytestqt.qtbot import QtBot
 from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import AppConfig
-from slot_racing.core.storage import Database
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
 from slot_racing.modules.timing_camera.capture import (
     CameraClosedError,
@@ -33,6 +32,7 @@ from slot_racing.modules.timing_camera.provider import CameraTimingFactory, Came
 from slot_racing.modules.timing_camera.session import CameraSession
 from slot_racing.modules.timing_camera.store import CameraConfigurationStore
 from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+from tests.database import migrated_database
 from tests.modules.test_camera_capture import blank, session, zones
 from tests.modules.test_camera_configuration import database
 from tests.modules.test_camera_diagnostic import _session as diagnostic_session
@@ -547,7 +547,7 @@ class _OpenCV:
 
 @pytest.fixture
 def runtime() -> Iterator[Runtime]:
-    app = Runtime.create(AppConfig(), database=Database.in_memory())
+    app = Runtime.create(AppConfig(), database=migrated_database())
     yield app
     app.shutdown()
 

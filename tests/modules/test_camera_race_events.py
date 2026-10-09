@@ -192,7 +192,7 @@ def test_default_layout_does_not_drop_a_start_finish_only_camera(env: Env) -> No
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert [(event.lane, event.position_id) for event in triggered] == [(1, "start_finish")]
@@ -241,7 +241,7 @@ def test_race_consumer_gets_frames_and_one_detection_is_one_timing_event(env: En
         assert source.frames_observed >= 1
         assert source._detector is not None
         first_detector = id(source._detector)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert [(event.lane, event.position_id) for event in triggered] == [(1, "start_finish")]
@@ -264,12 +264,13 @@ def test_a_new_race_builds_a_new_detector(env: Env) -> None:
         device = hub.live()
         consume(device, blank())
         drive(first)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=first)
         drive(first)
         first_source = first._engine._sources[0]
         assert isinstance(first_source, CameraTimingProvider)
-        assert first_source._detector is not None
-        detector_a = id(first_source._detector)
+        detector_a = first_source._detector
+        assert detector_a is not None
+        state_a = detector_a.zone_state("start_finish", 1)
         assert first.snapshot().rows[0].laps_completed == 0
         first.stop()
     finally:
@@ -283,11 +284,12 @@ def test_a_new_race_builds_a_new_detector(env: Env) -> None:
         drive(second)
         second_source = second._engine._sources[0]
         assert isinstance(second_source, CameraTimingProvider)
-        assert second_source._detector is not None
-        detector_b = id(second_source._detector)
-        assert detector_a != detector_b
-        assert second_source._detector.zone_state("start_finish", 1) is ZoneState.CLEAR
-        cross(device, zone_rect(ZONE_X))
+        detector_b = second_source._detector
+        assert detector_b is not None
+        assert detector_a is not detector_b
+        assert detector_a.zone_state("start_finish", 1) is state_a
+        assert detector_b.zone_state("start_finish", 1) is ZoneState.CLEAR
+        cross(device, zone_rect(ZONE_X), runner=second)
         drive(second)
         assert second.snapshot().rows[0].laps_completed == 0
     finally:
@@ -320,7 +322,7 @@ def test_audio_on_and_off_still_deliver_a_camera_timing_event(qtbot: QtBot, env:
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         assert [(event.lane, event.position_id) for event in of_type(events, SensorTriggered)] == [
             (1, "start_finish")
@@ -343,7 +345,7 @@ def test_audio_on_and_off_still_deliver_a_camera_timing_event(qtbot: QtBot, env:
         device = hub.live()
         consume(device, blank())
         drive(again)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=again)
         drive(again)
         assert of_type(quiet, SensorTriggered)
         assert again.snapshot().source_errors == ()

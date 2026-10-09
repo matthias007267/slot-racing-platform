@@ -19,7 +19,6 @@ from slot_racing.core.config import AppConfig, load_config
 from slot_racing.core.config.models import TRACK_PLANNER_BUILD_COLLECTION
 from slot_racing.core.domain import TrackId
 from slot_racing.core.errors import ValidationError
-from slot_racing.core.storage import Database
 from slot_racing.modules.track_planner.document import (
     duplicate_instances,
     empty_plan,
@@ -44,6 +43,7 @@ from slot_racing.modules.track_planner.ui.page import PlannerPage
 from slot_racing.modules.track_planner.ui.track_paint import _drawn
 from slot_racing.modules.tracks.models import TrackLayout
 from slot_racing.uikit.theme import COLORS
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 from tests.modules.test_track_extend_arrows import _paint_items
 from tests.modules.test_track_parts import _library_row, _select
@@ -474,7 +474,7 @@ def test_the_build_mode_is_a_saved_planner_preference(qtbot: QtBot, tmp_path: Pa
     from slot_racing.core.catalog import TrackCatalog
 
     path = tmp_path / "config.json"
-    runtime = Runtime.create(AppConfig(), config_path=path, database=Database.in_memory())
+    runtime = Runtime.create(AppConfig(), config_path=path, database=migrated_database())
     try:
         page = PlannerPage(
             runtime.translator,

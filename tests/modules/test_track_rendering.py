@@ -15,7 +15,6 @@ from slot_racing.app.runtime import Runtime
 from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.config import AppConfig, load_config
 from slot_racing.core.config.models import TRACK_PLANNER_COLOR_CODING_DEFAULT
-from slot_racing.core.storage import Database
 from slot_racing.modules.track_planner.appearance import (
     CENTER_LINE,
     CODED,
@@ -51,6 +50,7 @@ from slot_racing.modules.track_planner.ui.canvas import MM, InstanceItem
 from slot_racing.modules.track_planner.ui.library_view import PartPreview
 from slot_racing.modules.track_planner.ui.page import PlannerPage
 from slot_racing.modules.track_planner.ui.track_paint import _drawn, paint_part
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 from tests.modules.test_track_parts import _library_row, _planner, _select
 from tests.modules.test_ui_management import open_page
@@ -404,7 +404,7 @@ def test_the_toolbar_toggles_coding_on_the_plan_and_in_the_library(
     assert env.runtime.config.track_planner_color_coding is False
 
     path = tmp_path / "config.json"
-    runtime = Runtime.create(AppConfig(), config_path=path, database=Database.in_memory())
+    runtime = Runtime.create(AppConfig(), config_path=path, database=migrated_database())
     try:
         stored = PlannerPage(
             runtime.translator,

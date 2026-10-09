@@ -11,7 +11,6 @@ from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import AppConfig, load_config
 from slot_racing.core.i18n import Translator
-from slot_racing.core.storage import Database
 from slot_racing.modules.races.translations import TRANSLATIONS
 from slot_racing.modules.races.ui.audio_settings import AudioSettings
 from slot_racing.modules.races.ui.race_audio import (
@@ -26,6 +25,7 @@ from slot_racing.modules.races.ui.race_audio import (
 )
 from slot_racing.modules.races.ui.start_cue import DEFAULT_START_STEPS
 from tests.app.test_shell import make_window
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 from tests.modules.test_ui_management import open_page
 
@@ -62,7 +62,7 @@ def test_settings_show_and_store_the_audio_choice(qtbot: QtBot, env: Env) -> Non
 
 def test_audio_choices_are_written_to_the_config_file(qtbot: QtBot, tmp_path: Path) -> None:
     path = tmp_path / "config.json"
-    runtime = Runtime.create(AppConfig(), config_path=path, database=Database.in_memory())
+    runtime = Runtime.create(AppConfig(), config_path=path, database=migrated_database())
     try:
         window = make_window(qtbot, runtime)
         window.select("settings")

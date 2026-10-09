@@ -25,6 +25,7 @@ from slot_racing.modules.timing.models import TimingPosition as PositionRow
 from slot_racing.modules.timing.models import TimingSensor as SensorRow
 from slot_racing.modules.timing.service import TimingSetupManager
 from slot_racing.modules.tracks.service import TrackInput, TrackService
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 
 
@@ -154,8 +155,7 @@ def test_migration_keeps_existing_tracks_and_sensors() -> None:
 
 
 def test_downgrade_removes_only_the_layout_tables() -> None:
-    database = Database.in_memory()
-    database.migrate()
+    database = migrated_database()
     with database.engine.connect() as connection:
         config = alembic_config()
         config.attributes["connection"] = connection

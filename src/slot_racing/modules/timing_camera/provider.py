@@ -34,6 +34,7 @@ from slot_racing.modules.timing_camera.capture import (
     CameraOpenError,
     CameraReadError,
     CaptureDevice,
+    capture_clock_of,
 )
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
@@ -313,6 +314,8 @@ class CameraTimingProvider(TimingSource):
             self._note_first_frame(frame)
             elapsed = time.perf_counter_ns() - started
             latency = max(0, started - frame.timestamp_ns)
+            # ``observe`` has returned. Timing counters come next, then ``_store``.
+            # The race hears the crossing only when ``poll`` drains that queue.
             self.frames_observed += 1
             self.detection_ns_total += elapsed
             self.detection_ns_max = max(self.detection_ns_max, elapsed)
@@ -611,10 +614,12 @@ class CameraTimingFactory(TimingSourceFactory):
         elif self._session is not None:
             frames = self._session.race_consumer(camera)
         else:
+            device = self._make_device(camera)
             frames = CameraFrameSource(
-                self._make_device(camera),
+                device,
                 lease=self._lease,
                 lease_owner=CameraLease.RACE,
+                clock=capture_clock_of(device),
             )
         return CameraTimingProvider(spec, frames, settings, self._background, zone_frame=zone_frame)
 

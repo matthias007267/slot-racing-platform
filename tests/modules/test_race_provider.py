@@ -13,6 +13,7 @@ from slot_racing.core.storage.database import alembic_config
 from slot_racing.core.timing import ProviderAvailability, ProviderCapabilities, TimingSourceFactory
 from slot_racing.modules.races.models import Race
 from slot_racing.modules.races.service import RaceService
+from tests.database import migrated_database
 from tests.modules.conftest import Env
 from tests.support.timing import FakeTimingFactory, FakeTimingSource
 
@@ -168,8 +169,7 @@ def test_migration_gives_existing_races_the_simulation_provider() -> None:
 
 
 def test_downgrade_removes_only_the_provider_column() -> None:
-    database = Database.in_memory()
-    database.migrate()
+    database = migrated_database()
     with database.session() as session:
         session.add(Race(name="R", status="created", target_laps=2, timing_provider="camera"))
     with database.engine.connect() as connection:

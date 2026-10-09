@@ -48,4 +48,6 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - name: Pytest
-        run: uv run pytest
+        # Four workers matches the 4-vCPU GitHub runners. Measured on Linux;
+        # do not switch to -n auto, which follows the host CPU count.
+        run: uv run pytest -n 4

@@ -55,6 +55,7 @@ from slot_racing.modules.timing_camera.provider import (
     CameraTimingProvider,
 )
 from slot_racing.modules.timing_camera.store import CameraConfigurationStore
+from tests.database import migrated_database
 
 WIDTH = 80
 HEIGHT = 30
@@ -119,8 +120,7 @@ def running(
 
 
 def plugin_registry() -> tuple[PluginManager, TimingProviderRegistry, Database]:
-    database = Database.in_memory()
-    database.migrate()
+    database = migrated_database()
     services = ServiceRegistry()
     services.register(Database, database, owner="core")
     manager = PluginManager(

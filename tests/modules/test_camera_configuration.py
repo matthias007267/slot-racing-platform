@@ -40,6 +40,7 @@ from slot_racing.modules.timing_camera.store import (
     CameraConfigurationError,
     CameraConfigurationStore,
 )
+from tests.database import migrated_database
 from tests.modules.test_camera_provider import spec_for
 
 WIDTH = 80
@@ -47,9 +48,7 @@ HEIGHT = 40
 
 
 def database() -> Database:
-    stored = Database.in_memory()
-    stored.migrate()
-    return stored
+    return migrated_database()
 
 
 def zone(position_id: str, lane: int, *, y: float) -> StoredDetectionZone:

@@ -13,13 +13,13 @@ from pytestqt.qtbot import QtBot
 from slot_racing.app.backup_settings import BackupSettings
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import AppConfig
-from slot_racing.core.storage import Database
 from tests.app.test_shell import make_window
+from tests.database import migrated_database
 
 
 @pytest.fixture
 def runtime() -> Iterator[Runtime]:
-    runtime = Runtime.create(AppConfig(), database=Database.in_memory())
+    runtime = Runtime.create(AppConfig(), database=migrated_database())
     yield runtime
     runtime.shutdown()
 

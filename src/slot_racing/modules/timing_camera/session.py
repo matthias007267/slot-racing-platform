@@ -25,6 +25,7 @@ from slot_racing.modules.timing_camera.capture import (
     CameraReadError,
     CaptureDevice,
     LatestFrameBuffer,
+    capture_clock_of,
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
@@ -103,6 +104,14 @@ class SessionConsumer(FrameSource):
         if slot is None:
             return 0
         return slot.dropped
+
+    @property
+    def frames_taken(self) -> int:
+        """Frames this consumer's slot handed to detection, before analysis."""
+        slot = self._session.slot_for(self._name)
+        if slot is None:
+            return 0
+        return slot.takes
 
     def start(self) -> None:
         self._session.ensure(self._config, reason=self._ensure_reason)
@@ -436,6 +445,7 @@ class CameraSession:
             device,
             lease=self._lease,
             lease_owner=CameraLease.CAPTURE,
+            clock=capture_clock_of(device),
         )
         try:
             source.start()
