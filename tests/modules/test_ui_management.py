@@ -499,9 +499,14 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     _, page = open_page(qtbot, env, "races")
     assert isinstance(page, RacesPage)
     page.refresh()
+    chris = env.driver("Chris")
+    env.vehicle("Mercedes", driver_id=chris.id)
     configure_race(page, env)
     wizard = page.wizard
-    assert wizard.participant_table.rowCount() == 2
+    wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(chris.id))
+    assert wizard.vehicle_combo.currentData() is not None
+    assert wizard.add_participant()
+    assert wizard.participant_table.rowCount() == 3
 
     assert wizard.go_next()
     assert wizard.step == OVERVIEW
@@ -554,25 +559,27 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
             break
     assert not live.heat_gate.isHidden()
     assert "Spurwechsel" in live.heat_gate.body_label.text()
-    live.heat_gate.start_button.click()
-    release_start_lights(live)
-    assert live.runner is not None and live.runner.is_active
-
-    for _ in range(160):
-        env.clock.advance(100_000_000)
-        live.refresh()
-        if isinstance(page.current_view(), ResultsView):
-            break
+    for _heat in (2, 3):
+        live.heat_gate.start_button.click()
+        release_start_lights(live)
+        assert live.runner is not None and live.runner.is_active
+        for _ in range(160):
+            env.clock.advance(100_000_000)
+            live.refresh()
+            if _heat == 2 and not live.heat_gate.isHidden():
+                break
+            if _heat == 3 and isinstance(page.current_view(), ResultsView):
+                break
     assert isinstance(page.current_view(), ResultsView)
     results = page.results
-    assert results.table.rowCount() == 2
+    assert results.table.rowCount() == 3
     assert column_text(results.table, 0, "Platz") == "1"
-    assert column_text(results.table, 0, "Fahrer") in {"Anna", "Ben"}
+    assert column_text(results.table, 0, "Fahrer") in {"Anna", "Ben", "Chris"}
     assert column_text(results.table, 0, "Runden") == "4"
     assert column_text(results.table, 0, "Status") == "Fertig"
     for header in ("Gesamtzeit", "Beste Runde", "Letzte Runde", "Durchschnitt"):
         assert column_text(results.table, 0, header) != "-"
-    assert results.laps_table.rowCount() == 8
+    assert results.laps_table.rowCount() == 12
     assert results.records_table.isHidden()
     assert results.records_heading.isHidden()
 

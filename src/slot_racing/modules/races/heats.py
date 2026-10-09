@@ -12,7 +12,7 @@ from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.domain.scoring import time_trial_stored_key
 from slot_racing.core.errors import ValidationError
 from slot_racing.modules.races.models import Lap, Race, RaceHeat, RaceHeatEntry, RaceParticipant
-from slot_racing.modules.races.planning import build_rotation, plan_remaining
+from slot_racing.modules.races.planning import build_rotation, pending_pairwise, plan_remaining
 from slot_racing.modules.races.types import HeatBriefing, HeatInfo, HeatSeat, LaneChange
 
 PLANNED = "planned"
@@ -58,13 +58,7 @@ def replace_open_plan(session: Session, race: Race, lane_count: int) -> None:
         raise ValidationError("error.race.not_editable")
     participants = _participants(session, race.id)
     _delete_planned(session, race.id)
-    if has_completed(session, race.id):
-        heats = plan_remaining(
-            _obligations(participants, lane_count, _completed_pairs(session, race.id)), lane_count
-        )
-    else:
-        active = [participant.id for participant in participants if not participant.disqualified]
-        heats = build_rotation(active, lane_count)
+    heats = _open_heats(participants, lane_count, _completed_pairs(session, race.id))
     _insert_heats(session, race.id, heats)
 
 
@@ -75,12 +69,12 @@ def postpone(session: Session, race: Race, participant_id: int, lane_count: int)
     participant = _require_participant(session, race.id, participant_id)
     if participant.disqualified:
         raise ValidationError("error.race.disqualified")
-    obligations = _obligations(
-        _participants(session, race.id), lane_count, _completed_pairs(session, race.id)
-    )
-    if not any(driver == participant.id for driver, _lane in obligations):
+    participants = _participants(session, race.id)
+    completed = _completed_pairs(session, race.id)
+    open_now = _open_heats(participants, lane_count, completed)
+    if not any(driver == participant.id for heat in open_now for driver, _lane in heat):
         raise ValidationError("error.race.nothing_to_postpone")
-    heats = plan_remaining(obligations, lane_count, deferred=frozenset({participant.id}))
+    heats = _open_heats(participants, lane_count, completed, deferred=frozenset({participant.id}))
     _delete_planned(session, race.id)
     _insert_heats(session, race.id, heats)
 
@@ -95,10 +89,7 @@ def disqualify(session: Session, race: Race, participant_id: int, lane_count: in
     participant = _require_participant(session, race.id, participant_id)
     participant.disqualified = True
     participants = _participants(session, race.id)
-    heats = plan_remaining(
-        _obligations(participants, lane_count, _completed_pairs(session, race.id)),
-        lane_count,
-    )
+    heats = _open_heats(participants, lane_count, _completed_pairs(session, race.id))
     _delete_planned(session, race.id)
     _insert_heats(session, race.id, heats)
     if heats or not has_completed(session, race.id):
@@ -312,6 +303,28 @@ def _tie_lane(participant: RaceParticipant, laps: list[Lap]) -> int:
     if laps and laps[-1].lane is not None:
         return laps[-1].lane
     return participant.lane or 0
+
+
+def _open_heats(
+    participants: list[RaceParticipant],
+    lane_count: int,
+    completed: set[tuple[int, int]],
+    *,
+    deferred: frozenset[int] = frozenset(),
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """Open heats for the current roster.
+
+    Two or more drivers on two lanes stay on the pairwise cycle. Every other track still
+    owes each driver one visit to each lane.
+    """
+    active = [participant.id for participant in participants if not participant.disqualified]
+    if lane_count == 2 and len(active) >= 2:
+        return pending_pairwise(active, completed, deferred=deferred)
+    if completed or deferred:
+        return plan_remaining(
+            _obligations(participants, lane_count, completed), lane_count, deferred=deferred
+        )
+    return build_rotation(active, lane_count)
 
 
 def _obligations(
