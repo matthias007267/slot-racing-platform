@@ -7,7 +7,7 @@ returns:
 ```text
 read frame
     ↓
-perf_counter_ns()
+capture clock (``perf_counter_ns`` for hardware)
     ↓
 latest-frame slot (an unread frame is replaced)
     ↓
@@ -35,7 +35,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Protocol
+from typing import Protocol, cast
 
 from slot_racing.modules.timing_camera._checks import require_range
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
@@ -173,6 +173,19 @@ class LatestFrameBuffer:
     def __len__(self) -> int:
         with self._cond:
             return 0 if self._frame is None else 1
+
+
+def capture_clock_of(device: object) -> Callable[[], int] | None:
+    """A simulated device may name its grab clock. Hardware leaves this unset.
+
+    ``None`` keeps :meth:`CameraFrameSource` on ``perf_counter_ns``.
+    """
+    clock = getattr(device, "capture_clock", None)
+    if clock is None:
+        return None
+    if not callable(clock):
+        raise TypeError("capture_clock must be a callable")
+    return cast(Callable[[], int], clock)
 
 
 class CameraFrameSource(FrameSource):
@@ -369,8 +382,9 @@ class CameraFrameSource(FrameSource):
         if not self._running:
             return False
         # Stamp first, then drop the queue, so a frame read during the pause
-        # cannot land as the first frame of the resumed race.
-        self._resume_ns = time.perf_counter_ns()
+        # cannot land as the first frame of the resumed race. Hardware uses
+        # ``perf_counter_ns``. A simulated clock stays in its own time domain.
+        self._resume_ns = self._clock()
         self._queue.clear()
         self._paused = False
         return True

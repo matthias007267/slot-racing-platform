@@ -36,6 +36,7 @@ from slot_racing.modules.timing_camera.capture import (
     CaptureDevice,
     LatestFrameBuffer,
     _timed,
+    capture_clock_of,
 )
 from slot_racing.modules.timing_camera.detection import DetectionZone, DetectorSettings
 from slot_racing.modules.timing_camera.frame_source import (
@@ -169,6 +170,10 @@ def wait_for(predicate: Callable[[], bool]) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("timed out")
+
+
+def test_a_device_without_a_capture_clock_keeps_the_host_clock() -> None:
+    assert capture_clock_of(ScriptedCapture()) is None
 
 
 def test_a_taken_frame_is_kept_when_the_next_one_is_published() -> None:

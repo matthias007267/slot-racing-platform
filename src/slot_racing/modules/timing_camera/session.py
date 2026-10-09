@@ -25,6 +25,7 @@ from slot_racing.modules.timing_camera.capture import (
     CameraReadError,
     CaptureDevice,
     LatestFrameBuffer,
+    capture_clock_of,
 )
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
@@ -444,6 +445,7 @@ class CameraSession:
             device,
             lease=self._lease,
             lease_owner=CameraLease.CAPTURE,
+            clock=capture_clock_of(device),
         )
         try:
             source.start()

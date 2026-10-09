@@ -51,7 +51,11 @@ from slot_racing.modules.timing_camera.configuration import (
     StoredDetectionZone,
     roi_to_pixels,
 )
-from slot_racing.modules.timing_camera.detection import TravelDirection, effective_block_size
+from slot_racing.modules.timing_camera.detection import (
+    TravelDirection,
+    effective_block_size,
+    sensitivity_profile,
+)
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
@@ -76,17 +80,67 @@ CAR_IN_ZONE = DetectionRoi(28, 2, 8, 6)
 CAR_OUTSIDE = DetectionRoi(0, 2, 8, 6)
 
 
+# Two motion grabs stay inside the default 1.4 s window no matter how long
+# painting or analysis takes. A later pass starts after the race debounce.
+MOTION_GAP_NS = 20_000_000
+DETECTION_WINDOW_NS = sensitivity_profile(50).window_ns
+OUTSIDE_WINDOW_NS = DETECTION_WINDOW_NS + 100_000_000
+
+
+class ScriptedClock:
+    """Monotonic grab stamps for a simulated camera.
+
+    Hardware keeps ``perf_counter_ns``. This clock is only present on
+    ``SyncCapture``. ``cross`` places its two pictures ``gap_ns`` apart, after
+    the race's same-position debounce and not before the race start.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next = 1_000_000_000
+        self._step = MOTION_GAP_NS
+        self._issued: list[int] = []
+
+    def __call__(self) -> int:
+        with self._lock:
+            stamp = self._next
+            self._next = stamp + self._step
+            self._issued.append(stamp)
+            return stamp
+
+    def prepare_motion(self, gap_ns: int, not_before: int) -> None:
+        """The next two grabs are ``gap_ns`` apart and legal for the race clock."""
+        if gap_ns < 1:
+            raise ValueError("gap_ns must be positive")
+        with self._lock:
+            if self._next <= not_before:
+                self._next = not_before + 1
+            self._next += SAME_POSITION_DEBOUNCE_NS
+            self._step = gap_ns
+
+    def relax(self) -> None:
+        """Later frames, such as the empty track between passes, use the short step."""
+        with self._lock:
+            self._step = MOTION_GAP_NS
+
+    def stamps(self) -> tuple[int, ...]:
+        with self._lock:
+            return tuple(self._issued)
+
+
 class SyncCapture(ScriptedCapture):
     """Scripted device that reports when the capture thread has queued a frame.
 
     ``entries`` grows at the start of every ``read``. After a frame is taken,
     the thread queues it and only then enters ``read`` again. Waiting for both
     a new read and a new entry means the frame is already in the race queue.
+    ``capture_clock`` supplies the grab stamps. A real camera has no such clock.
     """
 
     def __init__(self, *, fail_open: bool = False) -> None:
         super().__init__(fail_open=fail_open)
         self.entries = 0
+        self.capture_clock = ScriptedClock()
 
     def read(self) -> GrayFrame:
         with self._cond:
@@ -176,15 +230,17 @@ def cross(
     runner: RaceRunner,
     width: int = WIDTH,
     height: int = HEIGHT,
+    gap_ns: int = MOTION_GAP_NS,
 ) -> None:
     """Queue a left-to-right pass of whole tiles, one frame at a time.
 
     The painted group is large enough for the default sensitivity and then
     shifts by one tile, so a half-zone that still covers the same blocks is
-    not used. The next picture is grabbed once detection has taken the
-    previous one, while that analysis may still be running. Waiting for the
-    analysis itself would separate the capture timestamps by more than the
-    motion window on a large frame.
+    not used. Both pictures are painted before either grab. Their capture
+    stamps are ``gap_ns`` apart on the simulated clock, so a slow runner cannot
+    push the pair outside the motion window. The worker still has to take each
+    frame before the next one is published, because the slot keeps only one
+    unread picture.
     """
     lefts: list[DetectionRoi] = []
     rights: list[DetectionRoi] = []
@@ -199,11 +255,12 @@ def cross(
         span_h = rows * block
         lefts.append(DetectionRoi(roi.x, roi.y, span_w, span_h))
         rights.append(DetectionRoi(roi.x + block, roi.y, span_w, span_h))
-    # Both pictures are grabbed before either analysis finishes. The motion
-    # window is the gap between those capture timestamps, and a 1920-wide
-    # frame can take longer to analyze than that window allows.
-    publish_taken(device, painted(tuple(lefts), width, height), runner)
-    publish_taken(device, painted(tuple(rights), width, height), runner)
+    left = painted(tuple(lefts), width, height)
+    right = painted(tuple(rights), width, height)
+    device.capture_clock.prepare_motion(gap_ns, _race_started_ns(runner))
+    publish_taken(device, left, runner)
+    publish_taken(device, right, runner)
+    device.capture_clock.relax()
 
 
 def pass_again(
@@ -214,19 +271,36 @@ def pass_again(
     width: int = WIDTH,
     height: int = HEIGHT,
 ) -> None:
-    """Clear the line and cross it once more, after the same-position debounce.
+    """Clear the line and cross it once more.
 
-    The first start/finish crossing starts the lap clock. This one stores the lap.
+    The first start/finish crossing starts the lap clock. This one stores the
+    lap. ``cross`` separates the new stamps from the previous pass by the
+    race debounce, on the same clock the detector reads.
     """
-    last = [event.timestamp_ns for event in events if isinstance(event, SensorTriggered)]
-    if last:
-        remain = SAME_POSITION_DEBOUNCE_NS - (time.perf_counter_ns() - last[-1])
-        if remain > 0:
-            time.sleep(remain / 1_000_000_000 + 0.02)
+    previous = [event.timestamp_ns for event in events if isinstance(event, SensorTriggered)]
     consume(device, blank(width, height))
     drive(runner)
     cross(device, *rois, runner=runner, width=width, height=height)
     drive(runner)
+    if previous:
+        latest = [event.timestamp_ns for event in events if isinstance(event, SensorTriggered)]
+        assert latest[-1] - previous[-1] >= SAME_POSITION_DEBOUNCE_NS
+
+
+def _race_started_ns(runner: RaceRunner) -> int:
+    engine = getattr(runner, "_engine", None)
+    started = getattr(engine, "_started_at_ns", 0)
+    if isinstance(started, int):
+        return started
+    return 0
+
+
+def motion_stamps(device: SyncCapture, issued_before: int) -> tuple[int, int]:
+    """The two grab stamps ``cross`` added. The later one is the crossing time."""
+    pair = device.capture_clock.stamps()[issued_before:]
+    if len(pair) != 2:
+        raise AssertionError(f"cross published {len(pair)} stamps, expected 2: {pair}")
+    return pair[0], pair[1]
 
 
 def camera_threads() -> list[threading.Thread]:
@@ -501,9 +575,9 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
-        before = time.perf_counter_ns()
+        issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), runner=runner)
-        after_capture = time.perf_counter_ns()
+        _earlier, grabbed_ns = motion_stamps(device, issued)
         drive(runner)
 
         triggered = of_type(events, SensorTriggered)
@@ -516,8 +590,8 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
                 lane=1,
             )
         ]
-        # The stamp is taken in the capture thread, before this tick runs poll.
-        assert before <= triggered[0].timestamp_ns <= after_capture
+        # The stamp is the grab of the second picture, taken before poll.
+        assert triggered[0].timestamp_ns == grabbed_ns
         assert of_type(events, LapCompleted) == []
         pass_again(device, runner, events, zone_rect(ZONE_X))
         crossings = of_type(events, SensorTriggered)
@@ -642,9 +716,9 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        before = time.perf_counter_ns()
+        issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50), runner=runner)
-        after_capture = time.perf_counter_ns()
+        _earlier, grabbed_ns = motion_stamps(device, issued)
         drive(runner)
 
         triggered = of_type(events, SensorTriggered)
@@ -655,8 +729,7 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
             (1, "start_finish", "sensor-start_finish", "camera"),
             (2, "start_finish", "sensor-start_finish", "camera"),
         ]
-        assert triggered[0].timestamp_ns == triggered[1].timestamp_ns
-        assert before <= triggered[0].timestamp_ns <= after_capture
+        assert triggered[0].timestamp_ns == triggered[1].timestamp_ns == grabbed_ns
         pass_again(device, runner, events, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50))
         assert [(event.lane, event.lap_number) for event in of_type(events, LapCompleted)] == [
             (1, 1),
@@ -695,9 +768,9 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        before = time.perf_counter_ns()
+        issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), zone_rect(0.50), zone_rect(0.80), runner=runner)
-        after_capture = time.perf_counter_ns()
+        _earlier, grabbed_ns = motion_stamps(device, issued)
         drive(runner)
 
         triggered = of_type(events, SensorTriggered)
@@ -707,7 +780,7 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
             ("start_finish", "sensor-start_finish", 1),
         ]
         assert len({event.timestamp_ns for event in triggered}) == 1
-        assert before <= triggered[0].timestamp_ns <= after_capture
+        assert triggered[0].timestamp_ns == grabbed_ns
         # Only sector_2 is the next point. The other two crossings are kept as
         # sensor events and ignored by the existing sequence rules.
         sectors = of_type(events, SectorCompleted)
@@ -763,13 +836,13 @@ def test_pause_drops_frames_and_resume_does_not_count_a_car_already_in_the_zone(
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
-        before = time.perf_counter_ns()
+        issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), runner=runner)
-        after_capture = time.perf_counter_ns()
+        _earlier, grabbed_ns = motion_stamps(device, issued)
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert len(triggered) == 1
-        assert before <= triggered[0].timestamp_ns <= after_capture
+        assert triggered[0].timestamp_ns == grabbed_ns
         assert triggered[0].position_id == "start_finish"
         pass_again(device, runner, events, zone_rect(ZONE_X))
         assert runner.snapshot().status is RaceStatus.FINISHED
@@ -1074,6 +1147,65 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         runner.close()
 
 
+def test_two_motion_samples_inside_the_window_keep_the_grab_stamp(env: Env) -> None:
+    """A 20 ms pair is inside the 1.4 s window and the event uses the later grab."""
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    events = listen(env)
+    runner = env.controller.start_race(race_id)
+    try:
+        device = hub.live()
+        consume(device, blank())
+        drive(runner)
+        issued = len(device.capture_clock.stamps())
+        cross(device, zone_rect(ZONE_X), runner=runner)
+        earlier, grabbed_ns = motion_stamps(device, issued)
+        assert grabbed_ns > earlier
+        assert grabbed_ns - earlier == MOTION_GAP_NS
+        assert grabbed_ns - earlier < DETECTION_WINDOW_NS
+        drive(runner)
+        triggered = of_type(events, SensorTriggered)
+        assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)]
+        assert triggered[0].timestamp_ns == grabbed_ns
+        stamps = device.capture_clock.stamps()
+        assert stamps == tuple(sorted(set(stamps)))
+        pass_again(device, runner, events, zone_rect(ZONE_X))
+        again = of_type(events, SensorTriggered)
+        assert again[-1].timestamp_ns > grabbed_ns
+        assert again[-1].timestamp_ns - grabbed_ns >= SAME_POSITION_DEBOUNCE_NS
+    finally:
+        runner.close()
+
+
+def test_motion_samples_outside_the_window_emit_nothing(env: Env) -> None:
+    """The same pictures produce no crossing when their stamps are 1.5 s apart."""
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    events = listen(env)
+    runner = env.controller.start_race(race_id)
+    try:
+        device = hub.live()
+        consume(device, blank())
+        drive(runner)
+        observed = frames_observed(runner)
+        issued = len(device.capture_clock.stamps())
+        cross(device, zone_rect(ZONE_X), runner=runner, gap_ns=OUTSIDE_WINDOW_NS)
+        earlier, grabbed_ns = motion_stamps(device, issued)
+        assert grabbed_ns - earlier == OUTSIDE_WINDOW_NS
+        assert grabbed_ns - earlier > DETECTION_WINDOW_NS
+        drive(runner)
+        assert frames_observed(runner) >= observed + 2
+        assert frames_dropped(runner) == 0
+        assert of_type(events, SensorTriggered) == []
+        assert runner.status is RaceStatus.RUNNING
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize(
     ("stored_width", "stored_height", "frame_width", "frame_height"),
     [
@@ -1123,7 +1255,11 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
         assert of_type(events, SensorTriggered) == []
         assert actual.x + actual.width <= frame_width
         assert actual.y + actual.height <= frame_height
+        issued = len(device.capture_clock.stamps())
         cross(device, actual, runner=runner, width=frame_width, height=frame_height)
+        earlier, grabbed_ns = motion_stamps(device, issued)
+        assert grabbed_ns - earlier == MOTION_GAP_NS
+        assert grabbed_ns - earlier < DETECTION_WINDOW_NS
         drive(runner)
         snapshot = runner.snapshot()
         assert snapshot.source_errors == ()
@@ -1131,6 +1267,7 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
         assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)], (
             camera_report(runner)
         )
+        assert triggered[0].timestamp_ns == grabbed_ns
         pass_again(device, runner, events, actual, width=frame_width, height=frame_height)
         assert of_type(events, LapCompleted)
         assert runner.status is RaceStatus.FINISHED
