@@ -173,6 +173,7 @@ def zone_rect(
 def cross(
     device: SyncCapture,
     *rois: DetectionRoi,
+    runner: RaceRunner,
     width: int = WIDTH,
     height: int = HEIGHT,
 ) -> None:
@@ -180,7 +181,8 @@ def cross(
 
     The painted group is large enough for the default sensitivity and then
     shifts by one tile, so a half-zone that still covers the same blocks is
-    not used.
+    not used. Each frame is detected before the next one is published: the
+    capture slot keeps only the newest unread picture.
     """
     lefts: list[DetectionRoi] = []
     rights: list[DetectionRoi] = []
@@ -195,8 +197,8 @@ def cross(
         span_h = rows * block
         lefts.append(DetectionRoi(roi.x, roi.y, span_w, span_h))
         rights.append(DetectionRoi(roi.x + block, roi.y, span_w, span_h))
-    consume(device, painted(tuple(lefts), width, height))
-    consume(device, painted(tuple(rights), width, height))
+    publish_detected(device, painted(tuple(lefts), width, height), runner)
+    publish_detected(device, painted(tuple(rights), width, height), runner)
 
 
 def pass_again(
@@ -218,7 +220,7 @@ def pass_again(
             time.sleep(remain / 1_000_000_000 + 0.02)
     consume(device, blank(width, height))
     drive(runner)
-    cross(device, *rois, width=width, height=height)
+    cross(device, *rois, runner=runner, width=width, height=height)
     drive(runner)
 
 
@@ -230,18 +232,47 @@ def camera_threads() -> list[threading.Thread]:
     ]
 
 
+def _sources(runner: RaceRunner) -> tuple[object, ...]:
+    engine = getattr(runner, "_engine", None)
+    sources = () if engine is None else getattr(engine, "_sources", ())
+    return tuple(sources)
+
+
+def await_detection(runner: RaceRunner) -> None:
+    """Block until every camera source has finished the frames it already has."""
+    for source in _sources(runner):
+        caught_up = getattr(source, "caught_up", None)
+        if callable(caught_up):
+            wait_until(caught_up, "camera detection did not catch up")
+
+
+def frames_observed(runner: RaceRunner) -> int:
+    return sum(int(getattr(source, "frames_observed", 0)) for source in _sources(runner))
+
+
+def publish_detected(device: SyncCapture, frame: GrayFrame, runner: RaceRunner) -> None:
+    """Publish one frame and return after detection has finished that frame.
+
+    A later ``push`` replaces an unread frame. Waiting on ``frames_observed``
+    is the signal that this picture was taken, not a fixed delay.
+    """
+    await_detection(runner)
+    seen = frames_observed(runner)
+    consume(device, frame)
+
+    def finished() -> bool:
+        return frames_observed(runner) > seen
+
+    wait_until(finished, "detection did not finish the queued frame")
+
+
 def drive(runner: RaceRunner) -> None:
     """Wait until camera detection has finished, then forward its events.
 
     The worker detects without this call. ``tick`` only delivers crossings that
     are already stored, on the test thread, the same way the live view does.
     """
-    engine = getattr(runner, "_engine", None)
-    sources = () if engine is None else getattr(engine, "_sources", ())
-    for source in sources:
-        caught_up = getattr(source, "caught_up", None)
-        if callable(caught_up):
-            wait_until(caught_up, "camera detection did not catch up")
+    await_detection(runner)
     runner.tick()
 
 
@@ -276,9 +307,6 @@ def consume(device: SyncCapture, frame: GrayFrame) -> None:
         lambda: device.reads > reads and device.entry_count() > entries,
         f"capture missed the frame (reads={device.reads}, entries={device.entry_count()})",
     )
-    # The capture thread has published this frame and is blocked in the next
-    # read. Detection has to take it before the next push replaces it.
-    time.sleep(0.02)
 
 
 def save_document(
@@ -383,7 +411,7 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
         assert of_type(events, SensorTriggered) == []
 
         before = time.perf_counter_ns()
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         after_capture = time.perf_counter_ns()
         drive(runner)
 
@@ -444,7 +472,7 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert [event.position_id for event in triggered] == ["start_finish"]
@@ -465,7 +493,7 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
         device = first_hub.live()
         consume(device, blank())
         drive(first)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=first)
         drive(first)
         pass_again(device, first, first_events, zone_rect(ZONE_X))
         assert len(of_type(first_events, LapCompleted)) == 1
@@ -493,7 +521,7 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
         consume(device, painted((CAR_IN_ZONE,)))
         drive(second)
         assert of_type(second_events, SensorTriggered) == []
-        cross(device, zone_rect(0.0))
+        cross(device, zone_rect(0.0), runner=second)
         drive(second)
         triggered = of_type(second_events, SensorTriggered)
         assert [(event.position_id, event.lane, event.sensor_id) for event in triggered] == [
@@ -524,7 +552,7 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
         consume(device, blank())
         drive(runner)
         before = time.perf_counter_ns()
-        cross(device, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50))
+        cross(device, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50), runner=runner)
         after_capture = time.perf_counter_ns()
         drive(runner)
 
@@ -577,7 +605,7 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
         consume(device, blank())
         drive(runner)
         before = time.perf_counter_ns()
-        cross(device, zone_rect(ZONE_X), zone_rect(0.50), zone_rect(0.80))
+        cross(device, zone_rect(ZONE_X), zone_rect(0.50), zone_rect(0.80), runner=runner)
         after_capture = time.perf_counter_ns()
         drive(runner)
 
@@ -598,7 +626,7 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
 
         consume(device, blank())
         drive(runner)
-        cross(device, zone_rect(ZONE_X), zone_rect(0.80))
+        cross(device, zone_rect(ZONE_X), zone_rect(0.80), runner=runner)
         drive(runner)
         laps = of_type(events, LapCompleted)
         assert len(laps) == 1 and laps[0].lap_number == 1
@@ -645,7 +673,7 @@ def test_pause_drops_frames_and_resume_does_not_count_a_car_already_in_the_zone(
         assert of_type(events, SensorTriggered) == []
 
         before = time.perf_counter_ns()
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         after_capture = time.perf_counter_ns()
         drive(runner)
         triggered = of_type(events, SensorTriggered)
@@ -741,7 +769,7 @@ def test_a_backlog_drops_old_frames_before_they_reach_the_race(env: Env) -> None
         assert of_type(events, SensorTriggered) == []
         assert runner.status is RaceStatus.RUNNING
 
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         assert len(of_type(events, SensorTriggered)) == 1
     finally:
@@ -870,7 +898,7 @@ def test_saved_zones_scale_to_the_stored_resolution(
         consume(device, painted((DetectionRoi(0, 0, 4, 4),), width, height))
         drive(runner)
         assert of_type(events, SensorTriggered) == []
-        cross(device, expected, width=width, height=height)
+        cross(device, expected, runner=runner, width=width, height=height)
         drive(runner)
         triggered = of_type(events, SensorTriggered)
         assert len(triggered) == 1
@@ -922,14 +950,14 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         names = [child.objectName() for child in live.findChildren(QWidget)]
         assert not any(name.startswith("camera") for name in names)
 
-        cross(device, zone_rect(0.50))
+        cross(device, zone_rect(0.50), runner=runner)
         live.refresh()
         assert live.status_label.text().endswith("Läuft")
         assert column_text(live.table, 0, "Runden") == "0"
 
         consume(device, blank())
         live.refresh()
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         live.refresh()
         assert live.status_label.text().endswith("Beendet")
         assert column_text(live.table, 0, "Platz") == "1"
@@ -1004,7 +1032,7 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
         assert of_type(events, SensorTriggered) == []
         assert actual.x + actual.width <= frame_width
         assert actual.y + actual.height <= frame_height
-        cross(device, actual, width=frame_width, height=frame_height)
+        cross(device, actual, runner=runner, width=frame_width, height=frame_height)
         drive(runner)
         snapshot = runner.snapshot()
         assert snapshot.source_errors == ()
@@ -1062,7 +1090,7 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         assert runner.snapshot().source_errors == ()
         pass_again(device, runner, events, zone_rect(ZONE_X))
@@ -1133,6 +1161,7 @@ def test_three_and_four_lanes_each_report_a_crossing(env: Env) -> None:
                     zone_rect(ZONE_X, y=(lane - 1) * 0.25, height=height)
                     for lane in range(1, lane_count + 1)
                 ),
+                runner=runner,
             )
             drive(runner)
             triggered = of_type(events, SensorTriggered)
@@ -1168,7 +1197,7 @@ def test_a_camera_time_trial_keeps_running_after_a_lap_until_it_is_stopped(env: 
         device = hub.live()
         consume(device, blank())
         drive(runner)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
         pass_again(device, runner, events, zone_rect(ZONE_X))
         assert len(of_type(events, LapCompleted)) == 1
@@ -1208,7 +1237,7 @@ def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) 
         device = hub.live()
         consume(device, blank())
         drive(again)
-        cross(device, zone_rect(ZONE_X))
+        cross(device, zone_rect(ZONE_X), runner=again)
         drive(again)
         pass_again(device, again, events, zone_rect(ZONE_X))
         assert len(of_type(events, LapCompleted)) == 1
