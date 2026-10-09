@@ -93,6 +93,7 @@ class LatestFrameBuffer:
         self._frame: TimedFrame | None = None
         self._in_flight = False
         self._retired = False
+        self._takes = 0
         self.dropped = 0
 
     @property
@@ -133,6 +134,7 @@ class LatestFrameBuffer:
             frame = self._frame
             self._frame = None
             self._in_flight = True
+            self._takes += 1
             return frame
 
     def retire(self) -> None:
@@ -161,6 +163,12 @@ class LatestFrameBuffer:
         """True when nothing is unread and nothing is still being detected."""
         with self._cond:
             return self._frame is None and not self._in_flight
+
+    @property
+    def takes(self) -> int:
+        """Frames removed for detection. Analysis may still be running."""
+        with self._cond:
+            return self._takes
 
     def __len__(self) -> int:
         with self._cond:
@@ -236,6 +244,11 @@ class CameraFrameSource(FrameSource):
         keep their own overwrite counts; those are not added here.
         """
         return self._queue.dropped
+
+    @property
+    def frames_taken(self) -> int:
+        """Frames the worker has taken from the primary slot, before analysis."""
+        return self._queue.takes
 
     @property
     def captured(self) -> int:

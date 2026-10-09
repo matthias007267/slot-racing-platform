@@ -313,6 +313,8 @@ class CameraTimingProvider(TimingSource):
             self._note_first_frame(frame)
             elapsed = time.perf_counter_ns() - started
             latency = max(0, started - frame.timestamp_ns)
+            # ``observe`` has returned. Timing counters come next, then ``_store``.
+            # The race hears the crossing only when ``poll`` drains that queue.
             self.frames_observed += 1
             self.detection_ns_total += elapsed
             self.detection_ns_max = max(self.detection_ns_max, elapsed)

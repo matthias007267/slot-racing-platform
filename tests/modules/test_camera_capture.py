@@ -171,6 +171,24 @@ def wait_for(predicate: Callable[[], bool]) -> None:
     raise AssertionError("timed out")
 
 
+def test_a_taken_frame_is_kept_when_the_next_one_is_published() -> None:
+    slot = LatestFrameBuffer()
+    stop = threading.Event()
+    first = TimedFrame(blank(), 1)
+    second = TimedFrame(blank(), 2)
+    slot.put(first)
+    assert slot.wait(stop) == first
+    assert slot.takes == 1
+    slot.put(second)
+    assert slot.dropped == 0
+    assert slot.idle() is False
+    slot.ack()
+    assert slot.wait(stop) == second
+    assert slot.takes == 2
+    slot.ack()
+    assert slot.idle() is True
+
+
 def test_a_newer_frame_replaces_one_that_detection_has_not_taken() -> None:
     slot = LatestFrameBuffer()
     first = TimedFrame(blank(), 1)

@@ -181,8 +181,10 @@ def cross(
 
     The painted group is large enough for the default sensitivity and then
     shifts by one tile, so a half-zone that still covers the same blocks is
-    not used. Each frame is detected before the next one is published: the
-    capture slot keeps only the newest unread picture.
+    not used. The next picture is grabbed once detection has taken the
+    previous one, while that analysis may still be running. Waiting for the
+    analysis itself would separate the capture timestamps by more than the
+    motion window on a large frame.
     """
     lefts: list[DetectionRoi] = []
     rights: list[DetectionRoi] = []
@@ -197,8 +199,11 @@ def cross(
         span_h = rows * block
         lefts.append(DetectionRoi(roi.x, roi.y, span_w, span_h))
         rights.append(DetectionRoi(roi.x + block, roi.y, span_w, span_h))
-    publish_detected(device, painted(tuple(lefts), width, height), runner)
-    publish_detected(device, painted(tuple(rights), width, height), runner)
+    # Both pictures are grabbed before either analysis finishes. The motion
+    # window is the gap between those capture timestamps, and a 1920-wide
+    # frame can take longer to analyze than that window allows.
+    publish_taken(device, painted(tuple(lefts), width, height), runner)
+    publish_taken(device, painted(tuple(rights), width, height), runner)
 
 
 def pass_again(
@@ -247,23 +252,109 @@ def await_detection(runner: RaceRunner) -> None:
 
 
 def frames_observed(runner: RaceRunner) -> int:
+    """Frames whose analysis has returned. The race has not been told yet."""
     return sum(int(getattr(source, "frames_observed", 0)) for source in _sources(runner))
 
 
-def publish_detected(device: SyncCapture, frame: GrayFrame, runner: RaceRunner) -> None:
-    """Publish one frame and return after detection has finished that frame.
+def _frame_source(source: object) -> object | None:
+    return getattr(source, "_frames", None)
 
-    A later ``push`` replaces an unread frame. Waiting on ``frames_observed``
-    is the signal that this picture was taken, not a fixed delay.
+
+def frames_taken(runner: RaceRunner) -> int:
+    """Frames detection has removed from the slot. Analysis may still be running."""
+    total = 0
+    found = False
+    for source in _sources(runner):
+        taken = getattr(_frame_source(source), "frames_taken", None)
+        if isinstance(taken, int):
+            total += taken
+            found = True
+    if not found:
+        raise AssertionError("camera source does not report taken frames")
+    return total
+
+
+def frames_dropped(runner: RaceRunner) -> int:
+    total = 0
+    for source in _sources(runner):
+        frames = _frame_source(source)
+        dropped = getattr(frames, "dropped", None)
+        if not isinstance(dropped, int):
+            dropped = getattr(frames, "replaced", None)
+        if isinstance(dropped, int):
+            total += dropped
+    return total
+
+
+def camera_report(runner: RaceRunner) -> str:
+    """Capture and detector facts for a failed camera race assertion.
+
+    ``frames_observed`` counts analyses that have returned, not frames merely
+    read. ``frames_taken`` counts the hand-off into analysis. A pending queue
+    means the crossing was stored and not yet delivered by ``poll``.
     """
-    await_detection(runner)
-    seen = frames_observed(runner)
+    parts: list[str] = [f"race={runner.status} errors={runner.snapshot().source_errors}"]
+    for source in _sources(runner):
+        frames = _frame_source(source)
+        detector = getattr(source, "_detector", None)
+        zone = None
+        analyzed = None
+        samples = None
+        if detector is not None:
+            try:
+                zone = detector.zone_state("start_finish", 1)
+            except (ValueError, AttributeError):
+                zone = "absent"
+            analyzed = (getattr(detector, "_width", None), getattr(detector, "_height", None))
+            stored = getattr(detector, "_samples", None)
+            if isinstance(stored, list):
+                samples = [len(row) for row in stored if isinstance(row, list)]
+        capture_dt = getattr(frames, "last_capture_dt_ns", None)
+        pending = getattr(source, "_pending", None)
+        parts.append(
+            "observed={observed} taken={taken} dropped={dropped} seq={seq} "
+            "analyzed={analyzed} samples={samples} pending={pending} "
+            "capture_dt_ms={dt} detect_max_ms={detect} failure={failure} zone={zone}".format(
+                observed=getattr(source, "frames_observed", None),
+                taken=getattr(frames, "frames_taken", None),
+                dropped=getattr(frames, "dropped", getattr(frames, "replaced", None)),
+                seq=getattr(frames, "sequence", None),
+                analyzed=analyzed,
+                samples=samples,
+                pending=None if pending is None else len(pending),
+                dt=None if not isinstance(capture_dt, int) else round(capture_dt / 1_000_000, 1),
+                detect=round(int(getattr(source, "detection_ns_max", 0)) / 1_000_000, 1),
+                failure=getattr(source, "_failure", None),
+                zone=zone,
+            )
+        )
+    return "; ".join(parts) if len(parts) > 1 else "no camera source"
+
+
+def publish_taken(device: SyncCapture, frame: GrayFrame, runner: RaceRunner) -> None:
+    """Publish one frame and return once detection has taken it.
+
+    ``frames_observed`` grows only after analysis. Waiting for that delays the
+    next grab by the whole analysis, and the motion window then drops the
+    first sample. The slot may hold the next unread frame while the taken one
+    is still being analyzed. An unread frame is still replaced, and that is
+    reported instead of being treated as success.
+    """
+    taken = frames_taken(runner)
+    dropped = frames_dropped(runner)
     consume(device, frame)
 
-    def finished() -> bool:
-        return frames_observed(runner) > seen
+    def held() -> bool:
+        return frames_taken(runner) > taken
 
-    wait_until(finished, "detection did not finish the queued frame")
+    wait_until(
+        held,
+        lambda: "detection did not take the queued frame; " + camera_report(runner),
+    )
+    if frames_dropped(runner) != dropped:
+        raise AssertionError(
+            "the unread frame was replaced before detection took it; " + camera_report(runner)
+        )
 
 
 def drive(runner: RaceRunner) -> None:
@@ -276,13 +367,13 @@ def drive(runner: RaceRunner) -> None:
     runner.tick()
 
 
-def wait_until(predicate: Callable[[], bool], message: str) -> None:
+def wait_until(predicate: Callable[[], bool], message: str | Callable[[], str]) -> None:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(0.005)
-    raise AssertionError(message)
+    raise AssertionError(message() if callable(message) else message)
 
 
 def wait_armed(device: SyncCapture) -> None:
@@ -1037,7 +1128,9 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
         snapshot = runner.snapshot()
         assert snapshot.source_errors == ()
         triggered = of_type(events, SensorTriggered)
-        assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)]
+        assert [(event.position_id, event.lane) for event in triggered] == [("start_finish", 1)], (
+            camera_report(runner)
+        )
         pass_again(device, runner, events, actual, width=frame_width, height=frame_height)
         assert of_type(events, LapCompleted)
         assert runner.status is RaceStatus.FINISHED

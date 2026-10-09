@@ -104,6 +104,14 @@ class SessionConsumer(FrameSource):
             return 0
         return slot.dropped
 
+    @property
+    def frames_taken(self) -> int:
+        """Frames this consumer's slot handed to detection, before analysis."""
+        slot = self._session.slot_for(self._name)
+        if slot is None:
+            return 0
+        return slot.takes
+
     def start(self) -> None:
         self._session.ensure(self._config, reason=self._ensure_reason)
         self._session.attach(self._name, reason=self._attach_reason)
