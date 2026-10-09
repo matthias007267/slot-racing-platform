@@ -7,9 +7,22 @@ lanes.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHeaderView, QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QResizeEvent, QShowEvent
+from PySide6.QtWidgets import (
+    QFrame,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionHeader,
+    QStyleOptionViewItem,
+    QTableWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, RaceMode, TrackId
@@ -35,6 +48,9 @@ from slot_racing.uikit import fill_table, heading, make_table
 from slot_racing.uikit.report_view import RaceReportView
 from slot_racing.uikit.theme import configure_page, set_role
 from slot_racing.uikit.widgets import format_datetime
+
+_VISIBLE_DATA_ROWS = 5
+"""How many data lines a result table keeps on screen before it scrolls."""
 
 
 class ResultsView(QWidget):
@@ -134,23 +150,48 @@ class ResultsView(QWidget):
         self.back_button.setObjectName("results-back")
         set_role(self.back_button, "ghost")
         self.back_button.clicked.connect(self.back_requested.emit)
-        layout = QVBoxLayout(self)
+        self._sized_tables = (
+            self.records_table,
+            self.measurements_table,
+            self.bests_table,
+            self.ranking_table,
+        )
+        self._fitting = False
+        content = QWidget()
+        content.setObjectName("results-content")
+        # Minimum: a short window scrolls this page instead of squeezing a table
+        # down to a single data line.
+        content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        layout = QVBoxLayout(content)
         configure_page(layout)
         layout.addWidget(self.header)
         layout.addWidget(self.summary)
         layout.addWidget(self.records_heading)
-        layout.addWidget(self.records_table, 2)
-        layout.addWidget(self.table, 2)
+        layout.addWidget(self.records_table)
+        layout.addWidget(self.table)
         layout.addWidget(self.laps_heading)
-        layout.addWidget(self.laps_table, 2)
+        layout.addWidget(self.laps_table)
         layout.addWidget(self.measurements_heading)
-        layout.addWidget(self.measurements_table, 2)
+        layout.addWidget(self.measurements_table)
         layout.addWidget(self.bests_heading)
-        layout.addWidget(self.bests_table, 2)
+        layout.addWidget(self.bests_table)
         layout.addWidget(self.ranking_heading)
-        layout.addWidget(self.ranking_table, 2)
+        layout.addWidget(self.ranking_table)
         layout.addWidget(self.report)
         layout.addWidget(self.back_button)
+        self.results_scroll = QScrollArea()
+        self.results_scroll.setObjectName("results-scroll")
+        self.results_scroll.setWidgetResizable(True)
+        self.results_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.results_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.results_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.results_scroll.setWidget(content)
+        self.results_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.results_scroll)
 
     def show_race(self, race_id: RaceId) -> None:
         race = self._service.require_race(race_id)
@@ -175,6 +216,29 @@ class ResultsView(QWidget):
             self.summary.setText(self._header(race))
             self._show_lap_race(race_id, race.is_over)
         self._apply_typography()
+        self._fit_tables()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._fit_tables()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_tables()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.ApplicationFontChange):
+            # Children may still carry the previous font when this event arrives.
+            self._adopt_font()
+            self._fit_tables()
+
+    def _adopt_font(self) -> None:
+        if not hasattr(self, "_sized_tables"):
+            return
+        font = self.font()
+        for table in self._sized_tables:
+            table.setFont(font)
 
     def _header(self, race: RaceInfo) -> str:
         return self.translator.format(
@@ -371,6 +435,16 @@ class ResultsView(QWidget):
             (TEXT_ROW, TEXT_PLACE, TEXT_DRIVER, TEXT_VEHICLE, TEXT_TIME),
         )
 
+    def _fit_tables(self) -> None:
+        if getattr(self, "_fitting", False) or not hasattr(self, "_sized_tables"):
+            return
+        self._fitting = True
+        try:
+            for table in self._sized_tables:
+                _fit_data_rows(table, visible_rows=_VISIBLE_DATA_ROWS)
+        finally:
+            self._fitting = False
+
 
 def _results_style(store: HudConfigurationStore | None) -> ViewStyle:
     if store is None:
@@ -383,6 +457,126 @@ def _label_px(label: QLabel, pixels: int, *, bold: bool) -> None:
     font.setPixelSize(pixels)
     font.setBold(bold)
     label.setFont(font)
+
+
+def _fit_data_rows(table: QTableWidget, *, visible_rows: int) -> None:
+    """Size the table from its header, rows, frame and a horizontal bar.
+
+    More than ``visible_rows`` lines stay inside the table and scroll. Fewer lines
+    use a shorter table. The height is never a fixed pixel constant.
+    """
+    table.ensurePolished()
+    row_height = _commit_row_height(table, _row_height(table))
+    shown = 1 if table.rowCount() < 1 else min(table.rowCount(), visible_rows)
+    header_height = _header_height(table)
+    frame = table.frameWidth() * 2
+    bar = _horizontal_bar_height(table)
+    table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    table.setFixedHeight(header_height + row_height * shown + frame + bar)
+    _match_viewport(table, shown, row_height)
+
+
+def _commit_row_height(table: QTableWidget, height: int) -> int:
+    """Apply ``height``, then keep the size Qt actually uses for the section.
+
+    The style refuses a section below its minimum, and a stylesheet can make the
+    painted line taller than the first measurement. The value written back is that
+    painted line, so the viewport is not one row short.
+    """
+    vertical = table.verticalHeader()
+    height = max(height, vertical.minimumSectionSize())
+    vertical.setDefaultSectionSize(height)
+    vertical.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+    for row in range(table.rowCount()):
+        table.setRowHeight(row, height)
+    if table.rowCount() < 1:
+        return max(height, vertical.defaultSectionSize())
+    actual = table.rowHeight(0)
+    if actual > height:
+        vertical.setDefaultSectionSize(actual)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, actual)
+        actual = max(actual, table.rowHeight(0))
+    return actual
+
+
+def _match_viewport(table: QTableWidget, shown: int, row_height: int) -> None:
+    """Grow or shrink until the data area holds exactly ``shown`` complete lines."""
+    if row_height < 1 or not table.isVisible():
+        return
+    for _ in range(2):
+        viewport = table.viewport().height()
+        if viewport <= 0:
+            return
+        delta = shown * row_height - viewport
+        if delta == 0:
+            return
+        updated = table.height() + delta
+        if updated <= 0 or updated == table.height():
+            return
+        table.setFixedHeight(updated)
+
+
+def _row_height(table: QTableWidget) -> int:
+    """Delegate hint, stylesheet box and the tallest font, so a line is not cut off."""
+    hinted = table.sizeHintForRow(0) if table.rowCount() else 0
+    font = table.font()
+    tallest = table.fontMetrics().height()
+    for row in range(table.rowCount()):
+        for column in range(table.columnCount()):
+            item = table.item(row, column)
+            if item is None:
+                continue
+            item_font = item.font()
+            item_height = QFontMetrics(item_font).height()
+            if item_height > tallest:
+                tallest = item_height
+                font = item_font
+    metrics = QFontMetrics(font)
+    option = QStyleOptionViewItem()
+    option.initFrom(table)
+    option.font = font
+    option.text = "Ag"
+    option.features = QStyleOptionViewItem.ViewItemFeature.HasDisplay
+    measured = table.style().sizeFromContents(
+        QStyle.ContentsType.CT_ItemViewItem,
+        option,
+        QSize(metrics.horizontalAdvance(option.text), metrics.height()),
+        table,
+    )
+    return max(hinted, measured.height(), tallest, table.verticalHeader().minimumSectionSize())
+
+
+def _header_height(table: QTableWidget) -> int:
+    header = table.horizontalHeader()
+    header.ensurePolished()
+    metrics = header.fontMetrics()
+    option = QStyleOptionHeader()
+    option.initFrom(header)
+    option.fontMetrics = metrics
+    option.text = "Ag"
+    measured = header.style().sizeFromContents(
+        QStyle.ContentsType.CT_HeaderSection,
+        option,
+        QSize(metrics.horizontalAdvance(option.text), metrics.height()),
+        header,
+    )
+    return max(header.sizeHint().height(), measured.height(), header.height())
+
+
+def _horizontal_bar_height(table: QTableWidget) -> int:
+    policy = table.horizontalScrollBarPolicy()
+    if policy == Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
+        return 0
+    bar = table.horizontalScrollBar()
+    if policy == Qt.ScrollBarPolicy.ScrollBarAlwaysOn or bar.isVisible():
+        return bar.sizeHint().height()
+    available = table.viewport().width()
+    if available <= 0:
+        available = max(0, table.width() - table.frameWidth() * 2)
+    if available > 0 and table.horizontalHeader().length() > available:
+        return bar.sizeHint().height()
+    return 0
 
 
 def _paint_table(table: QTableWidget, sizes: dict[str, int], columns: tuple[str, ...]) -> None:
