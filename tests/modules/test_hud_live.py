@@ -16,6 +16,7 @@ from slot_racing.modules.races.hud import (
     mark_default,
     replace_layout,
 )
+from slot_racing.modules.races.time_trial_board import format_lap_seconds
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
@@ -49,6 +50,7 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert column_text(live.table, 0, "Fahrer") == "Zoe"
     assert live.lanes.cards[1].last_label.text() == "-"
     assert live.lanes.cards[1].best_label.text() == "-"
+    assert live.lanes.cards[1].best_time_label.text() == "-"
 
     env.clock.advance(3 * NANOS_PER_SECOND)
     live.refresh()
@@ -66,7 +68,8 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert last != "-"
     assert card.last_label.text() == last
     assert card.driver_label.text() == leader.driver_label
-    assert card.best_label.text() == last
+    assert card.best_label.text() == "1"
+    assert card.best_time_label.text() == format_lap_seconds(leader.last_lap_ns)
     assert card.lap_label.text() == f"{leader.current_lap} / {runner.snapshot().laps}"
 
     frozen = live.time_label.text()
@@ -99,6 +102,7 @@ def test_the_hud_follows_a_simulated_race(qtbot: QtBot, env: Env) -> None:
     assert live.messages.message_label.text() == "Rennen beendet"
     assert live.status_label.text() == "● Beendet"
     assert live.lanes.cards[1].best_label.text() != "-"
+    assert live.lanes.cards[1].best_time_label.text() != "-"
     assert live.lanes.cards[1].driver_label.text() == "Zoe"
 
 

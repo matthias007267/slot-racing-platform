@@ -1,7 +1,7 @@
 """Settings editor for the live HUD. The preview is the same surface as a race.
 
-The settings page only launches a window. That window keeps the navigation column of the
-live shell on the left and the real ``LiveHudStage`` on the right.
+The settings page only launches a window. Settings stay in a scrollable column on the
+left. The real ``LiveHudStage`` fills the remaining width on the right.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,6 +39,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QSplitter,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -44,19 +48,27 @@ from PySide6.QtWidgets import (
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
+    DISPLAY_AUTO,
+    DISPLAY_HIDE,
+    DISPLAY_MODES,
     FIELD_IDS,
     LIGHT_ASPECT,
+    PANEL_RECORDS,
     SCALE_MAX,
     SCALE_MIN,
     SCALE_STEP,
     SHARE_MAX,
     SHARE_MIN,
+    TEXT_ROLES,
+    VIEW_IDS,
+    VIEW_LIVE,
     FieldStyle,
     HudConfiguration,
     HudConfigurationStore,
     HudLayout,
     HudWindowPlacement,
     LightFrame,
+    ViewStyle,
     add_layout,
     delete_layout,
     effective_light_scale,
@@ -69,15 +81,26 @@ from slot_racing.modules.races.hud import (
     normalize_light,
     replace_layout,
     snap_alignment,
+    snap_display,
     snap_scale,
     snap_share,
     to_document,
+    with_view,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
+from slot_racing.modules.races.ui.race_briefing import apply_text_size
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
+from slot_racing.uikit.enter import bind_enter
 from slot_racing.uikit.errors import describe_error
-from slot_racing.uikit.theme import NAVIGATION_WIDTH, SPACE, set_role
+from slot_racing.uikit.theme import (
+    FONT_CAPTION,
+    FONT_LANE,
+    FONT_VALUE,
+    NAVIGATION_WIDTH,
+    SPACE,
+    set_role,
+)
 from slot_racing.uikit.widgets import StatusPill
 
 logger = logging.getLogger(__name__)
@@ -227,7 +250,7 @@ def _sample(status_key: str, lanes: int) -> tuple[RaceSnapshot, str]:
                 total_time_ns=18_400_000_000,
                 best_lap_ns=4_050_000_000,
                 finished=status is RaceStatus.FINISHED and not aborted,
-                lap_times_ns=(4_200_000_000,),
+                lap_times_ns=(4_200_000_000, 4_050_000_000),
             )
         )
     if lanes >= 2:
@@ -318,7 +341,10 @@ class HudPreviewHost(QWidget):
     ) -> None:
         super().__init__()
         self.setObjectName("hud-preview")
-        self.setMinimumSize(640, 420)
+        # The stage scrolls on its own. A large minimum here used to steal the
+        # width the settings column needs and pushed those controls on top of
+        # each other.
+        self.setMinimumSize(320, 200)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.stage = LiveHudStage(translator, object_name="hud-live-preview")
         self.lights = StartLightWidget(self)
@@ -335,6 +361,41 @@ class HudPreviewHost(QWidget):
         self._on_resize()
 
 
+class SurfaceSample(QWidget):
+    """Preview of a board that is not the live lane HUD."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("hud-surface-sample")
+        self._labels: dict[str, QLabel] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE.md, SPACE.md, SPACE.md, SPACE.md)
+        layout.setSpacing(SPACE.sm)
+        bases = {
+            "header": FONT_CAPTION,
+            "driver": FONT_LANE,
+            "vehicle": FONT_VALUE,
+            "place": FONT_LANE,
+            "time": FONT_VALUE,
+            "row": FONT_VALUE,
+        }
+        self._bases = bases
+        for role in TEXT_ROLES:
+            label = QLabel()
+            label.setObjectName(f"hud-sample-{role}")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            self._labels[role] = label
+        layout.addStretch(1)
+
+    def show_style(self, style: ViewStyle, translator: Translator) -> None:
+        width = max(self.width(), 640)
+        for role, label in self._labels.items():
+            label.setText(translator.translate(f"hud.sample.{role}"))
+            scale = round(style.font_scale * style.text_scale(role) / 100)
+            apply_text_size(label, self._bases[role], width, bold=role != "header", scale=scale)
+
+
 class HudEditor(QWidget):
     """Configure the live HUD: type, shares, visibility and the start-light overlay."""
 
@@ -345,13 +406,18 @@ class HudEditor(QWidget):
         self._store = store
         self._config = store.load()
         self._filling = False
+        self._surface = VIEW_LIVE
         self._preview_status = "running"
         self._preview_lanes = 2
+        self._preview_mode = RaceMode.LAPS
+        self._locking = False
+        self._splitter_placed = False
         self.preview = HudPreviewHost(translator, self._place_lights, self._on_handle)
         self.stage = self.preview.stage
         self.lights = self.preview.lights
         self.handle = self.preview.handle
         self._build()
+        bind_enter(self, self.save)
         self.stage.apply_layout(self.selected_layout())
         self._fill_form()
         self._show_sample()
@@ -390,14 +456,52 @@ class HudEditor(QWidget):
         self._fill_form()
 
     def set_font_scale(self, value: int) -> None:
-        self._commit(replace(self.selected_layout(), font_scale=snap_scale(value)))
+        snapped = snap_scale(value)
+        if self._surface == VIEW_LIVE:
+            self._commit(replace(self.selected_layout(), font_scale=snapped))
+            return
+        style = replace(self.selected_layout().view(self._surface), font_scale=snapped)
+        self._commit(with_view(self.selected_layout(), self._surface, style))
+
+    def select_view(self, view_id: str) -> None:
+        if view_id not in VIEW_IDS:
+            return
+        self._surface = view_id
+        self._apply_preview()
+        self._fill_form()
+
+    def set_text_scale(self, role: str, value: int) -> None:
+        if role not in TEXT_ROLES or self._surface == VIEW_LIVE:
+            return
+        current = self.selected_layout().view(self._surface)
+        texts = tuple(
+            (key, snap_scale(value) if key == role else scale) for key, scale in current.texts
+        )
+        if role not in {key for key, _scale in texts}:
+            texts = (*texts, (role, snap_scale(value)))
+        updated = replace(current, texts=texts)
+        self._commit(with_view(self.selected_layout(), self._surface, updated))
+
+    def set_panel_display(self, panel_id: str, display: str) -> None:
+        mode = snap_display(display)
+        current = self.selected_layout().view(VIEW_LIVE)
+        panels = tuple((key, mode if key == panel_id else stored) for key, stored in current.panels)
+        if panel_id not in {key for key, _mode in panels}:
+            panels = (*panels, (panel_id, mode))
+        self._commit(with_view(self.selected_layout(), VIEW_LIVE, replace(current, panels=panels)))
 
     def set_alignment(self, alignment: str) -> None:
         self._commit(replace(self.selected_layout(), alignment=snap_alignment(alignment)))
 
     def set_field_visible(self, field_id: str, visible: bool) -> None:
+        self.set_field_display(field_id, DISPLAY_AUTO if visible else DISPLAY_HIDE)
+
+    def set_field_display(self, field_id: str, display: str) -> None:
+        mode = snap_display(display)
         style = self.selected_layout().field(field_id)
-        self._commit(self._with_field(field_id, replace(style, visible=visible)))
+        self._commit(
+            self._with_field(field_id, replace(style, visible=mode != DISPLAY_HIDE, display=mode))
+        )
 
     def set_field_scale(self, field_id: str, value: int) -> None:
         style = self.selected_layout().field(field_id)
@@ -488,41 +592,99 @@ class HudEditor(QWidget):
         self.sync_chrome()
 
     def sync_chrome(self) -> None:
-        """Keep the sidebar in the navigation column and the stage inside the live frame."""
+        """Inset the preview when it should use the live margins. Settings keep their width."""
         insets = live_hud_insets(self)
-        self._scroll.setFixedWidth(insets.navigation_width)
         if self.match_live():
             self._canvas_layout.setContentsMargins(
                 insets.left, insets.top, insets.right, insets.bottom
             )
         else:
             self._canvas_layout.setContentsMargins(0, 0, 0, 0)
-        layout = self.layout()
-        if layout is not None:
-            layout.activate()
         self._place_lights()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
+        self._lock_settings()
+        self._place_splitter()
         self.sync_chrome()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.ApplicationFontChange):
+            self._lock_settings()
+
+    def _lock_settings(self) -> None:
+        """Give every control the width of its text, then refuse to draw the form narrower.
+
+        A fixed sidebar used to be thinner than those texts. Qt then placed the
+        next control on top of the previous one. The form now keeps this width
+        and the column scrolls instead.
+        """
+        if getattr(self, "_locking", False) or not hasattr(self, "_form"):
+            return
+        self._locking = True
+        try:
+            for combo in self._form.findChildren(QComboBox):
+                combo.setMinimumWidth(_combo_min_width(combo))
+            for spin in self._form.findChildren(QSpinBox):
+                spin.setMinimumWidth(_spin_min_width(spin))
+            for button in self._form.findChildren(QPushButton):
+                button.setMinimumWidth(_button_min_width(button))
+            for label in self._form.findChildren(QLabel):
+                if label.wordWrap() or not label.text():
+                    continue
+                label.setMinimumWidth(_label_min_width(label))
+            layout = self._form.layout()
+            if layout is None:
+                return
+            layout.invalidate()
+            needed = max(layout.totalMinimumSize().width(), self._form.minimumSizeHint().width())
+            if needed > 0:
+                self._form.setMinimumWidth(needed)
+            gutter = self._scroll.verticalScrollBar().sizeHint().width()
+            self._scroll.setMinimumWidth(min(max(needed, 1), 280) + gutter)
+        finally:
+            self._locking = False
+
+    def _place_splitter(self) -> None:
+        """Give the settings their text width once. Later drags stay with the user."""
+        if self._splitter_placed or self._splitter.width() <= 0:
+            return
+        wanted = self._form.minimumWidth() + self._scroll.frameWidth() * 2
+        preview = max(self._splitter.width() - wanted, self.preview.minimumWidth())
+        settings = max(self._splitter.width() - preview, self._scroll.minimumWidth())
+        self._splitter.setSizes([settings, max(preview, 1)])
+        self._splitter_placed = True
 
     def _build(self) -> None:
         tr = self._translator.translate
         form = QWidget()
         form.setObjectName("hud-editor-form")
+        form.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         column = QVBoxLayout(form)
-        column.setContentsMargins(SPACE.sm, SPACE.sm, SPACE.sm, SPACE.sm)
-        column.setSpacing(SPACE.sm)
+        column.setContentsMargins(SPACE.md, SPACE.md, SPACE.md, SPACE.md)
+        column.setSpacing(SPACE.md)
+        column.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        self._form = form
+        self._groups: dict[str, QGroupBox] = {}
+        self._live_groups: list[QWidget] = []
+        self._board_only: list[QWidget] = []
 
-        _heading(column, tr("hud.group.surface"))
+        view_form = self._add_group(column, tr("hud.group.view"), "hud-group-view")
         self._match = QCheckBox(tr("hud.match_live"))
         self._match.setObjectName("hud-match-live")
         self._match.setToolTip(tr("hud.match_live.hint"))
         self._match.setChecked(True)
         self._match.toggled.connect(self._on_match)
-        column.addWidget(self._match)
+        view_form.addRow(self._match)
+        self._views = QComboBox()
+        self._views.setObjectName("hud-view")
+        for view_id in VIEW_IDS:
+            self._views.addItem(tr(f"hud.view.{view_id}"), view_id)
+        self._views.currentIndexChanged.connect(self._on_view)
+        view_form.addRow(_form_label(tr("hud.group.view")), self._views)
 
-        _heading(column, tr("hud.group.layout"))
+        layout_form = self._add_group(column, tr("hud.group.layout"), "hud-group-layout")
         self._layouts = QComboBox()
         self._layouts.setObjectName("hud-layout")
         self._layouts.currentIndexChanged.connect(self._on_layout)
@@ -532,46 +694,68 @@ class HudEditor(QWidget):
         self._default_mark = QLabel()
         self._default_mark.setObjectName("hud-default-mark")
         self._default_mark.setWordWrap(True)
-        column.addWidget(self._layouts)
-        column.addWidget(self._name)
-        column.addWidget(self._default_mark)
+        layout_form.addRow(_form_label(tr("hud.group.layout")), self._layouts)
+        layout_form.addRow(_form_label(tr("hud.layout.name")), self._name)
+        layout_form.addRow(self._default_mark)
+        layout_buttons = self._groups["hud-group-layout"].layout()
+        assert layout_buttons is not None
         self._new = _button("hud-layout-new", tr("hud.layout.new"), self._on_new)
         self._delete = _button("hud-layout-delete", tr("hud.layout.delete"), self.delete_selected)
         self._default = _button("hud-set-default", tr("hud.layout.default"), self.mark_default)
-        column.addWidget(self._new)
-        column.addWidget(self._delete)
-        column.addWidget(self._default)
+        layout_buttons.addWidget(self._new)
+        layout_buttons.addWidget(self._delete)
+        layout_buttons.addWidget(self._default)
 
-        _heading(column, tr("hud.group.text"))
+        text_form = self._add_group(column, tr("hud.group.text"), "hud-group-text")
         self._font = _scale_spin("hud-font-scale")
         self._font.valueChanged.connect(self._on_font)
-        _row(column, tr("hud.font_scale"), self._font)
+        text_form.addRow(_form_label(tr("hud.font_scale")), self._font)
+        self._text_scales: dict[str, QSpinBox] = {}
+        for role in TEXT_ROLES:
+            scale = _scale_spin(f"hud-text-{role}")
+            scale.valueChanged.connect(lambda value, name=role: self._on_text_scale(name, value))
+            self._text_scales[role] = scale
+            caption = _form_label(tr(f"hud.sample.{role}"))
+            text_form.addRow(caption, scale)
+            self._board_only.extend((caption, scale))
+
+        alignment_form = self._add_group(column, tr("hud.group.alignment"), "hud-group-alignment")
         self._alignment = QComboBox()
         self._alignment.setObjectName("hud-alignment")
         for key in ("center", "left", "right"):
             self._alignment.addItem(tr(f"hud.alignment.{key}"), key)
         self._alignment.currentIndexChanged.connect(self._on_alignment)
-        _row(column, tr("hud.alignment"), self._alignment)
+        alignment_form.addRow(_form_label(tr("hud.alignment")), self._alignment)
+        self._live_groups.append(self._groups["hud-group-alignment"])
 
-        _heading(column, tr("hud.group.fields"))
-        self._visible: dict[str, QCheckBox] = {}
+        fields_form = self._add_group(column, tr("hud.group.fields"), "hud-group-fields")
+        self._display: dict[str, QComboBox] = {}
         self._scales: dict[str, QSpinBox] = {}
         for field_id in FIELD_IDS:
-            checkbox = QCheckBox(tr(f"hud.field.{field_id}"))
-            checkbox.setObjectName(f"hud-visible-{field_id}")
+            combo = QComboBox()
+            combo.setObjectName(f"hud-display-{field_id}")
+            for mode in DISPLAY_MODES:
+                combo.addItem(tr(f"hud.display.{mode}"), mode)
             scale = _scale_spin(f"hud-scale-{field_id}")
-            checkbox.toggled.connect(
-                lambda checked, field=field_id: self._on_visible(field, checked)
+            combo.currentIndexChanged.connect(
+                lambda _index, field=field_id: self._on_display(field)
             )
             scale.valueChanged.connect(
                 lambda value, field=field_id: self._on_field_scale(field, value)
             )
-            column.addWidget(checkbox)
-            column.addWidget(scale)
-            self._visible[field_id] = checkbox
+            self._display[field_id] = combo
             self._scales[field_id] = scale
+            fields_form.addRow(_form_label(tr(f"hud.field.{field_id}")), _field_pair(combo, scale))
+        records = QComboBox()
+        records.setObjectName("hud-display-records")
+        for mode in DISPLAY_MODES:
+            records.addItem(tr(f"hud.display.{mode}"), mode)
+        records.currentIndexChanged.connect(self._on_records)
+        self._records = records
+        fields_form.addRow(_form_label(tr("hud.panel.records")), records)
+        self._live_groups.append(self._groups["hud-group-fields"])
 
-        _heading(column, tr("hud.group.shares"))
+        share_form = self._add_group(column, tr("hud.group.shares"), "hud-group-shares")
         self._shares: dict[str, QSpinBox] = {}
         for part in ("clock", "status", "lanes", "ranking"):
             spin = QSpinBox()
@@ -579,13 +763,14 @@ class HudEditor(QWidget):
             spin.setRange(SHARE_MIN, SHARE_MAX)
             spin.valueChanged.connect(lambda value, name=part: self._on_share(name, value))
             self._shares[part] = spin
-            _row(column, tr(f"hud.share.{part}"), spin)
+            share_form.addRow(_form_label(tr(f"hud.share.{part}")), spin)
+        self._live_groups.append(self._groups["hud-group-shares"])
 
-        _heading(column, tr("hud.group.lights"))
+        lights_form = self._add_group(column, tr("hud.group.lights"), "hud-group-lights")
         self._lights_visible = QCheckBox(tr("hud.lights.visible"))
         self._lights_visible.setObjectName("hud-lights-visible")
         self._lights_visible.toggled.connect(self._on_lights_visible)
-        column.addWidget(self._lights_visible)
+        lights_form.addRow(self._lights_visible)
         self._light_spins: dict[str, QSpinBox] = {}
         for axis in ("x", "y"):
             spin = QSpinBox()
@@ -594,61 +779,113 @@ class HudEditor(QWidget):
             spin.setRange(0, 100)
             spin.valueChanged.connect(self._on_light_spin)
             self._light_spins[axis] = spin
-            _row(column, tr(f"hud.lights.{axis}"), spin)
+            lights_form.addRow(_form_label(tr(f"hud.lights.{axis}")), spin)
         self._light_scale = QSlider(Qt.Orientation.Horizontal)
         self._light_scale.setObjectName("hud-lights-scale")
         self._light_scale.setRange(20, 200)
+        self._light_scale.setMinimumWidth(80)
         self._light_scale.valueChanged.connect(self._on_light_scale)
         self._light_readout = QLabel("100 %")
         self._light_readout.setObjectName("hud-lights-scale-readout")
-        scale_row = QWidget()
-        scale_line = QHBoxLayout(scale_row)
-        scale_line.setContentsMargins(0, 0, 0, 0)
-        scale_line.addWidget(self._light_scale, 1)
-        scale_line.addWidget(self._light_readout)
-        _row(column, tr("hud.lights.scale"), scale_row)
-        column.addWidget(_button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights))
+        lights_form.addRow(
+            _form_label(tr("hud.lights.scale")),
+            _field_pair(self._light_scale, self._light_readout),
+        )
+        reset_lights = _button("hud-lights-reset", tr("hud.lights.reset"), self.reset_lights)
+        lights_layout = self._groups["hud-group-lights"].layout()
+        assert lights_layout is not None
+        lights_layout.addWidget(reset_lights)
+        self._live_groups.append(self._groups["hud-group-lights"])
 
-        _heading(column, tr("hud.group.preview"))
+        preview_form = self._add_group(column, tr("hud.group.preview"), "hud-group-preview")
         self._status = QComboBox()
         self._status.setObjectName("hud-preview-status")
         for key, label_key in _PREVIEW_STATUSES:
             self._status.addItem(tr(label_key), key)
         self._status.currentIndexChanged.connect(self._on_preview_status)
-        _row(column, tr("hud.preview.status"), self._status)
+        preview_form.addRow(_form_label(tr("hud.preview.status")), self._status)
+        self._preview_mode_combo = QComboBox()
+        self._preview_mode_combo.setObjectName("hud-preview-mode")
+        self._preview_mode_combo.addItem(tr("race.wizard.mode.laps"), RaceMode.LAPS.value)
+        self._preview_mode_combo.addItem(
+            tr("race.wizard.mode.time_trial"), RaceMode.TIME_TRIAL.value
+        )
+        self._preview_mode_combo.currentIndexChanged.connect(self._on_preview_mode)
+        preview_form.addRow(_form_label(tr("hud.preview.mode")), self._preview_mode_combo)
         self._lanes = QSpinBox()
         self._lanes.setObjectName("hud-preview-lanes")
         self._lanes.setRange(2, 4)
         self._lanes.valueChanged.connect(self._on_preview_lanes)
-        _row(column, tr("hud.preview.lanes"), self._lanes)
+        preview_form.addRow(_form_label(tr("hud.preview.lanes")), self._lanes)
+        self._live_groups.append(self._groups["hud-group-preview"])
 
-        column.addWidget(_button("hud-standard", tr("hud.standard"), self.apply_standard_layout))
-        column.addWidget(_button("hud-save-close", tr("hud.save_close"), self.save_and_close))
-        column.addWidget(_button("hud-revert", tr("hud.revert"), self.revert))
+        self._add_group(column, tr("hud.group.actions"), "hud-group-actions")
+        action_buttons = self._groups["hud-group-actions"].layout()
+        assert action_buttons is not None
+        for button in (
+            _button("hud-standard", tr("hud.standard"), self.apply_standard_layout),
+            _button("hud-save-close", tr("hud.save_close"), self.save_and_close),
+            _button("hud-revert", tr("hud.revert"), self.revert),
+        ):
+            action_buttons.addWidget(button)
         column.addStretch(1)
 
         scroll = QScrollArea()
         scroll.setObjectName("hud-editor-sidebar")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(form)
-        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        scroll.setMinimumWidth(280)
         self._scroll = scroll
 
         canvas = QWidget()
         canvas.setObjectName("hud-live-canvas")
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        canvas.setMinimumWidth(self.preview.minimumWidth())
         canvas_layout = QVBoxLayout(canvas)
         canvas_layout.setSpacing(0)
+        self.sample = SurfaceSample()
         canvas_layout.addWidget(self.preview, 1)
+        canvas_layout.addWidget(self.sample, 1)
+        self.sample.hide()
         self._canvas_layout = canvas_layout
 
-        layout = QHBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("hud-editor-splitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        splitter.addWidget(scroll)
+        splitter.addWidget(canvas)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self._splitter = splitter
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(scroll)
-        layout.addWidget(canvas, 1)
+        layout.addWidget(splitter)
         self.sync_chrome()
+
+    def _add_group(self, column: QVBoxLayout, title: str, object_name: str) -> QFormLayout:
+        box = QGroupBox(title)
+        box.setObjectName(object_name)
+        box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(SPACE.md, SPACE.lg, SPACE.md, SPACE.md)
+        outer.setSpacing(SPACE.sm)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        form.setHorizontalSpacing(SPACE.md)
+        form.setVerticalSpacing(SPACE.sm)
+        outer.addLayout(form)
+        column.addWidget(box)
+        self._groups[object_name] = box
+        return form
 
     def _commit(self, layout: HudLayout) -> None:
         self._config = replace_layout(replace(self._config, selected_id=layout.id), layout)
@@ -663,13 +900,27 @@ class HudEditor(QWidget):
         return replace(self.selected_layout(), fields=fields)
 
     def _apply_preview(self) -> None:
+        live = self._surface == VIEW_LIVE
+        self.preview.setVisible(live)
+        self.sample.setVisible(not live)
+        if not live:
+            self.lights.hide()
+            self.handle.hide()
+            self.sample.show_style(self.selected_layout().view(self._surface), self._translator)
+            return
         self.stage.apply_layout(self.selected_layout())
         self._show_sample()
         self._place_lights()
 
     def _show_sample(self) -> None:
         snapshot, message_key = _sample(self._preview_status, self._preview_lanes)
-        self.stage.show_standings(snapshot, mode=RaceMode.LAPS, lane_count=self._preview_lanes)
+        duration = 5 if self._preview_mode is RaceMode.TIME_TRIAL else None
+        self.stage.show_standings(
+            snapshot,
+            mode=self._preview_mode,
+            lane_count=self._preview_lanes,
+            duration_minutes=duration,
+        )
         self.stage.messages.message_label.setText(self._translator.translate(message_key))
 
     def _fill_form(self) -> None:
@@ -692,13 +943,29 @@ class HudEditor(QWidget):
                 self._translator.format("hud.layout.default_mark", name=default.name)
             )
             self._delete.setEnabled(not layout.builtin)
-            self._font.setValue(layout.font_scale)
+            live = self._surface == VIEW_LIVE
+            for widget in self._live_groups:
+                widget.setVisible(live)
+            for widget in self._board_only:
+                widget.setVisible(not live)
+            self._lock_settings()
+            view_index = self._views.findData(self._surface)
+            self._views.setCurrentIndex(max(view_index, 0))
+            surface = layout.view(self._surface)
+            self._font.setValue(layout.font_scale if live else surface.font_scale)
             alignment = self._alignment.findData(layout.alignment)
             self._alignment.setCurrentIndex(max(alignment, 0))
-            for field_id, checkbox in self._visible.items():
+            for role, spin in self._text_scales.items():
+                spin.setValue(surface.text_scale(role))
+            for field_id, combo in self._display.items():
                 style = layout.field(field_id)
-                checkbox.setChecked(style.visible)
+                mode = DISPLAY_HIDE if not style.visible else style.display
+                combo.setCurrentIndex(max(combo.findData(mode), 0))
                 self._scales[field_id].setValue(style.scale)
+            records = layout.view(VIEW_LIVE).panel(PANEL_RECORDS)
+            self._records.setCurrentIndex(max(self._records.findData(records), 0))
+            mode_index = self._preview_mode_combo.findData(self._preview_mode.value)
+            self._preview_mode_combo.setCurrentIndex(max(mode_index, 0))
             self._shares["clock"].setValue(layout.clock_share)
             self._shares["status"].setValue(layout.status_share)
             self._shares["lanes"].setValue(layout.lanes_share)
@@ -811,7 +1078,12 @@ class HudEditor(QWidget):
         if snapped != value:
             self._font.setValue(snapped)
             return
-        if snapped != self.selected_layout().font_scale:
+        current = (
+            self.selected_layout().font_scale
+            if self._surface == VIEW_LIVE
+            else self.selected_layout().view(self._surface).font_scale
+        )
+        if snapped != current:
             self.set_font_scale(snapped)
 
     def _on_alignment(self) -> None:
@@ -821,10 +1093,48 @@ class HudEditor(QWidget):
         if isinstance(alignment, str):
             self.set_alignment(alignment)
 
-    def _on_visible(self, field_id: str, visible: bool) -> None:
-        if self._filling or visible == self.selected_layout().field(field_id).visible:
+    def _on_view(self) -> None:
+        if self._filling:
             return
-        self.set_field_visible(field_id, visible)
+        view_id = self._views.currentData()
+        if isinstance(view_id, str):
+            self.select_view(view_id)
+
+    def _on_display(self, field_id: str) -> None:
+        if self._filling:
+            return
+        mode = self._display[field_id].currentData()
+        if not isinstance(mode, str):
+            return
+        style = self.selected_layout().field(field_id)
+        shown = DISPLAY_HIDE if not style.visible else style.display
+        if mode != shown:
+            self.set_field_display(field_id, mode)
+
+    def _on_text_scale(self, role: str, value: int) -> None:
+        if self._filling or self._surface == VIEW_LIVE:
+            return
+        snapped = snap_scale(value)
+        if snapped != value:
+            self._text_scales[role].setValue(snapped)
+            return
+        if snapped != self.selected_layout().view(self._surface).text_scale(role):
+            self.set_text_scale(role, snapped)
+
+    def _on_records(self) -> None:
+        if self._filling:
+            return
+        mode = self._records.currentData()
+        current = self.selected_layout().view(VIEW_LIVE).panel(PANEL_RECORDS)
+        if isinstance(mode, str) and mode != current:
+            self.set_panel_display(PANEL_RECORDS, mode)
+
+    def _on_preview_mode(self) -> None:
+        if self._filling:
+            return
+        value = self._preview_mode_combo.currentData()
+        self._preview_mode = RaceMode.LAPS if value is None else RaceMode(str(value))
+        self._show_sample()
 
     def _on_field_scale(self, field_id: str, value: int) -> None:
         if self._filling:
@@ -911,18 +1221,55 @@ def _button(object_name: str, text: str, slot: Callable[[], None]) -> QPushButto
     return button
 
 
-def _heading(parent: QVBoxLayout, text: str) -> None:
+def _form_label(text: str) -> QLabel:
     label = QLabel(text)
-    set_role(label, "section")
-    parent.addWidget(label)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+    return label
 
 
-def _row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
-    line = QHBoxLayout()
-    caption = QLabel(label)
-    line.addWidget(caption)
-    line.addWidget(widget, 1)
-    parent.addLayout(line)
+def _field_pair(primary: QWidget, secondary: QWidget) -> QWidget:
+    """One field: the main control grows, the second keeps the width of its text."""
+    host = QWidget()
+    line = QHBoxLayout(host)
+    line.setContentsMargins(0, 0, 0, 0)
+    line.setSpacing(SPACE.sm)
+    primary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    secondary.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    line.addWidget(primary, 1)
+    line.addWidget(secondary, 0)
+    return host
+
+
+def _combo_min_width(combo: QComboBox) -> int:
+    combo.ensurePolished()
+    metrics = combo.fontMetrics()
+    widest = 0
+    for index in range(combo.count()):
+        widest = max(widest, metrics.horizontalAdvance(combo.itemText(index)))
+    dropdown = combo.style().pixelMetric(QStyle.PixelMetric.PM_MenuButtonIndicator, None, combo)
+    frame = combo.style().pixelMetric(QStyle.PixelMetric.PM_ComboBoxFrameWidth, None, combo)
+    return widest + dropdown + frame * 2 + SPACE.md
+
+
+def _spin_min_width(spin: QSpinBox) -> int:
+    spin.ensurePolished()
+    sample = f"{spin.prefix()}{spin.textFromValue(spin.maximum())}{spin.suffix()}"
+    text = spin.fontMetrics().horizontalAdvance(sample)
+    arrow = spin.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent, None, spin)
+    frame = spin.style().pixelMetric(QStyle.PixelMetric.PM_SpinBoxFrameWidth, None, spin)
+    return text + arrow + frame * 2 + SPACE.sm
+
+
+def _button_min_width(button: QPushButton) -> int:
+    button.ensurePolished()
+    text = button.fontMetrics().horizontalAdvance(button.text())
+    return text + _BUTTON_CHROME + _DIALOG_TEXT_SPARE
+
+
+def _label_min_width(label: QLabel) -> int:
+    label.ensurePolished()
+    return label.fontMetrics().horizontalAdvance(label.text()) + SPACE.xs
 
 
 class HudEditorWindow(QMainWindow):

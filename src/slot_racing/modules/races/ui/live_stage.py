@@ -105,7 +105,12 @@ class LiveHudStage(QScrollArea):
         return self._layout_spec
 
     def show_standings(
-        self, snapshot: RaceSnapshot, *, mode: RaceMode, lane_count: int
+        self,
+        snapshot: RaceSnapshot,
+        *,
+        mode: RaceMode,
+        lane_count: int,
+        duration_minutes: int | None = None,
     ) -> tuple[str, str]:
         """Paint one snapshot. Returns the status text and tone for a sibling board."""
         status_text, tone = status_presentation(self._translator, snapshot)
@@ -124,7 +129,12 @@ class LiveHudStage(QScrollArea):
             [row.lane for row in snapshot.rows],
         )
         self.ranking.present()
-        self.lanes.show_snapshot(snapshot, lane_count=lane_count, mode=mode)
+        self.lanes.show_snapshot(
+            snapshot,
+            lane_count=lane_count,
+            mode=mode,
+            duration_minutes=duration_minutes,
+        )
         return status_text, tone
 
 

@@ -6,6 +6,7 @@ import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QDropEvent, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -64,6 +65,23 @@ def test_duplicating_instances_keeps_the_definition_and_the_spacing() -> None:
     assert clones[1].x_mm - clones[0].x_mm == plan.instances[1].x_mm - plan.instances[0].x_mm
     assert clones[0].rotation_z_deg == 37
     assert plan.instances[0].x_mm == 10
+
+
+def test_enter_saves_the_open_plan_and_does_not_delete_the_track(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heim", lanes=2)
+    window, page = open_page(qtbot, env, "track_planner")
+    window.show()
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    page.track_combo.setFocus()
+    QTest.keyClick(page.track_combo, Qt.Key.Key_Return)
+    assert page.isVisible()
+    assert window.isVisible()
+    assert page.status.text() == "Streckenplan gespeichert."
+    page.delete_track_button.setFocus()
+    QTest.keyClick(page.delete_track_button, Qt.Key.Key_Return)
+    assert page.isVisible()
+    assert page.track_combo.findData(track.id) >= 0
 
 
 def test_the_library_is_the_only_part_source_and_can_be_dropped(qtbot: QtBot, env: Env) -> None:

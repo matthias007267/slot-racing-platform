@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QFormLayout, QLayout, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -293,6 +294,22 @@ def test_a_virtual_camera_is_listed_by_name_and_backend(qtbot: QtBot) -> None:
     again, _preview = open_page(qtbot, CameraConfigurationStore(stored), NamedOpener())
     assert again.device.currentData() == "1|dshow"
     assert again.device.currentText() == "iVCam · DirectShow"
+
+
+def test_enter_saves_the_camera_page_without_closing_or_cancelling(qtbot: QtBot) -> None:
+    stored = database()
+    page, _opener = open_page(qtbot, CameraConfigurationStore(stored), FakeOpener(indices=(0, 1)))
+    draw_sample(qtbot, page)
+    page.fps.setCurrentIndex(page.fps.findData(25))
+    page.position.setFocus()
+    QTest.keyClick(page.position, Qt.Key.Key_Return)
+    assert page.isVisible()
+    assert CameraConfigurationStore(stored).load().camera.fps == 25
+    page.fps.setCurrentIndex(page.fps.findData(30))
+    page.cancel.setFocus()
+    QTest.keyClick(page.cancel, Qt.Key.Key_Return)
+    assert page.isVisible()
+    assert page.fps.currentData() == 30
 
 
 def test_25_fps_can_be_chosen_and_is_saved(qtbot: QtBot) -> None:

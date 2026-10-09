@@ -650,14 +650,23 @@ def test_wizard_blocks_empty_steps(qtbot: QtBot, env: Env) -> None:
     assert isinstance(page, RacesPage)
     page.new_race()
     wizard = page.wizard
-    assert not wizard.go_next()
-    assert "Namen" in wizard.status.text()
-    wizard.name_edit.setText("R")
+    # A new race already carries a unique date-and-time name, so this step is valid.
+    assert wizard.name_edit.text().strip()
     assert wizard.go_next()
     assert not wizard.go_next()  # no track exists
     assert "Strecke" in wizard.status.text()
     wizard.go_back()
     assert wizard.step == NAME
+    wizard.name_edit.clear()
+    assert not wizard.go_next()
+    assert "Namen" in wizard.status.text()
+    assert wizard.step == NAME
+    wizard.name_edit.setText("   ")
+    assert not wizard.go_next()
+    assert "Namen" in wizard.status.text()
+    wizard.name_edit.setText("R")
+    assert wizard.go_next()
+    assert wizard.step == TRACK
 
 
 def test_the_wizard_blocks_a_race_when_no_drivers_exist(qtbot: QtBot, env: Env) -> None:

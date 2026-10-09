@@ -6,16 +6,17 @@ from dataclasses import replace
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
+    QSplitter,
     QWidget,
 )
 from pytestqt.qtbot import QtBot
@@ -27,6 +28,8 @@ from slot_racing.modules.races.hud import (
     FIELD_DRIVER,
     HUD_CONFIGURATION_KEY,
     LIGHT_ASPECT,
+    LIGHT_UNIT_WIDTH,
+    VIEW_IDS,
     HudConfiguration,
     HudConfigurationStore,
     LightFrame,
@@ -67,8 +70,8 @@ def test_visibility_alignment_and_shares_change_the_live_surface(qtbot: QtBot) -
     editor = _shown(qtbot)
     editor.set_field_visible(FIELD_DRIVER, False)
     card = editor.stage.lanes.cards[1]
-    checkbox = editor.findChild(QCheckBox, "hud-visible-driver")
-    assert checkbox is not None and checkbox.isChecked() is False
+    display = editor.findChild(QComboBox, "hud-display-driver")
+    assert display is not None and display.currentData() == "hide"
     assert not card.driver_label.isVisibleTo(card)
     editor.set_field_visible(FIELD_DRIVER, True)
     assert card.driver_label.isVisibleTo(card)
@@ -303,30 +306,14 @@ def test_the_editor_stage_matches_the_live_hud_area(qtbot: QtBot, env: Env) -> N
     QApplication.processEvents()
     page = window.current_page()
     editor = editor_window.editor
-    sidebar = editor.findChild(QWidget, "hud-editor-sidebar")
-    navigation = window.findChild(QWidget, "sidebar")
-    assert sidebar is not None and navigation is not None
-    assert sidebar.width() == navigation.width()
+    sidebar = editor.findChild(QScrollArea, "hud-editor-sidebar")
+    canvas = editor.findChild(QWidget, "hud-live-canvas")
+    splitter = editor.findChild(QSplitter, "hud-editor-splitter")
+    assert sidebar is not None and canvas is not None and splitter is not None
     assert editor.match_live() is True
+    assert sidebar.geometry().right() < canvas.geometry().left()
+    assert not sidebar.geometry().intersects(canvas.geometry())
     qtbot.waitUntil(lambda: editor.stage.width() > 200 and page.width() > 200)
-    assert (editor.stage.width(), editor.stage.height()) == (page.width(), page.height())
-
-    live = LiveRaceView(
-        env.runtime.translator,
-        env.controller,
-        env.runtime.services.get(HudConfigurationStore),
-        env.races,
-        env.runtime.config,
-    )
-    qtbot.addWidget(live)
-    live.resize(page.size())
-    live.show()
-    QApplication.processEvents()
-    assert (live.stage.width(), live.stage.height()) == (page.width(), page.height())
-    assert (editor.stage.width(), editor.stage.height()) == (
-        live.stage.width(),
-        live.stage.height(),
-    )
     matched = editor.stage.size()
     editor.set_match_live(False)
     QApplication.processEvents()
@@ -335,6 +322,44 @@ def test_the_editor_stage_matches_the_live_hud_area(qtbot: QtBot, env: Env) -> N
     editor.set_match_live(True)
     QApplication.processEvents()
     assert editor.stage.size() == matched
+
+
+def test_settings_stay_apart_in_a_small_window_and_at_larger_fonts(qtbot: QtBot) -> None:
+    editor = _shown(qtbot)
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    original = app.font()
+    form = editor.findChild(QWidget, "hud-editor-form")
+    sidebar = editor.findChild(QScrollArea, "hud-editor-sidebar")
+    canvas = editor.findChild(QWidget, "hud-live-canvas")
+    assert form is not None and sidebar is not None and canvas is not None
+    assert sidebar.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert sidebar.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    try:
+        for factor in (1.0, 1.25, 1.5, 2.0):
+            scaled = QFont(original)
+            point = original.pointSizeF() if original.pointSizeF() > 0 else 10.0
+            scaled.setPointSizeF(point * factor)
+            app.setFont(scaled)
+            editor.setFont(scaled)
+            for width, height in ((960, 520), (1280, 760)):
+                editor.resize(width, height)
+                QApplication.processEvents()
+                for view_id in VIEW_IDS:
+                    editor.select_view(view_id)
+                    QApplication.processEvents()
+                    assert _overlaps(form) == []
+                    view = editor.findChild(QComboBox, "hud-view")
+                    assert view is not None and view.width() >= _longest_item(view)
+                    assert sidebar.geometry().right() < canvas.geometry().left()
+                    assert not sidebar.geometry().intersects(canvas.geometry())
+                    assert canvas.width() > 200
+                    save = editor.findChild(QPushButton, "hud-save-close")
+                    assert save is not None
+                    assert _inside(save, form)
+    finally:
+        app.setFont(original)
+        editor.setFont(original)
 
 
 def test_editor_changes_show_up_immediately_and_layouts_still_save(qtbot: QtBot, env: Env) -> None:
@@ -460,6 +485,7 @@ def test_one_slider_and_the_grip_scale_the_gantry_together(qtbot: QtBot) -> None
     cards = _card_boxes(editor)
     others = editor.selected_layout()
     before = editor.lights.width()
+    before_lamp = editor.lights.lamp_rects()[0].width()
     slider.setValue(high)
     QApplication.processEvents()
     grown = editor.selected_layout().lights
@@ -467,7 +493,12 @@ def test_one_slider_and_the_grip_scale_the_gantry_together(qtbot: QtBot) -> None
     assert readout.text() == f"{high} %"
     assert slider.value() == high
     assert editor.lights.width() > before
-    assert editor.lights.lamp_rects()[0].width() > 92
+    # The settings column keeps the width of its labels, so a wider Windows font
+    # leaves a narrower stage. The largest gantry is that stage, not a fixed pixel size.
+    lamp = editor.lights.lamp_rects()[0].width()
+    assert lamp > before_lamp
+    assert abs(lamp - editor.lights.width() / LIGHT_UNIT_WIDTH) < 1
+    assert lamp / before_lamp == pytest.approx(high / 100, rel=0.05)
     _assert_locked_aspect(editor)
     _assert_placed(editor)
     assert _surface(editor) == surface
@@ -601,6 +632,48 @@ def _assert_preview_lanes(editor: HudEditor, count: int) -> None:
 
 def _card_boxes(editor: HudEditor) -> tuple[QRect, ...]:
     return tuple(card.geometry() for card in editor.stage.lanes.cards.values())
+
+
+def _longest_item(combo: QComboBox) -> int:
+    metrics = combo.fontMetrics()
+    return max(metrics.horizontalAdvance(combo.itemText(index)) for index in range(combo.count()))
+
+
+def _overlaps(root: QWidget) -> list[str]:
+    """Sibling controls that share more than a border. Hidden rows are skipped."""
+    problems: list[str] = []
+
+    def walk(widget: QWidget) -> None:
+        visible = [
+            child
+            for child in widget.children()
+            if isinstance(child, QWidget) and child.isVisible() and child.width() > 1
+        ]
+        for index, left in enumerate(visible):
+            left_rect = left.geometry()
+            for right in visible[index + 1 :]:
+                shared = left_rect.intersected(right.geometry())
+                if shared.width() > 2 and shared.height() > 2:
+                    problems.append(
+                        f"{left.objectName() or type(left).__name__} x "
+                        f"{right.objectName() or type(right).__name__}"
+                    )
+            if not _inside(left, widget):
+                problems.append(f"{left.objectName() or type(left).__name__} outside parent")
+            walk(left)
+
+    walk(root)
+    return problems
+
+
+def _inside(child: QWidget, parent: QWidget) -> bool:
+    origin = child.mapTo(parent, QPoint(0, 0))
+    return (
+        origin.x() >= -1
+        and origin.y() >= -1
+        and origin.x() + child.width() <= parent.width() + 1
+        and origin.y() + child.height() <= parent.height() + 1
+    )
 
 
 def _main(qtbot: QtBot, env: Env) -> MainWindow:

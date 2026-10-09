@@ -97,6 +97,7 @@ from slot_racing.modules.track_planner.ui.flow_layout import FlowHost, retain_co
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.library_view import PartLibrary
+from slot_racing.uikit.enter import bind_enter
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import SPACE, configure_page, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
@@ -571,6 +572,7 @@ class PlannerPage(QWidget):
         layout.addWidget(body_scroll, 1)
         layout.addWidget(self.status)
         trace("TRACK_PLANNER_OPEN", result="opened")
+        bind_enter(self, self.save)
         self._refresh_tracks()
 
     def plan(self) -> TrackPlan:
