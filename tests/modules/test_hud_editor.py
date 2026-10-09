@@ -28,6 +28,7 @@ from slot_racing.modules.races.hud import (
     FIELD_DRIVER,
     HUD_CONFIGURATION_KEY,
     LIGHT_ASPECT,
+    LIGHT_UNIT_WIDTH,
     VIEW_IDS,
     HudConfiguration,
     HudConfigurationStore,
@@ -484,6 +485,7 @@ def test_one_slider_and_the_grip_scale_the_gantry_together(qtbot: QtBot) -> None
     cards = _card_boxes(editor)
     others = editor.selected_layout()
     before = editor.lights.width()
+    before_lamp = editor.lights.lamp_rects()[0].width()
     slider.setValue(high)
     QApplication.processEvents()
     grown = editor.selected_layout().lights
@@ -491,7 +493,12 @@ def test_one_slider_and_the_grip_scale_the_gantry_together(qtbot: QtBot) -> None
     assert readout.text() == f"{high} %"
     assert slider.value() == high
     assert editor.lights.width() > before
-    assert editor.lights.lamp_rects()[0].width() > 92
+    # The settings column keeps the width of its labels, so a wider Windows font
+    # leaves a narrower stage. The largest gantry is that stage, not a fixed pixel size.
+    lamp = editor.lights.lamp_rects()[0].width()
+    assert lamp > before_lamp
+    assert abs(lamp - editor.lights.width() / LIGHT_UNIT_WIDTH) < 1
+    assert lamp / before_lamp == pytest.approx(high / 100, rel=0.05)
     _assert_locked_aspect(editor)
     _assert_placed(editor)
     assert _surface(editor) == surface
