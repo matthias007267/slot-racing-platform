@@ -185,6 +185,56 @@ class StoredCamera(BaseModel):
         return value
 
 
+class StoredCalibrationPolygon(BaseModel):
+    """The search outline for one zone. It is not a detection rectangle.
+
+    Older documents omit the list. A race never reads it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    position_id: str
+    lane: int
+    points: tuple[tuple[float, float], ...]
+
+    @field_validator("position_id", mode="before")
+    @classmethod
+    def _position(cls, value: object) -> str:
+        try:
+            return require_position_id(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+
+    @field_validator("lane", mode="before")
+    @classmethod
+    def _lane(cls, value: object) -> int:
+        try:
+            return require_range("lane", value, 1)
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+
+    @field_validator("points", mode="before")
+    @classmethod
+    def _points(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("polygon points must be a list")
+        points: list[tuple[float, float]] = []
+        for point in value:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError("a polygon point must be a pair")
+            x_value, y_value = point
+            if isinstance(x_value, bool) or isinstance(y_value, bool):
+                raise ValueError("polygon points must be numbers")
+            if not isinstance(x_value, (int, float)) or not isinstance(y_value, (int, float)):
+                raise ValueError("polygon points must be numbers")
+            if not 0 <= float(x_value) <= 1 or not 0 <= float(y_value) <= 1:
+                raise ValueError("polygon points must lie inside the frame")
+            points.append((float(x_value), float(y_value)))
+        if len(points) < 3 or len(points) > 24:
+            raise ValueError("a calibration polygon needs between 3 and 24 points")
+        return tuple(points)
+
+
 class CameraConfiguration(BaseModel):
     """The whole saved camera setup. ``version`` is the document format."""
 
@@ -193,6 +243,27 @@ class CameraConfiguration(BaseModel):
     version: int = SCHEMA_VERSION
     camera: StoredCamera = Field(default_factory=StoredCamera)
     detection: StoredDetection = Field(default_factory=StoredDetection)
+    calibration_polygons: tuple[StoredCalibrationPolygon, ...] = ()
+
+    @field_validator("calibration_polygons", mode="before")
+    @classmethod
+    def _polygons(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def _unique_polygons(self) -> CameraConfiguration:
+        seen: set[tuple[str, int]] = set()
+        for polygon in self.calibration_polygons:
+            key = (polygon.position_id, polygon.lane)
+            if key in seen:
+                raise ValueError(
+                    f"duplicate calibration polygon for position {polygon.position_id!r} "
+                    f"lane {polygon.lane}"
+                )
+            seen.add(key)
+        return self
 
     @field_validator("version", mode="before")
     @classmethod

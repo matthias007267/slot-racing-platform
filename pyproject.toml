@@ -176,6 +176,10 @@ name = "Camera timing logic does not know the UI"
 type = "forbidden"
 source_modules = [
     "slot_racing.modules.timing_camera._checks",
+    "slot_racing.modules.timing_camera.calibration",
+    "slot_racing.modules.timing_camera.calibration_analysis",
+    "slot_racing.modules.timing_camera.calibration_polygon",
+    "slot_racing.modules.timing_camera.calibration_recording",
     "slot_racing.modules.timing_camera.camera_config",
     "slot_racing.modules.timing_camera.capture",
     "slot_racing.modules.timing_camera.configuration",

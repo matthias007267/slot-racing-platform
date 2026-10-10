@@ -75,6 +75,7 @@ class CameraTimingPlugin(Plugin):
             "camera.action.refresh": "Kamera aktualisieren",
             "camera.action.cancel": "Abbrechen",
             "camera.action.save": "Speichern",
+            "camera.action.calibrate": "Kamera kalibrieren",
             "camera.diagnostic.open": "Erkennungsdiagnose",
             "camera.diagnostic.title": "Erkennungsdiagnose",
             "camera.diagnostic.start": "Diagnose starten",
@@ -177,6 +178,107 @@ class CameraTimingPlugin(Plugin):
                 "Die Datenbank konnte die Aktion nicht ausführen. Bitte versuchen Sie es erneut."
             ),
             "error.unexpected": "Unerwarteter Fehler: {detail}",
+            "calibration.title": "Kamera kalibrieren",
+            "calibration.zone": "Erkennungszone",
+            "calibration.laps": "Testrunden",
+            "calibration.next": "Weiter",
+            "calibration.back": "Zurück",
+            "calibration.start": "Kalibrierung starten",
+            "calibration.done": "Fertig",
+            "calibration.restart": "Neustart",
+            "calibration.cancel": "Abbrechen",
+            "calibration.apply": "Kalibrierung übernehmen",
+            "calibration.again": "Erneut kalibrieren",
+            "calibration.prompt": "Bitte fahre jetzt {laps} vollständige Runden auf Bahn {lane}.",
+            "calibration.polygon_hint": (
+                "Markiere den Suchbereich dieser Bahn im Bild. "
+                "Das Polygon ist nur die Suchfläche der Kalibrierung "
+                "und wird im Rennen nicht verwendet."
+            ),
+            "calibration.reset": "Polygon zurücksetzen",
+            "calibration.no_camera": "Kamera nicht verfügbar.",
+            "calibration.camera_lost": "Die Kamera wurde während der Kalibrierung getrennt.",
+            "calibration.disk": "Der Speicherplatz reicht für die Aufzeichnung nicht aus.",
+            "calibration.overflow": "Die Aufzeichnung hat ihr Speicherlimit erreicht.",
+            "calibration.resolution_changed": (
+                "Die Kamera hat während der Aufzeichnung die Auflösung geändert. "
+                "Es wird nichts übernommen."
+            ),
+            "calibration.analysis_failed": (
+                "Die Auswertung ist fehlgeschlagen. Es wurde nichts übernommen."
+            ),
+            "calibration.no_zone": "Lege zuerst eine Erkennungszone mit Position an.",
+            "calibration.frames": "Aufgenommene Frames: {count}",
+            "calibration.dropped": "Verworfene Frames: {count}",
+            "calibration.fps": "Gemessene Kamera-FPS: {fps}",
+            "calibration.resolution": "Aufnahmeauflösung: {resolution}",
+            "calibration.progress": "Auswertung läuft. Die Oberfläche bleibt bedienbar.",
+            "calibration.shared": (
+                "Empfindlichkeit, Erkennungsauflösung und Fahrtrichtung gelten für alle Zonen. "
+                "Die Rechtecke der anderen Zonen bleiben unverändert."
+            ),
+            "calibration.shared_apply": "Gemeinsame Detektoreinstellungen übernehmen",
+            "calibration.rating.good": "Gut",
+            "calibration.rating.limited": "Eingeschränkt",
+            "calibration.rating.unclear": "Nicht eindeutig",
+            "calibration.rating.insufficient": "Nicht ausreichend",
+            "calibration.result.title": "Kalibrierung {zone}",
+            "calibration.result.target": "Gefahrene Testrunden: {count}",
+            "calibration.result.detected": "Erkannte Durchfahrten: {count}",
+            "calibration.result.missed": "Potenziell verpasste Durchfahrten: {count}",
+            "calibration.result.ghosts": "Verdächtige Fehlauslösungen: {count}",
+            "calibration.result.sensitivity": "Empfohlene Empfindlichkeit: {value}",
+            "calibration.result.zone": (
+                "Empfohlene Erkennungszone: x {x}, y {y}, {width} x {height}"
+            ),
+            "calibration.result.rating": "Bewertung: {rating}",
+            "calibration.polygon.too_few_points": "Mindestens drei Punkte sind erforderlich.",
+            "calibration.polygon.too_many_points": "Das Polygon hat zu viele Punkte.",
+            "calibration.polygon.outside_frame": "Ein Punkt liegt außerhalb des Bildes.",
+            "calibration.polygon.duplicate_point": "Zwei Punkte liegen aufeinander.",
+            "calibration.polygon.empty": "Das Polygon hat keine Fläche.",
+            "calibration.polygon.self_intersection": "Das Polygon darf sich nicht überschneiden.",
+            "calibration.reason.processing_is_block_size": (
+                "Verglichen wurde die vorhandene Erkennungsauflösung. "
+                "Die Aufnahmeauflösung bleibt die aufgezeichnete. "
+                "Eine andere Kameraauflösung ist damit nicht belegt."
+            ),
+            "calibration.reason.short_intervals": (
+                "Auffällig kurze Abstände sprechen für Fehlauslösungen."
+            ),
+            "calibration.reason.long_intervals": (
+                "Ungewöhnlich lange Abstände sprechen für verpasste Durchfahrten."
+            ),
+            "calibration.reason.count_differs": (
+                "Die Anzahl der Durchfahrten weicht von den Testrunden ab. "
+                "Die Rundenzahl ist nur eine Referenz, keine Zuordnung jeder Runde."
+            ),
+            "calibration.reason.intervals_plausible": (
+                "Die Abstände sind gleichmäßig und die Anzahl liegt nah an den Testrunden. "
+                "Die Rundenzahl ordnet einzelne Durchfahrten trotzdem nicht zu."
+            ),
+            "calibration.reason.little_motion": (
+                "In der Aufzeichnung ist zu wenig verwertbare Bewegung."
+            ),
+            "calibration.reason.neighbor_excluded": (
+                "Zonen, die eine andere Bahn schneiden, wurden verworfen."
+            ),
+            "calibration.reason.inside_polygon": (
+                "Die empfohlene Zone liegt vollständig im Suchpolygon."
+            ),
+            "calibration.reason.capture_resolution_differs": (
+                "Die gelieferte Auflösung weicht von der gespeicherten Kameraauflösung ab."
+            ),
+            "calibration.reason.shared_detector_settings": (
+                "Empfindlichkeit, Erkennungsauflösung und Fahrtrichtung "
+                "sind gemeinsame Einstellungen."
+            ),
+            "calibration.reason.recording_unusable": (
+                "Die Aufzeichnung ist unvollständig und wird nicht übernommen."
+            ),
+            "calibration.reason.repeat_calibration": (
+                "Eine erneute Kalibrierung ist sinnvoller als diese Übernahme."
+            ),
         }
     }
 

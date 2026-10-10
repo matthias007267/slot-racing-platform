@@ -40,11 +40,14 @@ from PySide6.QtWidgets import (
 from slot_racing.core.domain.lanes import DEFAULT_LANE_COUNT, MAX_LANE_COUNT, MIN_LANE_COUNT
 from slot_racing.core.errors import ValidationError as InputError
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.timing_camera.calibration import CalibrationProposal
+from slot_racing.modules.timing_camera.calibration_polygon import CalibrationPolygon
 from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, LatestFrameBuffer
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
     NormalizedRoi,
+    StoredCalibrationPolygon,
     StoredCamera,
     StoredDetection,
     StoredDetectionZone,
@@ -63,6 +66,7 @@ from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFra
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.lease import CameraBusyError
 from slot_racing.modules.timing_camera.store import CameraConfigurationError
+from slot_racing.modules.timing_camera.ui.calibration_wizard import CalibrationWizard
 from slot_racing.modules.timing_camera.ui.stage import CameraStage
 from slot_racing.uikit import StatusLabel, describe_error
 from slot_racing.uikit.enter import bind_enter
@@ -125,6 +129,7 @@ class CameraSetupPage(QWidget):
         self._lane_limit = lane_limit or (lambda: MAX_LANE_COUNT)
         self._drafts: list[ZoneDraft] = []
         self._block_size = 20
+        self._polygons: dict[tuple[str, int], CalibrationPolygon] = {}
         self._snapshot: _State = ()
         self._source: FrameSource | None = None
         self._diagnostic_listener: DiagnosticListener | None = None
@@ -189,6 +194,8 @@ class CameraSetupPage(QWidget):
         self.refresh.setObjectName("camera-refresh")
         self.diagnostic = QPushButton(self._tr("camera.diagnostic.open"))
         self.diagnostic.setObjectName("camera-diagnostic")
+        self.calibrate = QPushButton(self._tr("camera.action.calibrate"))
+        self.calibrate.setObjectName("camera-calibrate")
         self.cancel = QPushButton(self._tr("camera.action.cancel"))
         self.cancel.setObjectName("camera-cancel")
         self.save = QPushButton(self._tr("camera.action.save"))
@@ -197,6 +204,7 @@ class CameraSetupPage(QWidget):
         set_role(self.delete_zone, "danger")
         set_role(self.refresh, "secondary")
         set_role(self.diagnostic, "secondary")
+        set_role(self.calibrate, "secondary")
         set_role(self.cancel, "ghost")
         set_role(self.save, "primary")
         self.status = QLabel()
@@ -230,6 +238,7 @@ class CameraSetupPage(QWidget):
         side_layout.addLayout(camera_form)
         side_layout.addWidget(self.refresh)
         side_layout.addWidget(self.diagnostic)
+        side_layout.addWidget(self.calibrate)
         side_layout.addWidget(_section(self._tr("camera.section.zones")))
         side_layout.addWidget(self.zones, 1)
         side_layout.addWidget(self.zone_hint)
@@ -263,6 +272,7 @@ class CameraSetupPage(QWidget):
         self.delete_zone.clicked.connect(self._on_delete)
         self.refresh.clicked.connect(self._on_refresh)
         self.diagnostic.clicked.connect(self._open_diagnostic)
+        self.calibrate.clicked.connect(self._open_calibration)
         self.cancel.clicked.connect(self._on_cancel)
         self.save.clicked.connect(self._on_save)
         bind_enter(self, self._on_save)
@@ -324,6 +334,11 @@ class CameraSetupPage(QWidget):
             for zone in config.detection.zones
         ]
         self._block_size = config.detection.block_size
+        self._polygons = {
+            (polygon.position_id, polygon.lane): CalibrationPolygon(polygon.points)
+            for polygon in config.calibration_polygons
+            if CalibrationPolygon(polygon.points).is_valid
+        }
         self._fill_direction(config.detection.direction)
         self.sensitivity.setValue(config.detection.sensitivity)
         self._show_resolution_control()
@@ -671,6 +686,7 @@ class CameraSetupPage(QWidget):
             self.sensitivity.value(),
             self._block_size,
             zones,
+            tuple(sorted(self._polygons.items())),
         )
 
     def _is_dirty(self) -> bool:
@@ -699,6 +715,15 @@ class CameraSetupPage(QWidget):
                 block_size=self._block_size,
                 sensitivity=self.sensitivity.value(),
                 direction=self._direction(),
+            ),
+            calibration_polygons=tuple(
+                StoredCalibrationPolygon(
+                    position_id=position_id,
+                    lane=lane,
+                    points=polygon.points,
+                )
+                for (position_id, lane), polygon in sorted(self._polygons.items())
+                if polygon.is_valid
             ),
         )
 
@@ -946,6 +971,69 @@ class CameraSetupPage(QWidget):
                     listener(delivered, _capture_counters(source))
                 except Exception:
                     logger.exception("Camera diagnostic rejected a frame")
+
+    def _open_calibration(self) -> None:
+        zones = [
+            (draft.position_id, draft.lane, draft.roi, draft.check_direction)
+            for draft in self._drafts
+            if _complete(draft.position_id)
+        ]
+        if not zones:
+            self._error_key = "calibration.no_zone"
+            self._detail = None
+            self._refresh_status()
+            return
+        width, height = self._resolution()
+        self._timer.stop()
+        wizard = CalibrationWizard(
+            self._translator,
+            zones,
+            self._polygons,
+            direction=self._direction(),
+            sensitivity=self.sensitivity.value(),
+            block_size=self._block_size,
+            saved_width=width,
+            saved_height=height,
+            poll=self._poll_preview if self._source is not None else None,
+            parent=self,
+        )
+        wizard.exec()
+        proposal = wizard.proposal
+        if proposal is not None:
+            self._apply_proposal(proposal)
+        if self.isVisible() and self._source is not None:
+            self._timer.start()
+
+    def _poll_preview(self) -> TimedFrame | None:
+        source = self._source
+        if source is None:
+            return None
+        return source.poll_latest()
+
+    def _apply_proposal(self, proposal: CalibrationProposal) -> None:
+        """Write one zone after the user confirms. Other zone rectangles stay."""
+        for draft in self._drafts:
+            if (draft.position_id, draft.lane) != (proposal.position_id, proposal.lane):
+                continue
+            draft.roi = proposal.roi
+            draft.check_direction = proposal.check_direction
+            break
+        else:
+            return
+        self._polygons[(proposal.position_id, proposal.lane)] = proposal.polygon
+        if proposal.apply_shared:
+            self.sensitivity.setValue(proposal.sensitivity)
+            self._block_size = proposal.block_size
+            self._fill_direction(proposal.direction)
+        self._show_drafts(self.stage.selected_index())
+        try:
+            self.save_persistent()
+        except InputError as error:
+            self._error_key = error.key
+            self._refresh_status()
+            return
+        self._saved_flash = True
+        self._refresh_status()
 
     def _open_diagnostic(self) -> None:
         existing = self._diagnostic_dialog

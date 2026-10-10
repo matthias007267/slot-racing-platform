@@ -62,6 +62,10 @@ class CameraConfigurationStore:
             raise TypeError("configuration must be a CameraConfiguration")
         document = configuration.model_dump(mode="json")
         CameraConfiguration.model_validate(document)
+        # An unused search outline is omitted, so a document that was never
+        # calibrated keeps the keys older versions already stored.
+        if not document.get("calibration_polygons"):
+            document.pop("calibration_polygons", None)
         with self._database.session() as session:
             row = session.get(Setting, CAMERA_CONFIGURATION_KEY)
             if row is None:
