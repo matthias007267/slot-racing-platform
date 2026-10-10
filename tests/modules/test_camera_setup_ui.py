@@ -644,6 +644,79 @@ def test_direction_check_sits_directly_under_the_direction_field(qtbot: QtBot) -
     assert zone_form.indexOf(page.check_direction) < 0
 
 
+def test_zone_hints_do_not_resize_the_preview(qtbot: QtBot) -> None:
+    stored = database()
+    CameraConfigurationStore(stored).save(
+        CameraConfiguration(
+            camera=StoredCamera(width=640, height=480, fps=30),
+            detection=StoredDetection(
+                zones=(
+                    StoredDetectionZone(
+                        position_id="start_finish",
+                        lane=1,
+                        roi=NormalizedRoi(x=0.05, y=0.05, width=0.9, height=0.85),
+                    ),
+                )
+            ),
+        )
+    )
+    page = CameraSetupPage(translator(), CameraConfigurationStore(stored), FakeOpener())
+    page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    page.resize(1100, 720)
+    page.show()
+    qtbot.addWidget(page)
+    qtbot.waitUntil(lambda: page.stage.width() > 300 and page.stage.height() > 200)
+    assert page.zone_hint.text() == ""
+    stable = page.stage.size()
+    zones = page.stage.zones()
+    hint_height = page.zone_hint.height()
+
+    page.zone_hint.setText("Zone 1: Die Zone ist etwas klein.")
+    assert page.stage.size() == stable
+    assert page.zone_hint.height() == hint_height
+    assert page.stage.zones() == zones
+
+    long = "Die Erkennungszone ist in Fahrtrichtung sehr klein. " * 30
+    page.zone_hint.setText(long)
+    qtbot.waitUntil(lambda: page.zone_hint.verticalScrollBar().maximum() > 0)
+    assert page.stage.size() == stable
+    assert page.zone_hint.height() == hint_height
+    assert page.stage.zones() == zones
+    assert page.zone_hint.verticalScrollBar().isVisible() or (
+        page.zone_hint.verticalScrollBar().maximum() > 0
+    )
+
+    page._drafts[0].roi = NormalizedRoi(x=0.4, y=0.4, width=0.05, height=0.05)
+    page._show_drafts(0)
+    short_hint = page.zone_hint.text()
+    assert short_hint
+    assert page.stage.size() == stable
+
+    page.add_zone.click()
+    assert page.zones.count() == 2
+    page.zones.setCurrentRow(0)
+    assert page.stage.size() == stable
+    page.zones.setCurrentRow(1)
+    assert page.stage.size() == stable
+    assert page.zone_hint.height() == hint_height
+
+    for draft in page._drafts:
+        draft.roi = NormalizedRoi(x=0.05, y=0.05, width=0.9, height=0.8)
+    page._show_drafts(0)
+    assert page.zone_hint.text() == ""
+    assert page.stage.size() == stable
+    assert page.zone_hint.verticalScrollBar().maximum() == 0
+
+    page.resize(1300, 860)
+    qtbot.waitUntil(lambda: page.stage.size() != stable)
+    grown = page.stage.size()
+    assert grown.width() > stable.width()
+    assert grown.height() > stable.height()
+    page.zone_hint.setText(long)
+    qtbot.waitUntil(lambda: page.zone_hint.verticalScrollBar().maximum() > 0)
+    assert page.stage.size() == grown
+
+
 def _form_containing(root: QWidget, widget: QWidget) -> QFormLayout:
     found = _search_form(root.layout(), widget)
     assert isinstance(found, QFormLayout)

@@ -21,16 +21,19 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import ValidationError
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QVBoxLayout,
@@ -99,6 +102,73 @@ class CameraSetupPreview(Protocol):
 
     def open(self, config: CameraConfig) -> FrameSource:
         """Start a preview. Raise when the device is missing or already taken."""
+
+
+class _ZoneHint(QScrollArea):
+    """A diagnosis slot with a fixed height.
+
+    A wrapping label reports the unwrapped text as its width and the wrapped
+    text as its height. Either one resizes the settings column and, with it,
+    the preview. This area keeps both hints constant and scrolls the rest.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("camera-zone-hint")
+        self._label = QLabel()
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._label.setMinimumSize(0, 0)
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setWidget(self._label)
+        self.setWidgetResizable(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._height = self.fontMetrics().lineSpacing() * 4 + 8
+        self.setFixedHeight(self._height)
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        policy.setHeightForWidth(False)
+        self.setSizePolicy(policy)
+        self._fitting = False
+
+    def text(self) -> str:
+        return self._label.text()
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        """Replace the diagnosis. The slot height does not follow the text."""
+        self._label.setText(text)
+        self._fit()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return False
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        if self._fitting:
+            return
+        width = self.viewport().width()
+        if width < 2:
+            return
+        self._fitting = True
+        try:
+            wrapped = _wrapped_height(self._label, width)
+            height = max(self.viewport().height(), wrapped)
+            if self._label.width() != width:
+                self._label.setFixedWidth(width)
+            if self._label.height() != height:
+                self._label.setFixedHeight(height)
+        finally:
+            self._fitting = False
 
 
 @dataclass
@@ -179,9 +249,7 @@ class CameraSetupPage(QWidget):
         self.resolution_fine = QLabel(self._tr("camera.resolution.very_fine"))
         self.resolution_value = QLabel()
         self.resolution_value.setObjectName("camera-detection-resolution-value")
-        self.zone_hint = QLabel()
-        self.zone_hint.setObjectName("camera-zone-hint")
-        self.zone_hint.setWordWrap(True)
+        self.zone_hint = _ZoneHint()
         self.zones = QListWidget()
         self.zones.setObjectName("camera-zones")
         self.position = QLineEdit()
@@ -1237,6 +1305,15 @@ def _parse_device(value: object) -> tuple[int, str] | None:
     if not index_text.isdigit() or backend not in {"", "any", "dshow", "msmf"}:
         return None
     return int(index_text), backend
+
+
+def _wrapped_height(label: QLabel, width: int) -> int:
+    """Height of the wrapped diagnosis. Empty text does not keep the previous height."""
+    text = label.text()
+    if not text:
+        return 0
+    flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
+    return label.fontMetrics().boundingRect(0, 0, width, 10_000, flags, text).height() + 4
 
 
 def _section(text: str) -> QLabel:
