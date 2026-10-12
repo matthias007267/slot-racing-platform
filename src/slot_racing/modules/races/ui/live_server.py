@@ -37,6 +37,8 @@ from slot_racing.modules.races.broadcast import (
     MAX_INBOUND_BYTES,
     SOFT_OUTBOUND_BYTES,
     TYPE_SCENE,
+    TYPE_START_COMMITTED,
+    TYPE_START_PHASE,
     TYPE_START_SCHEDULE,
     TYPE_START_SCHEDULE_REVOKED,
     BindError,
@@ -45,6 +47,7 @@ from slot_racing.modules.races.broadcast import (
     BroadcastMailbox,
     DecodedFrame,
     classify_client_message,
+    commit_message,
     decide_access,
     diagnostic_page,
     dump_message,
@@ -56,6 +59,7 @@ from slot_racing.modules.races.broadcast import (
     new_session_token,
     normalize_bind_host,
     parse_http_request,
+    phase_message,
     plan_outbound,
     scene_message_for,
     schedule_message,
@@ -149,7 +153,12 @@ class _Stats:
             self._last_send_ns = time.perf_counter_ns()
             if kind == TYPE_SCENE:
                 self._state += 1
-            elif kind in {TYPE_START_SCHEDULE, TYPE_START_SCHEDULE_REVOKED}:
+            elif kind in {
+                TYPE_START_SCHEDULE,
+                TYPE_START_SCHEDULE_REVOKED,
+                TYPE_START_PHASE,
+                TYPE_START_COMMITTED,
+            }:
                 self._control += 1
 
 
@@ -161,6 +170,8 @@ class _Client:
     hello_sent: bool = False
     scene_seq: int = 0
     schedule_seq: int = 0
+    phase_seq: int = 0
+    commit_seq: int = 0
     rejected: bool = False
     dropped: bool = False
     closing: bool = False
@@ -440,6 +451,8 @@ class _Worker(QObject):
             client.socket.bytesToWrite(),
             hello_due=not client.hello_sent,
             schedule_due=frame.schedule is not None and frame.schedule_seq != client.schedule_seq,
+            phase_due=frame.phase is not None and frame.phase_seq != client.phase_seq,
+            commit_due=frame.commit is not None and frame.commit_seq != client.commit_seq,
             scene_due=frame.scene is not None
             and (frame.scene_seq != client.scene_seq or client.viewport_pending),
             soft_bytes=SOFT_OUTBOUND_BYTES,
@@ -460,6 +473,18 @@ class _Worker(QObject):
                 client, dump_message(document), kind=str(document["type"])
             ):
                 client.schedule_seq = frame.schedule_seq
+        if plan.send_phase:
+            phase = phase_message(frame)
+            if phase is not None and self._send_text(
+                client, dump_message(phase), kind=TYPE_START_PHASE
+            ):
+                client.phase_seq = frame.phase_seq
+        if plan.send_commit:
+            committed = commit_message(frame)
+            if committed is not None and self._send_text(
+                client, dump_message(committed), kind=TYPE_START_COMMITTED
+            ):
+                client.commit_seq = frame.commit_seq
         if plan.send_scene:
             text = self._scene_text(frame, client.viewport)
             if text is not None and self._send_text(client, text, kind=TYPE_SCENE):
@@ -674,6 +699,26 @@ class LiveBroadcast:
             return self._mailbox.publish_schedule(document, revoked=revoked)
         except ValueError:
             logger.error("Live display ignored a schedule that cannot be sent")
+            return 0
+
+    def publish_start_phase(self, document: Mapping[str, object]) -> int:
+        """Copy one reached red phase. A browser cannot make this happen."""
+        if not self._accepting:
+            return 0
+        try:
+            return self._mailbox.publish_start_phase(document)
+        except ValueError:
+            logger.error("Live display ignored a start phase that cannot be sent")
+            return 0
+
+    def publish_start_committed(self, document: Mapping[str, object]) -> int:
+        """Copy a start the engine already stamped. This does not start the race."""
+        if not self._accepting:
+            return 0
+        try:
+            return self._mailbox.publish_start_committed(document)
+        except ValueError:
+            logger.error("Live display ignored a start confirmation that cannot be sent")
             return 0
 
     def clear_scene(self) -> None:

@@ -2,8 +2,9 @@
 
 The page is static. It has no CDN, no external font, and no race command.
 A viewport message asks the PC for a scene of that size. ``planned_go_ns`` is
-not read. While a start sequence is active the lamps stay dark and the page
-shows that synchronization is not available yet.
+not read. Red start lamps follow ``start_phase`` only. They go out only after
+``start_committed`` for the same sequence. A scene, a running status, or a
+lost connection cannot authorize GO. Clock synchronization is a later phase.
 
 Small screens keep the same grid as the PC. The scene already says when that
 grid scrolls. A lane card that is still taller than its box at the fit floor
@@ -14,8 +15,9 @@ reserve check as the PC, measured with the browser's own font.
 
 from __future__ import annotations
 
-# The en dash is the wording requested for the unsynchronized start sequence.
-START_HINT = "Startsequenz – Synchronisation noch nicht verfügbar"  # noqa: RUF001
+START_HINT = "Startampel folgt dem Renn-PC"
+START_LOST = "Startampel unterbrochen - keine Startfreigabe"
+START_RESYNC = "Startampel wird abgeglichen"
 
 _HUD_HTML = """<!DOCTYPE html>
 <html lang="de">
@@ -117,8 +119,9 @@ _HUD_HTML = """<!DOCTYPE html>
 <button id="fullscreen" type="button">Vollbild</button>
 <script>
 (function () {
-  var HINT = "__START_HINT__";
-  var startSynchronized = false;
+  var HINT_COUNTING = "__START_COUNTING__";
+  var HINT_LOST = "__START_LOST__";
+  var HINT_RESYNC = "__START_RESYNC__";
   var limits = {min: 1, max: 8192};
   var fit = document.getElementById("fit");
   var stage = document.getElementById("stage");
@@ -134,14 +137,172 @@ _HUD_HTML = """<!DOCTYPE html>
   var fitted = false;
   var mismatchSeq = null;
   var lastSceneSeq = -1;
-  var lastScheduleSeq = -1;
-  var scheduleActive = false;
   var lastLights = null;
+  var startGate = false;
+  var queuedScene = null;
+  var startDisplay = freshStart("idle");
   var resizeTimer = 0;
   var retryTimer = 0;
   var retryDelay = 1000;
   var probe = null;
   var sessionOver = false;
+
+  function whole(value) {
+    if (typeof value !== "number" || !isFinite(value)) return null;
+    if (Math.floor(value) !== value) return null;
+    return value;
+  }
+  function freshStart(kind) {
+    return {
+      state: kind,
+      sequence_id: null,
+      lit_lights: 0,
+      step_index: -1,
+      phase_seq: -1,
+      commit_seq: -1,
+      schedule_seq: -1,
+      actual_start_ns: null,
+      race_status: null,
+      authorizes_go: false
+    };
+  }
+  function copyStart(state, patch) {
+    var next = freshStart(state.state);
+    next.sequence_id = state.sequence_id;
+    next.lit_lights = state.lit_lights;
+    next.step_index = state.step_index;
+    next.phase_seq = state.phase_seq;
+    next.commit_seq = state.commit_seq;
+    next.schedule_seq = state.schedule_seq;
+    next.actual_start_ns = state.actual_start_ns;
+    next.race_status = state.race_status;
+    next.authorizes_go = state.authorizes_go;
+    var key;
+    for (key in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) next[key] = patch[key];
+    }
+    return next;
+  }
+  function applySchedule(state, seq, payload, revoked) {
+    if (seq <= state.schedule_seq) return state;
+    var sequenceId = payload.sequence_id;
+    if (typeof sequenceId !== "string" || !sequenceId) return state;
+    var isRevoked = revoked || payload.status === "revoked";
+    if (isRevoked) {
+      if (state.sequence_id !== null && state.sequence_id !== sequenceId) return state;
+      if (state.state === "committed" && state.sequence_id === sequenceId) return state;
+      return copyStart(state, {
+        state: "revoked",
+        sequence_id: sequenceId,
+        lit_lights: 0,
+        step_index: -1,
+        authorizes_go: false,
+        schedule_seq: seq
+      });
+    }
+    if (state.sequence_id === sequenceId &&
+        (state.state === "counting" || state.state === "committed" ||
+          state.state === "revoked")) {
+      return copyStart(state, {schedule_seq: seq});
+    }
+    return copyStart(state, {
+      state: "counting",
+      sequence_id: sequenceId,
+      lit_lights: 0,
+      step_index: -1,
+      phase_seq: -1,
+      commit_seq: -1,
+      schedule_seq: seq,
+      actual_start_ns: null,
+      race_status: null,
+      authorizes_go: false
+    });
+  }
+  function applyPhase(state, seq, payload) {
+    if (state.state !== "counting" || seq <= state.phase_seq) return state;
+    if (payload.phase !== "counting" || payload.authorizes_go !== false) return state;
+    var sequenceId = payload.sequence_id;
+    var stepIndex = whole(payload.step_index);
+    var lit = whole(payload.lit_lights);
+    if (typeof sequenceId !== "string" || !sequenceId) return state;
+    if (stepIndex === null || lit === null || lit < 1 || stepIndex < 0) return state;
+    if (sequenceId !== state.sequence_id || stepIndex <= state.step_index) return state;
+    if ("at_ns" in payload && whole(payload.at_ns) === null) return state;
+    return copyStart(state, {
+      lit_lights: lit,
+      step_index: stepIndex,
+      phase_seq: seq,
+      authorizes_go: false
+    });
+  }
+  function applyCommit(state, seq, payload) {
+    if (state.state === "committed") return state;
+    if (state.state !== "counting" || seq <= state.commit_seq) return state;
+    if (payload.authorizes_go !== true || payload.race_status !== "running") return state;
+    var sequenceId = payload.sequence_id;
+    var actual = whole(payload.actual_start_ns);
+    if (typeof sequenceId !== "string" || !sequenceId) return state;
+    if (actual === null || actual < 0 || sequenceId !== state.sequence_id) return state;
+    return copyStart(state, {
+      state: "committed",
+      lit_lights: 0,
+      authorizes_go: true,
+      actual_start_ns: actual,
+      race_status: "running",
+      commit_seq: seq
+    });
+  }
+  function reduceStart(state, event) {
+    var kind = event && event.type;
+    if (kind === "disconnect") {
+      if (state.state === "disconnected") return state;
+      return copyStart(state, {
+        state: "disconnected", lit_lights: 0, authorizes_go: false
+      });
+    }
+    if (kind === "reconnect") {
+      if (state.state === "idle" && !state.sequence_id) return state;
+      return freshStart("resyncing");
+    }
+    if (kind === "resync_scene") {
+      if (state.state !== "resyncing") return state;
+      return freshStart("idle");
+    }
+    if (kind === "scene" || state.state === "disconnected") return state;
+    if (!event || event.protocol_version !== 2) return state;
+    var seq = whole(event.seq);
+    var payload = event.payload;
+    if (seq === null || !payload || typeof payload !== "object") return state;
+    if (kind === "start_schedule") return applySchedule(state, seq, payload, false);
+    if (kind === "start_schedule_revoked") return applySchedule(state, seq, payload, true);
+    if (kind === "start_phase") return applyPhase(state, seq, payload);
+    if (kind === "start_committed") return applyCommit(state, seq, payload);
+    return state;
+  }
+  function startCaption() {
+    if (startDisplay.state === "counting" && startDisplay.sequence_id) return HINT_COUNTING;
+    if (startDisplay.state === "disconnected" && startDisplay.sequence_id) return HINT_LOST;
+    if (startDisplay.state === "resyncing") return HINT_RESYNC;
+    return "";
+  }
+  function remember(raw) {
+    var msg;
+    try { msg = JSON.parse(raw); } catch (error) { return; }
+    if (!msg || typeof msg.type !== "string") return;
+    if (msg.type === "scene") {
+      queuedScene = raw;
+      return;
+    }
+    if (queue.length >= 16) {
+      queue = [];
+      queuedScene = null;
+      startDisplay = reduceStart(startDisplay, {type: "disconnect"});
+      paintLights(lastLights);
+      if (socket) socket.close();
+      return;
+    }
+    queue.push(raw);
+  }
 
   function setText(node, value) {
     var text = value == null ? "" : String(value);
@@ -244,9 +405,9 @@ _HUD_HTML = """<!DOCTYPE html>
       sendViewport();
     }, 150);
   }
-  function phaseLit(lights, index) {
-    if (!startSynchronized || !lights || lights.go) return false;
-    return index < (lights.lit_lights || 0);
+  function phaseLit(index) {
+    if (startDisplay.state !== "counting" || startDisplay.authorizes_go) return false;
+    return index < startDisplay.lit_lights;
   }
   function paintLights(lights) {
     lastLights = lights || null;
@@ -275,7 +436,7 @@ _HUD_HTML = """<!DOCTYPE html>
         var key = "lamp-" + String(lamp.index);
         keep[key] = true;
         var face = ensure(host, key, "div");
-        face.className = phaseLit(lights, lamp.index) ? "lamp on" : "lamp";
+        face.className = phaseLit(lamp.index) ? "lamp on" : "lamp";
         face.style.left = px(lamp.x);
         face.style.top = px(lamp.y);
         face.style.width = px(lamp.size);
@@ -283,13 +444,10 @@ _HUD_HTML = """<!DOCTYPE html>
       }
       dropMissing(host, "lamp-", keep);
     }
-    var sequence = scheduleActive || !!(lights && lights.active);
-    startNote.hidden = !sequence;
-    if (!sequence) {
-      setText(startNote, "");
-      return;
-    }
-    setText(startNote, HINT);
+    var caption = startCaption();
+    startNote.hidden = !caption;
+    setText(startNote, caption);
+    if (!caption) return;
     if (visible) {
       startNote.style.left = px(lights.x);
       startNote.style.top = px((lights.y || 0) + (lights.height || 0));
@@ -783,7 +941,6 @@ _HUD_HTML = """<!DOCTYPE html>
     if (!scene || scene.present === false) {
       connection = "no-race";
       showBanner();
-      scheduleActive = false;
       paintLights(null);
       return;
     }
@@ -857,6 +1014,9 @@ _HUD_HTML = """<!DOCTYPE html>
     if (!matches) {
       if (!fitted && mismatchSeq === seq) {
         lastSceneSeq = seq;
+        if (startDisplay.state === "resyncing") {
+          startDisplay = reduceStart(startDisplay, {type: "resync_scene"});
+        }
         renderScene(scene);
         return;
       }
@@ -866,13 +1026,14 @@ _HUD_HTML = """<!DOCTYPE html>
     fitted = true;
     mismatchSeq = null;
     lastSceneSeq = seq;
+    if (startDisplay.state === "resyncing") {
+      startDisplay = reduceStart(startDisplay, {type: "resync_scene"});
+    }
     renderScene(scene);
   }
-  function onSchedule(msg, active) {
-    var seq = typeof msg.seq === "number" ? msg.seq : 0;
-    if (seq < lastScheduleSeq) return;
-    lastScheduleSeq = seq;
-    scheduleActive = active;
+  function onStart(msg) {
+    if (!startGate) return;
+    startDisplay = reduceStart(startDisplay, msg);
     paintLights(lastLights);
   }
   function apply(raw) {
@@ -885,6 +1046,8 @@ _HUD_HTML = """<!DOCTYPE html>
       if (box && typeof box.min === "number" && typeof box.max === "number") {
         limits = {min: box.min, max: box.max};
       }
+      startGate = payload.protocol_version === 2 &&
+        payload.start_authorization === "start_committed";
       if (payload.receiving_hud === false && lastSceneSeq < 0) {
         connection = "no-race";
         showBanner();
@@ -892,8 +1055,8 @@ _HUD_HTML = """<!DOCTYPE html>
       return;
     }
     if (msg.type === "scene") onScene(msg);
-    else if (msg.type === "start_schedule") onSchedule(msg, true);
-    else if (msg.type === "start_schedule_revoked") onSchedule(msg, false);
+    else if (msg.type === "start_schedule" || msg.type === "start_schedule_revoked" ||
+        msg.type === "start_phase" || msg.type === "start_committed") onStart(msg);
   }
   function stopRetry() {
     if (retryTimer) {
@@ -914,7 +1077,7 @@ _HUD_HTML = """<!DOCTYPE html>
       oldSocket.close();
     }
     connection = "expired";
-    scheduleActive = false;
+    startDisplay = reduceStart(startDisplay, {type: "disconnect"});
     paintLights(lastLights);
     showBanner();
   }
@@ -962,15 +1125,18 @@ _HUD_HTML = """<!DOCTYPE html>
   }
   function connect() {
     if (sessionOver) return;
+    socket = null;
     if (connection !== "reconnecting") connection = "connecting";
     showBanner();
     opened = false;
     queue = [];
+    queuedScene = null;
     lastSceneSeq = -1;
-    lastScheduleSeq = -1;
     fitted = false;
     mismatchSeq = null;
-    scheduleActive = false;
+    startGate = false;
+    startDisplay = reduceStart(startDisplay, {type: "reconnect"});
+    paintLights(lastLights);
     var openedSocket = new WebSocket("ws://" + location.host + "/live" + location.search);
     socket = openedSocket;
     openedSocket.onopen = function () {
@@ -980,15 +1146,17 @@ _HUD_HTML = """<!DOCTYPE html>
       connection = "connected";
       sendViewport();
       var pending = queue;
+      var sceneText = queuedScene;
       queue = [];
+      queuedScene = null;
       var index;
       for (index = 0; index < pending.length; index += 1) apply(pending[index]);
+      if (sceneText) apply(sceneText);
     };
     openedSocket.onmessage = function (event) {
       if (socket !== openedSocket) return;
       if (!opened) {
-        if (queue.length > 8) queue.shift();
-        queue.push(event.data);
+        remember(event.data);
         return;
       }
       apply(event.data);
@@ -998,7 +1166,7 @@ _HUD_HTML = """<!DOCTYPE html>
       socket = null;
       if (sessionOver) return;
       connection = "disconnected";
-      scheduleActive = false;
+      startDisplay = reduceStart(startDisplay, {type: "disconnect"});
       paintLights(lastLights);
       showBanner();
       scheduleRetry();
@@ -1033,4 +1201,7 @@ _HUD_HTML = """<!DOCTYPE html>
 
 def hud_page() -> bytes:
     """The live HUD. The session token is not part of this document."""
-    return _HUD_HTML.replace("__START_HINT__", START_HINT).encode("utf-8")
+    page = _HUD_HTML.replace("__START_COUNTING__", START_HINT)
+    page = page.replace("__START_LOST__", START_LOST)
+    page = page.replace("__START_RESYNC__", START_RESYNC)
+    return page.encode("utf-8")

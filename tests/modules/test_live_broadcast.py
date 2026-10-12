@@ -55,6 +55,8 @@ from slot_racing.modules.races.hud_scene import (
     scene_payload,
 )
 from slot_racing.modules.races.live_page import START_HINT, hud_page
+from slot_racing.modules.races.runner import RaceRunner
+from slot_racing.modules.races.start_display import commit_document, phase_document
 from slot_racing.modules.races.start_schedule import TIME_BASE, StartSchedule
 from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_view import LiveRaceView
@@ -86,6 +88,9 @@ def test_messages_are_versioned_json_and_client_text_is_not_a_command() -> None:
     assert parsed["type"] == "hello"
     assert parsed["payload"]["application"] == APP_NAME
     assert parsed["payload"]["read_only"] is True
+    assert parsed["payload"]["start_authorization"] == "start_committed"
+    assert "start_phase" in parsed["payload"]["capabilities"]
+    assert "start_committed" in parsed["payload"]["capabilities"]
     assert parsed["payload"]["time_base"] == TIME_BASE
     assert parsed["payload"]["transport"] == "unencrypted_local_network"
     assert parsed["payload"]["race_active"] is False
@@ -99,6 +104,8 @@ def test_messages_are_versioned_json_and_client_text_is_not_a_command() -> None:
         '{"type": "abort"}',
         '{"type": "set_lap"}',
         '{"type": "edit_driver"}',
+        '{"type": "start_phase"}',
+        '{"type": "start_committed"}',
     ):
         verdict = classify_client_message(raw)
         assert verdict.code == "read_only"
@@ -225,12 +232,21 @@ def test_a_full_buffer_drops_the_client_and_a_soft_buffer_skips_the_scene() -> N
     blocked = plan_outbound(HARD_OUTBOUND_BYTES, hello_due=True, schedule_due=True, scene_due=True)
     assert blocked.drop is True
     pressured = plan_outbound(
-        SOFT_OUTBOUND_BYTES, hello_due=True, schedule_due=True, scene_due=True
+        SOFT_OUTBOUND_BYTES,
+        hello_due=True,
+        schedule_due=True,
+        scene_due=True,
+        phase_due=True,
+        commit_due=True,
     )
     assert pressured.drop is False
     assert pressured.send_hello is True
     assert pressured.send_schedule is True
+    assert pressured.send_phase is True
+    assert pressured.send_commit is True
     assert pressured.send_scene is False
+    assert blocked.send_phase is False
+    assert blocked.send_commit is False
     clear = plan_outbound(0, hello_due=True, schedule_due=False, scene_due=True)
     assert clear.send_scene is True
 
@@ -571,6 +587,8 @@ def test_client_commands_do_not_change_the_race(qtbot: QtBot, env: Env) -> None:
             assert fitted_view["height"] == 844
             client.send_text('{"type":"pause"}')
             client.send_text('{"type":"stop"}')
+            client.send_text('{"type":"start_committed","authorizes_go":true}')
+            client.send_text('{"type":"start_phase"}')
             client.send_text("not-json")
             errors = client.take_matching(lambda item: item.get("type") == "error", timeout=2)
             code = _payload(errors[0]).get("code")
@@ -667,11 +685,263 @@ def test_ten_distinct_viewports_compose_inside_one_second() -> None:
     assert all(item.startswith("{") for item in documents)
 
 
+def test_start_documents_stay_apart_from_scenes_and_old_sequences() -> None:
+    first = StartSchedule.build(reference_ns=1_000, step_interval_ns=1_000, sequence_id="old")
+    second = StartSchedule.build(reference_ns=9_000, step_interval_ns=1_000, sequence_id="new")
+    box = BroadcastMailbox()
+    wakes: list[int] = []
+    box.wake.set_callback(lambda: wakes.append(1))
+    box.publish_schedule(second.to_document(), revoked=False)
+    box.wake.acknowledge()
+    assert box.publish_schedule(first.revoke().to_document(), revoked=True) == 0
+    assert wakes == [1]
+    held = box.current()
+    assert held.schedule_revoked is False
+    assert held.schedule is not None
+    assert held.schedule["sequence_id"] == "new"
+    phase = phase_document(sequence_id="new", step_index=0, lit_lights=1, at_ns=9_000)
+    assert box.publish_start_phase(phase) == 1
+    later = phase_document(sequence_id="new", step_index=2, lit_lights=3, at_ns=11_000)
+    assert box.publish_start_phase(later) == 2
+    assert box.publish_start_phase(phase) == 0
+    assert (
+        box.publish_start_phase(
+            phase_document(sequence_id="old", step_index=4, lit_lights=5, at_ns=5_000)
+        )
+        == 0
+    )
+    for index in range(30):
+        box.publish_scene({"n": index, "status": "running", "lights": {"go": True}})
+    current = box.current()
+    assert current.phase is not None
+    assert current.phase["lit_lights"] == 3
+    assert current.phase["authorizes_go"] is False
+    assert current.commit is None
+    committed = commit_document(sequence_id="new", actual_start_ns=50_000, race_status="running")
+    box.wake.acknowledge()
+    before = len(wakes)
+    assert box.publish_start_committed(committed) == 1
+    assert len(wakes) == before + 1
+    box.wake.acknowledge()
+    assert box.publish_start_committed(committed) == 1
+    assert len(wakes) == before + 1
+    after = box.current()
+    assert after.phase is None
+    assert after.commit is not None
+    assert after.commit["actual_start_ns"] == 50_000
+    assert after.commit["authorizes_go"] is True
+    box.publish_scene({"status": "running", "lights": {"go": False, "lit_lights": 5}})
+    assert box.current().commit == after.commit
+    with pytest.raises(ValueError, match="cannot authorize GO"):
+        box.publish_start_phase({**phase, "authorizes_go": True})
+    with pytest.raises(ValueError, match="running"):
+        box.publish_start_committed({**committed, "race_status": "created"})
+
+
+def test_a_client_receives_confirmed_lamps_and_go_only_after_commit(qtbot: QtBot, env: Env) -> None:
+    service = LiveBroadcast()
+    assert service.start(_HOST, 0).running
+    live: LiveRaceView | None = None
+    try:
+        _ready_race(env, laps=2)
+        live = LiveRaceView(
+            env.runtime.translator, env.controller, service=env.races, broadcast=service
+        )
+        qtbot.addWidget(live)
+        live.show()
+        runner = env.controller.prepare_race(env.races.list_races()[0].id)
+        live.show_runner(runner)
+        live.begin_start_cue(interval_ms=60_000)
+        host, port, token = _endpoint(service)
+        client = _Client.connect(host, port, token)
+        try:
+            first_message = client.wait_for(lambda item: item.get("type") == "start_phase")
+            first = _payload(first_message)
+            assert first["lit_lights"] == 1
+            assert first["authorizes_go"] is False
+            assert first["phase"] == "counting"
+            for lit in range(2, 6):
+                live.advance_start_cue()
+                seen = client.wait_for(_phase_with_lamps(lit))
+                assert _payload(seen)["authorizes_go"] is False
+            assert runner.status is RaceStatus.CREATED
+            assert runner.started_at_ns is None
+            assert all(item.get("type") != "start_committed" for item in client.quiet(0.05))
+            live.advance_start_cue()
+            committed = client.wait_for(lambda item: item.get("type") == "start_committed")
+            body = _payload(committed)
+            assert _race_status(runner) is RaceStatus.RUNNING
+            assert body["actual_start_ns"] == runner.started_at_ns
+            assert body["race_status"] == "running"
+            assert body["authorizes_go"] is True
+            assert body["sequence_id"] == first["sequence_id"]
+        finally:
+            client.close()
+    finally:
+        service.stop()
+        if live is not None and live.runner is not None:
+            live.runner.close()
+
+
+def test_a_late_clock_does_not_release_go_before_the_engine_starts(qtbot: QtBot, env: Env) -> None:
+    service = LiveBroadcast()
+    assert service.start(_HOST, 0).running
+    live: LiveRaceView | None = None
+    try:
+        _ready_race(env, laps=2)
+        live = LiveRaceView(
+            env.runtime.translator, env.controller, service=env.races, broadcast=service
+        )
+        qtbot.addWidget(live)
+        live.show()
+        runner = env.controller.prepare_race(env.races.list_races()[0].id)
+        live.show_runner(runner)
+        live.begin_start_cue(interval_ms=60_000)
+        host, port, token = _endpoint(service)
+        client = _Client.connect(host, port, token)
+        try:
+            client.wait_for(lambda item: item.get("type") == "start_phase")
+            env.clock.advance(7 * 60_000 * 1_000_000)
+            waiting = client.quiet(0.2)
+            assert runner.status is RaceStatus.CREATED
+            assert all(item.get("type") != "start_committed" for item in waiting)
+            live.sync_start_cue()
+            committed = client.wait_for(lambda item: item.get("type") == "start_committed")
+            assert _race_status(runner) is RaceStatus.RUNNING
+            assert _payload(committed)["actual_start_ns"] == runner.started_at_ns
+        finally:
+            client.close()
+    finally:
+        service.stop()
+        if live is not None and live.runner is not None:
+            live.runner.close()
+
+
+def test_abort_and_a_new_sequence_do_not_keep_the_old_start(qtbot: QtBot, env: Env) -> None:
+    service = LiveBroadcast()
+    assert service.start(_HOST, 0).running
+    live: LiveRaceView | None = None
+    try:
+        _ready_race(env, laps=2)
+        live = LiveRaceView(
+            env.runtime.translator, env.controller, service=env.races, broadcast=service
+        )
+        qtbot.addWidget(live)
+        live.show()
+        runner = env.controller.prepare_race(env.races.list_races()[0].id)
+        live.show_runner(runner)
+        live.begin_start_cue(interval_ms=60_000)
+        host, port, token = _endpoint(service)
+        client = _Client.connect(host, port, token)
+        try:
+            live.advance_start_cue()
+            live.advance_start_cue()
+            third = client.wait_for(
+                lambda item: (
+                    item.get("type") == "start_phase" and _payload(item).get("lit_lights") == 3
+                )
+            )
+            old_sequence = _payload(third)["sequence_id"]
+            live.hide()
+            revoked = client.wait_for(lambda item: item.get("type") == "start_schedule_revoked")
+            assert _payload(revoked)["sequence_id"] == old_sequence
+            assert runner.status is RaceStatus.CREATED
+            assert all(item.get("type") != "start_committed" for item in client.quiet(0.1))
+            live.show()
+            live.begin_start_cue(interval_ms=60_000)
+            restarted = client.wait_for(_schedule_besides(old_sequence))
+            new_sequence = _payload(restarted)["sequence_id"]
+            assert isinstance(new_sequence, str)
+            phase = client.wait_for(_phase_for_sequence(new_sequence))
+            assert _payload(phase)["lit_lights"] == 1
+            assert _payload(phase)["authorizes_go"] is False
+            assert runner.status is RaceStatus.CREATED
+        finally:
+            client.close()
+    finally:
+        service.stop()
+        if live is not None and live.runner is not None:
+            live.runner.close()
+
+
+def test_ten_clients_receive_the_same_confirmed_start(display: LiveBroadcast) -> None:
+    schedule = StartSchedule.build(reference_ns=4_000, step_interval_ns=1_000, sequence_id="heat")
+    assert display.publish_schedule(schedule.to_document(), revoked=False) == 1
+    assert (
+        display.publish_start_phase(
+            phase_document(sequence_id="heat", step_index=4, lit_lights=5, at_ns=8_000)
+        )
+        == 1
+    )
+    assert (
+        display.publish_start_committed(
+            commit_document(sequence_id="heat", actual_start_ns=9_100, race_status="running")
+        )
+        == 1
+    )
+    host, port, token = _endpoint(display)
+    clients = [_Client.connect(host, port, token) for _ in range(10)]
+    try:
+        for client in clients:
+            messages = client.take(3)
+            assert [item["type"] for item in messages] == [
+                "hello",
+                "start_schedule",
+                "start_committed",
+            ]
+            assert _payload(messages[2])["actual_start_ns"] == 9_100
+            assert _payload(messages[2])["authorizes_go"] is True
+            assert all(item.get("type") != "start_phase" for item in messages)
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_a_running_race_does_not_gain_go_from_a_second_countdown(qtbot: QtBot, env: Env) -> None:
+    service = LiveBroadcast()
+    assert service.start(_HOST, 0).running
+    live: LiveRaceView | None = None
+    try:
+        _ready_race(env, laps=2)
+        live = LiveRaceView(
+            env.runtime.translator, env.controller, service=env.races, broadcast=service
+        )
+        qtbot.addWidget(live)
+        live.show()
+        race = env.races.list_races()[0]
+        runner = env.controller.start_race(race.id)
+        stamp = runner.started_at_ns
+        live.show_runner(runner)
+        live.begin_start_cue(interval_ms=60_000)
+        host, port, token = _endpoint(service)
+        client = _Client.connect(host, port, token)
+        try:
+            client.wait_for(lambda item: item.get("type") == "start_phase")
+            env.clock.advance(7 * 60_000 * 1_000_000)
+            live.sync_start_cue()
+            arrived = client.quiet(0.3)
+            assert all(item.get("type") != "start_committed" for item in arrived)
+            assert runner.status is RaceStatus.RUNNING
+            assert runner.started_at_ns == stamp
+        finally:
+            client.close()
+    finally:
+        service.stop()
+        if live is not None and live.runner is not None:
+            live.runner.close()
+
+
 def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     page = hud_page().decode()
     assert START_HINT in page
-    assert "var startSynchronized = false" in page
+    assert "Startampel unterbrochen - keine Startfreigabe" in page
+    assert "Startampel wird abgeglichen" in page
+    assert "function reduceStart" in page
+    assert "start_authorization" in page
+    assert "authorizes_go" in page
+    assert "startSynchronized" not in page
     assert "planned_go" not in page
+    assert "Date.now" not in page
     assert "setInterval" not in page
     assert "innerHTML" not in page
     assert "fetch(" not in page
@@ -753,6 +1023,8 @@ class _Client:
         self.sock = sock
         self.status = status
         self.buffer = bytearray(rest)
+        self._inbox: list[dict[str, object]] = []
+        self._cursor = 0
 
     @classmethod
     def connect(cls, host: str, port: int, token: str, *, origin: str | None = None) -> _Client:
@@ -804,6 +1076,57 @@ class _Client:
                     found.append(loaded)
         assert len(found) >= count
         return found
+
+    def collect(self, timeout: float = 0.3) -> list[dict[str, object]]:
+        """Messages that arrive within ``timeout``. An empty result is allowed."""
+        found: list[dict[str, object]] = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._pump(min(0.05, max(0.01, deadline - time.monotonic())))
+            frames, error = take_frames(self.buffer, expect_mask=False, limit=2_000_000)
+            assert error is None
+            for frame in frames:
+                if frame.opcode != 0x1:
+                    continue
+                loaded = json.loads(frame.payload.decode())
+                assert isinstance(loaded, dict)
+                found.append(loaded)
+        return found
+
+    def wait_for(
+        self,
+        predicate: Callable[[dict[str, object]], bool],
+        *,
+        timeout: float = 2.0,
+    ) -> dict[str, object]:
+        """The next matching message. Later messages in the same read stay available."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._ingest(min(0.05, max(0.01, deadline - time.monotonic())))
+            while self._cursor < len(self._inbox):
+                item = self._inbox[self._cursor]
+                self._cursor += 1
+                if predicate(item):
+                    return item
+        raise AssertionError("message did not arrive")
+
+    def quiet(self, timeout: float = 0.2) -> list[dict[str, object]]:
+        """Inbox after waiting. Used to show that a message was not sent."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._ingest(min(0.05, max(0.01, deadline - time.monotonic())))
+        return list(self._inbox)
+
+    def _ingest(self, timeout: float) -> None:
+        self._pump(timeout)
+        frames, error = take_frames(self.buffer, expect_mask=False, limit=2_000_000)
+        assert error is None
+        for frame in frames:
+            if frame.opcode != 0x1:
+                continue
+            loaded = json.loads(frame.payload.decode())
+            assert isinstance(loaded, dict)
+            self._inbox.append(loaded)
 
     def send_text(self, text: str) -> None:
         payload = text.encode()
@@ -867,6 +1190,34 @@ def _has_marker(message: dict[str, object], marker: int) -> bool:
         and isinstance(payload, dict)
         and payload.get("marker") == marker
     )
+
+
+def _race_status(runner: RaceRunner) -> RaceStatus:
+    """Read the status again. A previous assert must not freeze it for the type checker."""
+    return runner.status
+
+
+def _phase_with_lamps(expected: int) -> Callable[[dict[str, object]], bool]:
+    def predicate(item: dict[str, object]) -> bool:
+        return item.get("type") == "start_phase" and _payload(item).get("lit_lights") == expected
+
+    return predicate
+
+
+def _schedule_besides(previous: object) -> Callable[[dict[str, object]], bool]:
+    def predicate(item: dict[str, object]) -> bool:
+        return (
+            item.get("type") == "start_schedule" and _payload(item).get("sequence_id") != previous
+        )
+
+    return predicate
+
+
+def _phase_for_sequence(sequence: object) -> Callable[[dict[str, object]], bool]:
+    def predicate(item: dict[str, object]) -> bool:
+        return item.get("type") == "start_phase" and _payload(item).get("sequence_id") == sequence
+
+    return predicate
 
 
 def _payload(message: dict[str, object]) -> dict[str, object]:
