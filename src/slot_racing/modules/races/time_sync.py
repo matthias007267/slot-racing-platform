@@ -74,6 +74,9 @@ _TIMESTAMP_KEYS = frozenset(
         "step_interval_ns",
         "at_ns",
         "actual_start_ns",
+        "observed_ns",
+        "published_ns",
+        "lateness_ns",
     }
 )
 

@@ -77,8 +77,15 @@ def phase_document(
     step_index: int,
     lit_lights: int,
     at_ns: int | None = None,
+    observed_ns: int | None = None,
+    lateness_ns: int | None = None,
+    skipped_steps: int = 0,
 ) -> dict[str, object]:
-    """One red phase the PC has already reached. This document cannot mean GO."""
+    """One red phase the PC has already reached. This document cannot mean GO.
+
+    ``observed_ns`` is when the PC published the phase. ``lateness_ns`` is that
+    time minus the plan. Neither field changes which lamps are allowed.
+    """
     document: dict[str, object] = {
         "sequence_id": sequence_id,
         "phase": PHASE_COUNTING,
@@ -88,6 +95,18 @@ def phase_document(
     }
     if at_ns is not None:
         document["at_ns"] = at_ns
+    if observed_ns is not None:
+        if parse_timestamp(observed_ns) is None or isinstance(observed_ns, bool):
+            raise ValueError("observed_ns must be a host timestamp")
+        document["observed_ns"] = observed_ns
+    if lateness_ns is not None:
+        if parse_timestamp(lateness_ns) is None or isinstance(lateness_ns, bool):
+            raise ValueError("lateness_ns must be a host duration")
+        document["lateness_ns"] = lateness_ns
+    if isinstance(skipped_steps, bool) or not isinstance(skipped_steps, int) or skipped_steps < 0:
+        raise ValueError("skipped_steps must not be negative")
+    if skipped_steps:
+        document["skipped_steps"] = skipped_steps
     parse_phase_document(document)
     return document
 
@@ -97,14 +116,24 @@ def commit_document(
     sequence_id: str,
     actual_start_ns: int,
     race_status: str,
+    published_ns: int | None = None,
 ) -> dict[str, object]:
-    """The race clock is running. ``actual_start_ns`` is the engine stamp."""
-    document = {
+    """The race clock is running. ``actual_start_ns`` is the engine stamp.
+
+    ``published_ns`` is when this document was handed to the broadcast. It is
+    not a second start stamp and it cannot replace ``actual_start_ns``.
+    """
+    document: dict[str, object] = {
         "sequence_id": sequence_id,
         "actual_start_ns": actual_start_ns,
         "race_status": race_status,
         "authorizes_go": True,
     }
+    if published_ns is not None:
+        parsed = parse_timestamp(published_ns)
+        if parsed is None or isinstance(published_ns, bool) or parsed < 0:
+            raise ValueError("published_ns must be a host timestamp")
+        document["published_ns"] = published_ns
     parse_commit_document(document)
     return document
 

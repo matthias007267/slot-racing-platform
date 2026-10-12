@@ -16,6 +16,7 @@ reserve check as the PC, measured with the browser's own font.
 
 from __future__ import annotations
 
+from slot_racing.modules.races.start_metrics import metrics_source
 from slot_racing.modules.races.time_sync import sync_source
 
 START_HINT = "Startampel folgt dem Renn-PC"
@@ -164,6 +165,11 @@ _HUD_HTML = """<!DOCTYPE html>
   var sessionOver = false;
 
   __SYNC_SOURCE__
+  __METRICS_SOURCE__
+  var hudLit = -1;
+  var hudGo = false;
+  var hudCommit = null;
+  var hudOpened = false;
   function whole(value) {
     if (typeof value !== "number" || !isFinite(value)) return null;
     if (Math.floor(value) !== value) return null;
@@ -468,6 +474,7 @@ _HUD_HTML = """<!DOCTYPE html>
     syncQuality = "poor";
     syncLocal = false;
     lampPeak = 0;
+    noteMode(false);
     clearLampTimer();
     if (syncTimer) {
       clearTimeout(syncTimer);
@@ -540,6 +547,7 @@ _HUD_HTML = """<!DOCTYPE html>
     syncQuality = estimate.quality;
     syncOffset = estimate.offset;
     syncLocal = estimate.local && !document.hidden;
+    noteMode(syncLocal);
     paintLights(lastLights);
     armLamps();
   }
@@ -595,6 +603,65 @@ _HUD_HTML = """<!DOCTYPE html>
     if (now === null || syncOffset === null) return null;
     return now + syncOffset;
   }
+  function hudUncertainty() {
+    var now = clientNowNs();
+    if (now === null) return "";
+    var estimate = assessSync(syncSamples, now, syncQuality, syncOffset);
+    if (estimate.uncertainty === null || estimate.uncertainty === undefined) return "";
+    return estimate.uncertainty.toString();
+  }
+  function noteHudLamp() {
+    if (!measureEnabled) return;
+    var go = startDisplay.authorizes_go === true;
+    var lit = go ? 0 : currentLit();
+    if (go && hudGo) return;
+    if (!go && lit === hudLit) return;
+    var skipped = !go && hudLit >= 0 && lit > hudLit + 1 ? lit - hudLit - 1 : 0;
+    hudLit = lit;
+    hudGo = go;
+    var browser = clientNowNs();
+    var estimated = estimatedPc();
+    var uncertainty = hudUncertainty();
+    if (!go) {
+      recordMeasure({
+        sequence_id: startDisplay.sequence_id || "",
+        event: "lamp",
+        phase: String(lit),
+        time_basis: "estimated_pc",
+        browser_ns: browser === null ? "" : browser.toString(),
+        estimated_pc_ns: estimated === null ? "" : estimated.toString(),
+        quality: syncQuality,
+        uncertainty_ns: uncertainty,
+        note: skipped
+          ? "JavaScript-Zustandswechsel, übersprungene Phasen " + String(skipped)
+          : "JavaScript-Zustandswechsel, nicht der sichtbare Pixel"
+      });
+    } else if (hudCommit) {
+      noteGoPaint({
+        sequence: hudCommit.sequence,
+        actual: hudCommit.actual,
+        receiveBrowser: hudCommit.receiveBrowser,
+        paintBrowser: browser === null ? "" : browser.toString(),
+        paintEstimated: estimated === null ? "" : estimated.toString(),
+        quality: syncQuality,
+        uncertainty: uncertainty
+      });
+    }
+    if (!window.requestAnimationFrame) return;
+    var shown = go ? "go" : String(lit);
+    var sequence = startDisplay.sequence_id || "";
+    window.requestAnimationFrame(function () {
+      var frame = clientNowNs();
+      recordMeasure({
+        sequence_id: sequence,
+        event: "frame",
+        phase: shown,
+        time_basis: "browser",
+        browser_ns: frame === null ? "" : frame.toString(),
+        note: "Nächster Frame-Callback, nicht der sichtbare Pixel"
+      });
+    });
+  }
   function phaseLit(index) {
     if (startDisplay.authorizes_go || startDisplay.state !== "counting") return false;
     return index < currentLit();
@@ -637,6 +704,7 @@ _HUD_HTML = """<!DOCTYPE html>
     var caption = startCaption();
     startNote.hidden = !caption;
     setText(startNote, caption);
+    noteHudLamp();
     if (!caption) return;
     if (visible) {
       startNote.style.left = px(lights.x);
@@ -1231,7 +1299,42 @@ _HUD_HTML = """<!DOCTYPE html>
     }
     var entered = startDisplay.state === "counting" &&
       (startDisplay.sequence_id !== previous || previousState !== "counting");
-    if (entered || startDisplay.state === "revoked") lampPeak = 0;
+    if (entered || startDisplay.state === "revoked") {
+      lampPeak = 0;
+      hudLit = -1;
+      hudGo = false;
+    }
+    if (msg.type === "start_phase" && startDisplay.state === "counting") {
+      var phaseBody = msg.payload || {};
+      noteHudLamp();
+      attachObserved(
+        phaseBody.sequence_id, phaseBody.lit_lights, phaseBody.observed_ns, phaseBody.at_ns
+      );
+    }
+    if (msg.type === "start_committed" && startDisplay.authorizes_go) {
+      var commitBody = msg.payload || {};
+      var actual = hostNs(commitBody.actual_start_ns);
+      var published = hostNs(commitBody.published_ns);
+      var received = clientNowNs();
+      var receiveEstimated = received === null || syncOffset === null
+        ? null
+        : received + syncOffset;
+      hudCommit = {
+        sequence: startDisplay.sequence_id || "",
+        actual: actual === null ? "" : actual.toString(),
+        published: published === null ? "" : published.toString(),
+        receiveBrowser: received === null ? "" : received.toString()
+      };
+      noteCommitArrival({
+        sequence: hudCommit.sequence,
+        actual: hudCommit.actual,
+        published: hudCommit.published,
+        receiveBrowser: hudCommit.receiveBrowser,
+        receiveEstimated: receiveEstimated === null ? "" : receiveEstimated.toString(),
+        quality: syncQuality,
+        uncertainty: hudUncertainty()
+      });
+    }
     if (entered) burst(4, 40);
     if (startDisplay.state !== "counting") clearLampTimer();
     paintLights(lastLights);
@@ -1358,6 +1461,8 @@ _HUD_HTML = """<!DOCTYPE html>
       opened = true;
       retryDelay = 1000;
       connection = "connected";
+      if (hudOpened) noteResync();
+      hudOpened = true;
       sendViewport();
       var pending = queue;
       var sceneText = queuedScene;
@@ -1381,6 +1486,7 @@ _HUD_HTML = """<!DOCTYPE html>
       if (sessionOver) return;
       connection = "disconnected";
       startGate = false;
+      noteDisconnect();
       dropSync();
       plan = null;
       startDisplay = reduceStart(startDisplay, {type: "disconnect"});
@@ -1409,6 +1515,7 @@ _HUD_HTML = """<!DOCTYPE html>
   if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleViewport);
   document.addEventListener("visibilitychange", function () {
     syncLocal = false;
+    noteMode(false);
     clearLampTimer();
     if (document.hidden) {
       paintLights(lastLights);
@@ -1422,6 +1529,31 @@ _HUD_HTML = """<!DOCTYPE html>
     paintLights(lastLights);
     if (socket && socket.readyState === 1 && startGate) burst(8, 40);
   });
+  measureEnabled = /(?:^|[?&])messung=1(?:&|$)/.test(location.search);
+  if (measureEnabled) {
+    var measureBar = document.createElement("div");
+    measureBar.id = "measure-bar";
+    measureBar.style.position = "fixed";
+    measureBar.style.left = "0";
+    measureBar.style.right = "0";
+    measureBar.style.bottom = "0";
+    measureBar.style.zIndex = "5";
+    measureBar.style.display = "flex";
+    measureBar.style.gap = "8px";
+    measureBar.style.padding = "8px";
+    measureBar.style.background = "rgba(18,20,24,0.92)";
+    var jsonButton = document.createElement("button");
+    jsonButton.type = "button";
+    jsonButton.textContent = "JSON exportieren";
+    jsonButton.addEventListener("click", function () { downloadMeasure("json"); });
+    var csvButton = document.createElement("button");
+    csvButton.type = "button";
+    csvButton.textContent = "CSV exportieren";
+    csvButton.addEventListener("click", function () { downloadMeasure("csv"); });
+    measureBar.appendChild(jsonButton);
+    measureBar.appendChild(csvButton);
+    document.body.appendChild(measureBar);
+  }
   showBanner();
   connect();
 })();
@@ -1434,6 +1566,7 @@ _HUD_HTML = """<!DOCTYPE html>
 def hud_page() -> bytes:
     """The live HUD. The session token is not part of this document."""
     page = _HUD_HTML.replace("__SYNC_SOURCE__", sync_source())
+    page = page.replace("__METRICS_SOURCE__", metrics_source())
     page = page.replace("__START_COUNTING__", START_HINT)
     page = page.replace("__START_LOST__", START_LOST)
     page = page.replace("__START_RESYNC__", START_RESYNC)
