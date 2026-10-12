@@ -137,7 +137,14 @@ source_modules = [
     "slot_racing.modules.races.models",
     "slot_racing.modules.races.time_trial_board",
 ]
-forbidden_modules = ["PySide6", "slot_racing.uikit", "cv2", "gpiozero", "RPi"]
+forbidden_modules = [
+    "PySide6",
+    "slot_racing.uikit",
+    "cv2",
+    "gpiozero",
+    "RPi",
+    "slot_racing.modules.races.broadcast",
+]
 
 [[tool.importlinter.contracts]]
 name = "HUD scene is free of UI and does not call the race engine"
@@ -151,6 +158,21 @@ forbidden_modules = [
     "slot_racing.modules.races.service",
     "slot_racing.modules.races.recorder",
     "slot_racing.modules.races.models",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Live broadcast is free of UI and does not drive the race"
+type = "forbidden"
+source_modules = ["slot_racing.modules.races.broadcast"]
+forbidden_modules = [
+    "PySide6",
+    "slot_racing.uikit",
+    "sqlalchemy",
+    "slot_racing.modules.races.engine",
+    "slot_racing.modules.races.service",
+    "slot_racing.modules.races.recorder",
+    "slot_racing.modules.races.ui",
 ]
 allow_indirect_imports = true
 

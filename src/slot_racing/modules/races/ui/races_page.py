@@ -23,6 +23,7 @@ from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.results_view import ResultsView
 from slot_racing.modules.races.ui.start_cue import uses_start_cue
@@ -53,6 +54,7 @@ class RacesPage(QWidget):
         providers: TimingProviderRegistry,
         hud_store: HudConfigurationStore | None = None,
         config: AppConfig | None = None,
+        broadcast: LiveBroadcast | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -108,7 +110,12 @@ class RacesPage(QWidget):
         self.wizard = RaceWizard(
             translator, service, drivers, vehicles, tracks, providers, hud_store
         )
-        self.live = LiveRaceView(translator, controller, hud_store, service, config)
+        if broadcast is not None and config is not None:
+            broadcast.ensure_started(
+                enabled=config.live_broadcast_enabled,
+                port=config.live_broadcast_port,
+            )
+        self.live = LiveRaceView(translator, controller, hud_store, service, config, broadcast)
         self.results = ResultsView(translator, service, hud_store)
         self.stack = QStackedWidget()
         # The list's preferred width must not stop the live race from using a small window.

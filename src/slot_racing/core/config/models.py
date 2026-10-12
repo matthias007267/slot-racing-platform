@@ -19,6 +19,7 @@ AUDIO_VOLUME_DEFAULT = 70
 TRACK_PLANNER_COLOR_CODING_DEFAULT = False
 TRACK_PLANNER_BUILD_UNLIMITED: Literal["unlimited"] = "unlimited"
 TRACK_PLANNER_BUILD_COLLECTION: Literal["collection"] = "collection"
+LIVE_BROADCAST_PORT_DEFAULT = 8765
 
 
 class AppConfig(BaseModel):
@@ -49,6 +50,10 @@ class AppConfig(BaseModel):
     """Tint rails by geometry in the track planner. Off keeps the dark roadway."""
     track_planner_build_mode: Literal["unlimited", "collection"] = TRACK_PLANNER_BUILD_UNLIMITED
     """Planner preference. ``unlimited`` ignores owned stock. ``collection`` uses it."""
+    live_broadcast_enabled: bool = False
+    """Local read-only display. Off until it is turned on, so startup does not open a port."""
+    live_broadcast_port: int = Field(default=LIVE_BROADCAST_PORT_DEFAULT, ge=1, le=65535)
+    """TCP port for the local display. The address is chosen when the service starts."""
 
     def resolved_database_path(self) -> Path:
         return self.database_path or default_database_path()

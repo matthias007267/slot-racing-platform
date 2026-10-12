@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from slot_racing.core.catalog import (
@@ -10,6 +11,8 @@ from slot_racing.core.catalog import (
     TrackCatalog,
     VehicleCatalog,
 )
+from slot_racing.core.config import AppConfig
+from slot_racing.core.diagnostics import record
 from slot_racing.core.events import PersistentStoreReplacing
 from slot_racing.core.plugin import (
     NavigationItem,
@@ -32,6 +35,10 @@ from slot_racing.modules.races.translations import TRANSLATIONS
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
 
+    from slot_racing.modules.races.ui.live_server import LiveBroadcast
+
+logger = logging.getLogger(__name__)
+
 
 class RacesPlugin(Plugin):
     manifest: ClassVar[PluginManifest] = PluginManifest(
@@ -47,6 +54,7 @@ class RacesPlugin(Plugin):
     def __init__(self) -> None:
         self._controller: RaceController | None = None
         self._recorder: RaceRecorder | None = None
+        self._broadcast: LiveBroadcast | None = None
 
     def activate(self, context: PluginContext) -> None:
         drivers = context.get_service(DriverCatalog)
@@ -84,11 +92,22 @@ class RacesPlugin(Plugin):
         context.register_service(TimeMeasurementCatalog, StoredTimeMeasurements(service))
         hud_store = HudConfigurationStore(context.get_service(Database))
         context.register_service(HudConfigurationStore, hud_store)
+        from slot_racing.modules.races.ui.live_server import LiveBroadcast
+
+        broadcast = LiveBroadcast()
+        self._broadcast = broadcast
+        context.register_service(LiveBroadcast, broadcast)
+        if context.config.live_broadcast_enabled:
+            _start_live_broadcast(broadcast, context.config)
         translator = context.translator
 
         def races_page() -> QWidget:
             from slot_racing.modules.races.ui.races_page import RacesPage
 
+            broadcast.ensure_started(
+                enabled=context.config.live_broadcast_enabled,
+                port=context.config.live_broadcast_port,
+            )
             return RacesPage(
                 translator,
                 service,
@@ -99,6 +118,7 @@ class RacesPlugin(Plugin):
                 providers,
                 hud_store,
                 context.config,
+                broadcast,
             )
 
         def hud_settings() -> QWidget:
@@ -132,9 +152,48 @@ class RacesPlugin(Plugin):
         )
 
     def deactivate(self) -> None:
+        if self._broadcast is not None:
+            self._broadcast.stop()
+            self._broadcast = None
         if self._controller is not None:
             self._controller.shutdown()
             self._controller = None
         if self._recorder is not None:
             self._recorder.close()
             self._recorder = None
+
+
+def _start_live_broadcast(broadcast: LiveBroadcast, config: AppConfig) -> None:
+    """Open the display if Qt is already running. A failure must not stop the plugin."""
+    from PySide6.QtCore import QCoreApplication
+
+    if QCoreApplication.instance() is None:
+        record(
+            "LIVE_BROADCAST",
+            module="races",
+            page="broadcast",
+            result="start_deferred",
+        )
+        return
+    try:
+        diagnostics = broadcast.start(port=config.live_broadcast_port)
+    except Exception:
+        logger.exception("Live display failed to start")
+        record(
+            "LIVE_BROADCAST",
+            module="races",
+            page="broadcast",
+            result="start_failed",
+            error="exception",
+        )
+        return
+    if not diagnostics.error:
+        return
+    record(
+        "LIVE_BROADCAST",
+        module="races",
+        page="broadcast",
+        result="start_failed",
+        error=diagnostics.error,
+        port=config.live_broadcast_port,
+    )
