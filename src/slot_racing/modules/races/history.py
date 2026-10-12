@@ -7,9 +7,15 @@ from sqlalchemy.orm import Session
 
 from slot_racing.core.catalog import DriverCatalog, VehicleCatalog
 from slot_racing.core.domain import DriverId, RaceId, RaceMode, RaceStatus, TrackId, VehicleId
-from slot_racing.core.statistics import HistoryLap, HistoryParticipant, HistoryRace, LayoutRevision
+from slot_racing.core.statistics import (
+    HistoryHeat,
+    HistoryLap,
+    HistoryParticipant,
+    HistoryRace,
+    LayoutRevision,
+)
 from slot_racing.core.storage.base import Base
-from slot_racing.modules.races.models import Lap, Race, RaceParticipant
+from slot_racing.modules.races.models import Lap, Race, RaceHeat, RaceHeatEntry, RaceParticipant
 
 _ENDED = (RaceStatus.FINISHED.value, RaceStatus.ABORTED.value)
 _CURRENT_PLAN = "plan"
@@ -91,7 +97,31 @@ def _race(
             )
             for lap in laps
         ),
+        heats=_heats(session, race.id),
     )
+
+
+def _heats(session: Session, race_id: int) -> tuple[HistoryHeat, ...]:
+    """Completed heats only. A race without a heat plan contributes nothing."""
+    rows = session.scalars(
+        select(RaceHeat)
+        .where(RaceHeat.race_id == race_id, RaceHeat.status == "completed")
+        .order_by(RaceHeat.sequence)
+    ).all()
+    heats: list[HistoryHeat] = []
+    for heat in rows:
+        entries = session.scalars(
+            select(RaceHeatEntry)
+            .where(RaceHeatEntry.heat_id == heat.id)
+            .order_by(RaceHeatEntry.lane, RaceHeatEntry.participant_id)
+        ).all()
+        heats.append(
+            HistoryHeat(
+                sequence=int(heat.sequence),
+                seats=tuple((int(entry.participant_id), int(entry.lane)) for entry in entries),
+            )
+        )
+    return tuple(heats)
 
 
 def _participant(

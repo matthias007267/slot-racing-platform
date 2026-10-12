@@ -64,6 +64,19 @@ UIKIT_TRANSLATIONS: dict[str, dict[str, str]] = {
         "report.official": "Wertung: reguläres Ergebnis.",
         "report.aborted": "Abgebrochen. Kein Sieg und kein Podestplatz.",
         "report.no_laps": "Keine gültigen Runden.",
+        "report.run": "Durchlauf {number}",
+        "report.run_unknown": "unbekannt",
+        "report.runs_unaligned": (
+            "Die Durchläufe lassen sich nicht eindeutig zuordnen. "
+            "Die Achse zeigt die gespeicherte Gesamtrunde je Fahrer."
+        ),
+        "report.zoom_reset": "Gesamtansicht",
+        "report.tip.vehicle": "Fahrzeug: {vehicle}",
+        "report.tip.run": "Durchlauf: {run}",
+        "report.tip.lane": "Spur: {lane}",
+        "report.tip.lap": "Runde im Durchlauf: {lap}",
+        "report.tip.absolute": "Gesamtrunde: {lap}",
+        "report.tip.time": "Rundenzeit: {time}",
         "report.disqualified": "Disqualifiziert, nicht gewertet.",
         "report.outliers": "Auffällig: Runde {laps}",
         "report.column.place": "Platz",
