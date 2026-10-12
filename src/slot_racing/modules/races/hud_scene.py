@@ -270,6 +270,9 @@ RANKING_WIDTH_FLOOR = 40
 RANKING_VEHICLE_MIN_WIDTH = 300
 RANKING_FULL_TABLE_WIDTH = 980
 RANKING_BEST_RESERVE = 64
+RANKING_CELL_PAD = 16
+RANKING_PRIMARY_IDS = ("position", "driver", "laps")
+RANKING_BEST_ID = "best_lap"
 _RANKING_INDEX = {column[0]: index for index, column in enumerate(_RANKING_COLUMNS)}
 _RANKING_VEHICLE = _RANKING_INDEX["vehicle"]
 _RANKING_OPTIONAL = frozenset(
@@ -315,6 +318,20 @@ def ranking_column_visible(column_id: str, width: int) -> bool:
     return index not in hidden
 
 
+def ranking_best_fits(viewport: int, primary_px: int) -> bool:
+    """Whether the best-lap column keeps its reserve after the primary columns.
+
+    ``primary_px`` is the host's measured width of place, driver and lap count,
+    including padding. Below the width floor the PC leaves every column alone.
+    The PC can still drop the column afterwards when the assigned pixel widths
+    overflow its own scrollbar. That last step needs the widget's layout, so a
+    browser that passed this check keeps the column and shortens the text.
+    """
+    if viewport < RANKING_WIDTH_FLOOR:
+        return True
+    return viewport - primary_px >= RANKING_BEST_RESERVE
+
+
 @dataclass(frozen=True, slots=True)
 class HudColumn:
     id: str
@@ -340,6 +357,11 @@ class HudRanking:
     rows: tuple[HudRankingRow, ...]
     row_px: int
     columns_are_complete: bool
+    primary_ids: tuple[str, ...] = RANKING_PRIMARY_IDS
+    best_id: str = RANKING_BEST_ID
+    best_reserve_px: int = RANKING_BEST_RESERVE
+    width_floor_px: int = RANKING_WIDTH_FLOOR
+    cell_pad_px: int = RANKING_CELL_PAD
 
 
 @dataclass(frozen=True, slots=True)
@@ -973,6 +995,11 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
         rows=tuple(rows),
         row_px=RANKING_ROW_PX,
         columns_are_complete=True,
+        primary_ids=RANKING_PRIMARY_IDS,
+        best_id=RANKING_BEST_ID,
+        best_reserve_px=RANKING_BEST_RESERVE,
+        width_floor_px=RANKING_WIDTH_FLOOR,
+        cell_pad_px=RANKING_CELL_PAD,
     )
 
 

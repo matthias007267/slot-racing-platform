@@ -49,6 +49,7 @@ from slot_racing.modules.races.hud import factory_layout
 from slot_racing.modules.races.hud_scene import (
     HudViewport,
     build_hud_scene,
+    ranking_best_fits,
     ranking_column_visible,
     ranking_width_hidden,
     scene_payload,
@@ -172,6 +173,9 @@ def test_the_scene_is_the_hud_scene_and_the_layout_stays_put() -> None:
     assert ranking_width_hidden(980) == frozenset()
     assert 2 in (ranking_width_hidden(299) or frozenset())
     assert 8 not in (ranking_width_hidden(299) or frozenset())
+    assert ranking_best_fits(39, 999) is True
+    assert ranking_best_fits(240, 200) is False
+    assert ranking_best_fits(240, 100) is True
     assert parse_viewport({"width": 10, "height": 10}) == HudViewport(10, 10)
 
 
@@ -260,11 +264,21 @@ def test_access_checks_token_host_and_origin_without_opening_files() -> None:
     )
     assert escaped is not None
     assert decide_access(escaped, bound_host=_HOST, port=8765, token=token).status == 404
+    session = parse_http_request(
+        f"GET /session?token={token} HTTP/1.1\r\nHost: {_HOST}:8765\r\n\r\n".encode()
+    )
+    assert session is not None
+    assert decide_access(session, bound_host=_HOST, port=8765, token=token).status == 204
+    stale = parse_http_request(b"GET /session?token=old HTTP/1.1\r\nHost: 127.0.0.1:8765\r\n\r\n")
+    assert stale is not None
+    assert decide_access(stale, bound_host=_HOST, port=8765, token=token).status == 403
     page = diagnostic_page().decode()
     assert "Slot-Racing Platform" in page
     assert "nicht verschlüsselt" in page
     assert "keine Startfreigabe" in page
     assert "setInterval" not in page
+    assert "/session" in page
+    assert "sitzung abgelaufen" in page
     assert token not in page
 
 
@@ -327,6 +341,13 @@ def test_http_page_and_rejected_tokens(display: LiveBroadcast) -> None:
     denied, denied_body = _http(host, port, "/live?token=not-the-session")
     assert denied == 403
     assert b"not-the-session" not in denied_body
+    session, session_body = _http(host, port, f"/session?token={token}")
+    assert session == 204
+    assert session_body == b""
+    expired, expired_body = _http(host, port, "/session?token=not-the-session")
+    assert expired == 403
+    assert token.encode() not in expired_body
+    assert b"not-the-session" not in expired_body
     missing, _body = _http(host, port, "/live")
     assert missing == 403
     wrong_host, _body = _http(host, port, f"/live?token={token}", host_header="192.0.2.1:9")
@@ -630,6 +651,22 @@ def test_enabling_the_display_does_not_block_startup(qtbot: QtBot) -> None:
     assert service.is_running() is False
 
 
+def test_ten_distinct_viewports_compose_inside_one_second() -> None:
+    layout = factory_layout()
+    fields = layout.fields
+    snapshot = _snapshot(RaceStatus.RUNNING)
+    presentation = _presentation()
+    viewports = [HudViewport(480 + index * 80, 640) for index in range(10)]
+    started = time.perf_counter()
+    documents = [
+        dump_message(compose_scene(layout, snapshot, presentation, box)) for box in viewports
+    ]
+    assert time.perf_counter() - started < 1.5
+    assert layout.fields is fields
+    assert len(documents) == 10
+    assert all(item.startswith("{") for item in documents)
+
+
 def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     page = hud_page().decode()
     assert START_HINT in page
@@ -638,7 +675,8 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "setInterval" not in page
     assert "innerHTML" not in page
     assert "fetch(" not in page
-    assert "XMLHttpRequest" not in page
+    assert page.count("new XMLHttpRequest") == 1
+    assert '"/session"' in page
     assert "http://" not in page
     assert "https://" not in page
     assert "textContent" in page
@@ -650,7 +688,13 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "seq < lastSceneSeq" in page
     assert "Verbindung unterbrochen" in page
     assert "Wiederverbindung läuft" in page
+    assert "Server nicht erreichbar" in page
+    assert "Die Sitzung ist abgelaufen. Bitte öffne die aktuelle Anzeigeadresse erneut." in page
     assert "Kein Rennen aktiv" in page
+    assert "overflowY" in page
+    assert "best_reserve_px" in page
+    assert "primary_ids" in page
+    assert "width_floor_px" in page
     assert "requestFullscreen" in page
     assert page.count("socket.send(") == 1
     assert "token=" not in page

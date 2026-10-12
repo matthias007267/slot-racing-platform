@@ -358,6 +358,12 @@ class _Worker(QObject):
             self._reject(client, 400, "Anfrage abgelehnt")
             return
         decision = decide_access(request, bound_host=self._host, port=self._port, token=self._token)
+        if decision.kind == "session":
+            if client.socket.write(http_response(204, "No Content", b"", _PLAIN)) < 0:
+                self._release(client, abort=True)
+                return
+            client.socket.disconnectFromHost()
+            return
         if decision.kind in {"page", "diagnostics"}:
             body = diagnostic_page() if decision.kind == "diagnostics" else hud_page()
             if client.socket.write(http_response(200, "OK", body, _HTML)) < 0:

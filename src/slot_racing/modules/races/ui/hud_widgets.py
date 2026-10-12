@@ -34,7 +34,12 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.races.hud_scene import RANKING_BEST_RESERVE, ranking_width_hidden
+from slot_racing.modules.races.hud_scene import (
+    RANKING_BEST_RESERVE,
+    RANKING_CELL_PAD,
+    ranking_best_fits,
+    ranking_width_hidden,
+)
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
 from slot_racing.uikit.theme import COLORS, SPACE, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel, make_table
@@ -45,7 +50,7 @@ _PLACEHOLDER_MAX_FONT = 22
 _MIN_TEXT_FONT = 6
 _STATUS_CAPTION_HEIGHT = 56
 _MESSAGE_CAPTION_HEIGHT = 64
-_CELL_PAD = 16
+_CELL_PAD = RANKING_CELL_PAD
 _TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -503,7 +508,7 @@ class LiveRankingWidget(HudWidget):
         }
         remaining = viewport - sum(floors.values())
         secondary = [column for column in visible if column not in _PRIMARY_COLUMNS]
-        if COLUMN_BEST in secondary and remaining < RANKING_BEST_RESERVE:
+        if COLUMN_BEST in secondary and not ranking_best_fits(viewport, sum(floors.values())):
             self.table.setColumnHidden(COLUMN_BEST, True)
             secondary = [column for column in secondary if column != COLUMN_BEST]
             visible = [column for column in visible if column != COLUMN_BEST]

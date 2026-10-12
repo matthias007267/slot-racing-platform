@@ -6,9 +6,10 @@ not read. While a start sequence is active the lamps stay dark and the page
 shows that synchronization is not available yet.
 
 Small screens keep the same grid as the PC. The scene already says when that
-grid scrolls or overflows. Text may shrink to the scene's fit floor and can
-still clip. There is no separate phone layout. The best-lap column follows the
-scene's ``visible`` flag; the PC may still hide it after measuring its own font.
+grid scrolls. A lane card that is still taller than its box at the fit floor
+scrolls inside the card, so every field stays reachable. There is no separate
+phone layout. The best-lap column uses the scene's width gate and then the same
+reserve check as the PC, measured with the browser's own font.
 """
 
 from __future__ import annotations
@@ -47,9 +48,10 @@ _HUD_HTML = """<!DOCTYPE html>
     font-weight: 700; min-height: 0; overflow: hidden; padding: 0 8px;
   }
   .card {
-    position: absolute; overflow: hidden; background: var(--elevated);
-    border: 1px solid var(--border); display: flex; flex-direction: column;
-    justify-content: center;
+    position: absolute; overflow-x: hidden; overflow-y: hidden;
+    background: var(--elevated); border: 1px solid var(--border);
+    display: flex; flex-direction: column; justify-content: center;
+    -webkit-overflow-scrolling: touch;
   }
   .field { flex: 0 0 auto; overflow: hidden; }
   .field .cap { color: var(--text_muted); line-height: 1.1; }
@@ -136,6 +138,10 @@ _HUD_HTML = """<!DOCTYPE html>
   var scheduleActive = false;
   var lastLights = null;
   var resizeTimer = 0;
+  var retryTimer = 0;
+  var retryDelay = 1000;
+  var probe = null;
+  var sessionOver = false;
 
   function setText(node, value) {
     var text = value == null ? "" : String(value);
@@ -193,6 +199,13 @@ _HUD_HTML = """<!DOCTYPE html>
     } else if (connection === "reconnecting") {
       title = "Verbindung unterbrochen";
       detail = "Wiederverbindung läuft";
+      cover = true;
+    } else if (connection === "unreachable") {
+      title = "Server nicht erreichbar";
+      detail = "Wiederverbindung läuft";
+      cover = true;
+    } else if (connection === "expired") {
+      title = "Die Sitzung ist abgelaufen. Bitte öffne die aktuelle Anzeigeadresse erneut.";
       cover = true;
     } else if (connection === "connecting") {
       title = "Verbindung wird hergestellt";
@@ -412,6 +425,13 @@ _HUD_HTML = """<!DOCTYPE html>
       factor = next;
       apply(factor);
     }
+    if (card.scrollHeight > card.clientHeight + 1) {
+      card.style.overflowY = "auto";
+      card.style.justifyContent = "flex-start";
+    } else {
+      card.style.overflowY = "hidden";
+      card.style.justifyContent = "center";
+    }
   }
   function renderLanes(panel, scene) {
     var lanes = panel && !panel.hidden ? (scene.lanes || []) : [];
@@ -451,6 +471,7 @@ _HUD_HTML = """<!DOCTYPE html>
       var headRow = document.createElement("tr");
       for (index = 0; index < columns.length; index += 1) {
         var th = document.createElement("th");
+        th.setAttribute("data-key", columns[index].column.id);
         setText(th, columns[index].column.header || "");
         headRow.appendChild(th);
       }
@@ -489,6 +510,65 @@ _HUD_HTML = """<!DOCTYPE html>
         body.insertBefore(ordered[index], body.children[index] || null);
       }
     }
+    applyBestColumn(table, ranking);
+  }
+  function textPx(value, bold) {
+    var probe = document.getElementById("text-probe");
+    if (!probe) {
+      probe = document.createElement("span");
+      probe.id = "text-probe";
+      probe.setAttribute("aria-hidden", "true");
+      probe.style.position = "absolute";
+      probe.style.whiteSpace = "nowrap";
+      probe.style.left = "-9999px";
+      document.body.appendChild(probe);
+    }
+    probe.style.fontWeight = bold ? "700" : "400";
+    setText(probe, value);
+    return probe.offsetWidth;
+  }
+  function columnBold(ranking, id) {
+    var columns = ranking.columns || [];
+    var index;
+    for (index = 0; index < columns.length; index += 1) {
+      if (columns[index].id === id) {
+        return columns[index].bold === "always" || columns[index].bold === "leader";
+      }
+    }
+    return false;
+  }
+  function applyBestColumn(table, ranking) {
+    var reserve = ranking.best_reserve_px;
+    var floor = ranking.width_floor_px;
+    var pad = ranking.cell_pad_px;
+    var bestId = ranking.best_id;
+    var primary = ranking.primary_ids || [];
+    if (typeof reserve !== "number" || typeof floor !== "number") return;
+    if (typeof pad !== "number" || !bestId) return;
+    var head = table.querySelector("[data-key='" + bestId + "']");
+    if (!head) return;
+    var viewport = table.clientWidth;
+    var hide = false;
+    var index = 0;
+    if (viewport >= floor) {
+      var used = 0;
+      for (index = 0; index < primary.length; index += 1) {
+        var id = String(primary[index]);
+        var bold = columnBold(ranking, id);
+        var widest = 0;
+        var cells = table.querySelectorAll("[data-key='cell-" + id + "']");
+        var cursor;
+        for (cursor = 0; cursor < cells.length; cursor += 1) {
+          var width = textPx(cells[cursor].textContent, bold);
+          if (width > widest) widest = width;
+        }
+        used += widest + pad;
+      }
+      hide = viewport - used < reserve;
+    }
+    head.hidden = hide;
+    var bestCells = table.querySelectorAll("[data-key='cell-" + bestId + "']");
+    for (index = 0; index < bestCells.length; index += 1) bestCells[index].hidden = hide;
   }
   function keepCells(columns) {
     var keep = {};
@@ -815,7 +895,73 @@ _HUD_HTML = """<!DOCTYPE html>
     else if (msg.type === "start_schedule") onSchedule(msg, true);
     else if (msg.type === "start_schedule_revoked") onSchedule(msg, false);
   }
+  function stopRetry() {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = 0;
+    }
+    var pending = probe;
+    probe = null;
+    if (pending) pending.abort();
+  }
+  function failSession() {
+    sessionOver = true;
+    stopRetry();
+    if (socket) {
+      var oldSocket = socket;
+      socket = null;
+      oldSocket.onclose = null;
+      oldSocket.close();
+    }
+    connection = "expired";
+    scheduleActive = false;
+    paintLights(lastLights);
+    showBanner();
+  }
+  function scheduleRetry() {
+    if (sessionOver || retryTimer) return;
+    retryTimer = setTimeout(function () {
+      retryTimer = 0;
+      if (sessionOver) return;
+      connection = "reconnecting";
+      showBanner();
+      checkSession();
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 8000);
+  }
+  function checkSession() {
+    if (sessionOver) return;
+    var xhr = new XMLHttpRequest();
+    probe = xhr;
+    xhr.open("GET", "/session" + location.search, true);
+    xhr.timeout = 4000;
+    xhr.onload = function () {
+      if (sessionOver || probe !== xhr) return;
+      probe = null;
+      if (xhr.status === 204) {
+        connect();
+        return;
+      }
+      if (xhr.status === 403 || xhr.status === 404 || xhr.status === 405) {
+        failSession();
+        return;
+      }
+      connection = "unreachable";
+      showBanner();
+      scheduleRetry();
+    };
+    xhr.onerror = function () {
+      if (sessionOver || probe !== xhr) return;
+      probe = null;
+      connection = "unreachable";
+      showBanner();
+      scheduleRetry();
+    };
+    xhr.ontimeout = xhr.onerror;
+    xhr.send();
+  }
   function connect() {
+    if (sessionOver) return;
     if (connection !== "reconnecting") connection = "connecting";
     showBanner();
     opened = false;
@@ -830,6 +976,7 @@ _HUD_HTML = """<!DOCTYPE html>
     openedSocket.onopen = function () {
       if (socket !== openedSocket) return;
       opened = true;
+      retryDelay = 1000;
       connection = "connected";
       sendViewport();
       var pending = queue;
@@ -849,15 +996,12 @@ _HUD_HTML = """<!DOCTYPE html>
     openedSocket.onclose = function () {
       if (socket !== openedSocket) return;
       socket = null;
+      if (sessionOver) return;
       connection = "disconnected";
       scheduleActive = false;
       paintLights(lastLights);
       showBanner();
-      setTimeout(function () {
-        connection = "reconnecting";
-        showBanner();
-        connect();
-      }, 1000);
+      scheduleRetry();
     };
   }
   document.getElementById("fullscreen").addEventListener("click", function () {

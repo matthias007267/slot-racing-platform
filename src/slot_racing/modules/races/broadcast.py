@@ -561,7 +561,7 @@ def decide_access(
     if not token_matches(token, request_token(request.target)):
         return AccessDecision("deny", 403, "Zugriff verweigert")
     path = urlsplit(request.target).path
-    if ".." in request.target or path not in {"/", "/live", "/diagnostics"}:
+    if ".." in request.target or path not in {"/", "/live", "/diagnostics", "/session"}:
         return AccessDecision("deny", 404, "Nicht gefunden")
     if request.method != "GET":
         return AccessDecision("deny", 405, "Nicht erlaubt")
@@ -570,6 +570,8 @@ def decide_access(
         return AccessDecision("deny", 400, "Anfrage abgelehnt")
     upgrade = request.headers.get("upgrade", "")
     if not upgrade:
+        if path == "/session":
+            return AccessDecision("session", 204, "No Content")
         if path == "/diagnostics":
             return AccessDecision("diagnostics", 200, "OK")
         return AccessDecision("page", 200, "OK")
@@ -776,6 +778,9 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
   var messages = 0;
   var protocolErrors = 0;
   var socket = null;
+  var retryTimer = 0;
+  var retryDelay = 1000;
+  var stopped = false;
   function text(node, value) { node.textContent = value; }
   function showViewport() {
     var width = window.innerWidth;
@@ -801,7 +806,7 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     opened.onclose = function () {
       if (socket !== opened) return;
       text(connection, "getrennt");
-      setTimeout(connect, 1000);
+      schedule();
     };
     opened.onmessage = function (event) {
       if (socket !== opened) return;
@@ -836,6 +841,37 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
           + " (Host-Zeit, keine Startfreigabe)");
       }
     };
+  }
+  function schedule() {
+    if (stopped || retryTimer) return;
+    retryTimer = setTimeout(function () {
+      retryTimer = 0;
+      if (stopped) return;
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", "/session" + location.search, true);
+      xhr.timeout = 4000;
+      xhr.onload = function () {
+        if (xhr.status === 204) {
+          retryDelay = 1000;
+          connect();
+          return;
+        }
+        if (xhr.status === 403 || xhr.status === 404 || xhr.status === 405) {
+          stopped = true;
+          text(connection, "sitzung abgelaufen");
+          return;
+        }
+        text(connection, "nicht erreichbar");
+        schedule();
+      };
+      xhr.onerror = function () {
+        text(connection, "nicht erreichbar");
+        schedule();
+      };
+      xhr.ontimeout = xhr.onerror;
+      xhr.send();
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 8000);
   }
   window.addEventListener("resize", showViewport);
   showViewport();
