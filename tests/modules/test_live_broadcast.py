@@ -938,6 +938,7 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "Startampel wird abgeglichen" in page
     assert "function reduceStart" in page
     assert "start_authorization" in page
+    assert "msg.protocol_version === 2" in page
     assert "authorizes_go" in page
     assert "startSynchronized" not in page
     assert "planned_go" not in page

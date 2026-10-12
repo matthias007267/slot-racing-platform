@@ -1046,7 +1046,7 @@ _HUD_HTML = """<!DOCTYPE html>
       if (box && typeof box.min === "number" && typeof box.max === "number") {
         limits = {min: box.min, max: box.max};
       }
-      startGate = payload.protocol_version === 2 &&
+      startGate = msg.protocol_version === 2 &&
         payload.start_authorization === "start_committed";
       if (payload.receiving_hud === false && lastSceneSeq < 0) {
         connection = "no-race";
