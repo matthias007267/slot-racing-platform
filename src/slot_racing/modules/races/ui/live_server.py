@@ -16,8 +16,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtNetwork import (
@@ -41,11 +41,13 @@ from slot_racing.modules.races.broadcast import (
     TYPE_START_PHASE,
     TYPE_START_SCHEDULE,
     TYPE_START_SCHEDULE_REVOKED,
+    TYPE_TIME_SAMPLE,
     BindError,
     BroadcastDiagnostics,
     BroadcastFrame,
     BroadcastMailbox,
     DecodedFrame,
+    TimeProbe,
     classify_client_message,
     commit_message,
     decide_access,
@@ -64,12 +66,14 @@ from slot_racing.modules.races.broadcast import (
     scene_message_for,
     schedule_message,
     take_frames,
+    time_sample_message,
     websocket_upgrade,
 )
 from slot_racing.modules.races.hud import HudLayout
 from slot_racing.modules.races.hud_scene import HudPresentation, HudViewport
 from slot_racing.modules.races.live_page import hud_page
 from slot_racing.modules.races.runner import RaceSnapshot
+from slot_racing.modules.races.time_sync import allow_probe
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +181,7 @@ class _Client:
     closing: bool = False
     viewport: HudViewport | None = None
     viewport_pending: bool = False
+    probe_marks: list[int] = field(default_factory=list)
 
 
 class _Poster(QObject):
@@ -201,6 +206,7 @@ class _Worker(QObject):
         ready: threading.Event,
         done: threading.Event,
         failure: dict[str, str],
+        now_ns: Callable[[], int],
     ) -> None:
         super().__init__()
         self._host = host
@@ -211,6 +217,7 @@ class _Worker(QObject):
         self._ready = ready
         self._done = done
         self._failure = failure
+        self._now_ns = now_ns
         self._server: QTcpServer | None = None
         self._clients: dict[int, _Client] = {}
         self._closed = False
@@ -427,22 +434,38 @@ class _Worker(QObject):
             return False
         if client.rejected:
             return False
+        received_ns = self._now_ns()
         try:
             text = frame.payload.decode("utf-8")
         except UnicodeDecodeError:
             verdict_code = "invalid_message"
             viewport = None
+            probe = None
         else:
             verdict = classify_client_message(text)
             verdict_code = verdict.code
             viewport = verdict.viewport
+            probe = verdict.probe
         if verdict_code == "viewport" and viewport is not None:
             client.viewport = viewport
             client.viewport_pending = True
             return True
+        if verdict_code == "time_probe" and probe is not None:
+            self._reply_probe(client, probe, received_ns)
+            return False
+        if verdict_code == "ignore":
+            return False
         client.rejected = True
         self._send_text(client, dump_message(error_message(verdict_code)), kind="")
         return False
+
+    def _reply_probe(self, client: _Client, probe: TimeProbe, received_ns: int) -> None:
+        """Answer on this thread. The GUI thread and the race clock are not involved."""
+        if not allow_probe(client.probe_marks, received_ns):
+            return
+        sent_ns = self._now_ns()
+        document = time_sample_message(probe, received_ns, sent_ns)
+        self._send_text(client, dump_message(document), kind=TYPE_TIME_SAMPLE)
 
     def _flush_client(self, client: _Client, frame: BroadcastFrame) -> None:
         if client.dropped or not client.websocket:
@@ -568,7 +591,7 @@ class _Worker(QObject):
 class LiveBroadcast:
     """Start and stop the local display. Publishing only copies state into the mailbox."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, now_ns: Callable[[], int] | None = None) -> None:
         self._stats = _Stats()
         self._mailbox = BroadcastMailbox()
         self._token = ""
@@ -578,6 +601,7 @@ class LiveBroadcast:
         self._poster: _Poster | None = None
         self._done = threading.Event()
         self._done.set()
+        self._now_ns = time.perf_counter_ns if now_ns is None else now_ns
 
     def start(self, host: str | None = None, port: int = DEFAULT_PORT) -> BroadcastDiagnostics:
         """Listen until :meth:`stop`. A failure is reported and does not raise."""
@@ -609,6 +633,7 @@ class LiveBroadcast:
             ready=ready,
             done=self._done,
             failure=failure,
+            now_ns=self._now_ns,
         )
         thread = QThread()
         worker.moveToThread(thread)

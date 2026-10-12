@@ -1,16 +1,12 @@
 """Confirmed start lights for a browser. The race PC is the only authority.
 
-Phase 2C-1 sends lamps the PC has already shown. It does not predict the next
-lamp and it does not synchronize clocks. ``planned_go_ns`` is a host timestamp,
-never permission to show GO.
-
 ``start_phase`` confirms red lamps that are already on. ``authorizes_go`` is
 false on every phase. GO exists only in ``start_committed``, and the live view
 publishes that document only after ``RaceEngine.start`` has stamped the race.
-A scene, a race status, or a timer is not that stamp.
+A scene, a race status, a timer, or a clock estimate is not that stamp.
 
-Phase 2C-2 may estimate a clock offset and light red lamps locally. It still
-must not turn the lamps out until ``start_committed`` arrives.
+A synced browser may light later red phases from the current schedule. At
+``planned_go_ns`` those lamps stay on. They go out only after ``start_committed``.
 """
 
 from __future__ import annotations
@@ -18,7 +14,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-PROTOCOL_VERSION = 2
+from slot_racing.modules.races.time_sync import parse_timestamp
+
+PROTOCOL_VERSION = 3
 PHASE_COUNTING = "counting"
 RACE_RUNNING = "running"
 
@@ -126,7 +124,7 @@ def parse_phase_document(document: Mapping[str, object]) -> tuple[str, int, int]
         raise ValueError("step_index must not be negative")
     if isinstance(lit_lights, bool) or not isinstance(lit_lights, int) or lit_lights < 1:
         raise ValueError("a counting phase lights at least one lamp")
-    if "at_ns" in document and _whole(document.get("at_ns")) is None:
+    if "at_ns" in document and parse_timestamp(document.get("at_ns")) is None:
         raise ValueError("at_ns must be a host timestamp")
     return sequence_id, step_index, lit_lights
 
@@ -141,13 +139,10 @@ def parse_commit_document(document: Mapping[str, object]) -> tuple[str, int]:
         raise ValueError("start_committed is the start authorization")
     if document.get("race_status") != RACE_RUNNING:
         raise ValueError("start_committed requires a running race")
-    if (
-        isinstance(actual_start_ns, bool)
-        or not isinstance(actual_start_ns, int)
-        or actual_start_ns < 0
-    ):
+    parsed_start = parse_timestamp(actual_start_ns)
+    if parsed_start is None or parsed_start < 0:
         raise ValueError("actual_start_ns must be the engine stamp")
-    return sequence_id, actual_start_ns
+    return sequence_id, parsed_start
 
 
 def reduce_start_display(state: StartDisplay, event: Mapping[str, object]) -> StartDisplay:

@@ -1,10 +1,11 @@
 """Browser HUD. It paints one HUD scene and does not compute a race.
 
 The page is static. It has no CDN, no external font, and no race command.
-A viewport message asks the PC for a scene of that size. ``planned_go_ns`` is
-not read. Red start lamps follow ``start_phase`` only. They go out only after
-``start_committed`` for the same sequence. A scene, a running status, or a
-lost connection cannot authorize GO. Clock synchronization is a later phase.
+A viewport message asks the PC for a scene of that size. Red start lamps
+follow the current schedule when the clock estimate is fresh enough, and
+otherwise follow ``start_phase``. They go out only after ``start_committed``
+for the same sequence. A scene, a running status, ``planned_go_ns``, or a
+lost connection cannot authorize GO. The estimate is not a real-time promise.
 
 Small screens keep the same grid as the PC. The scene already says when that
 grid scrolls. A lane card that is still taller than its box at the fit floor
@@ -15,9 +16,12 @@ reserve check as the PC, measured with the browser's own font.
 
 from __future__ import annotations
 
+from slot_racing.modules.races.time_sync import sync_source
+
 START_HINT = "Startampel folgt dem Renn-PC"
 START_LOST = "Startampel unterbrochen - keine Startfreigabe"
 START_RESYNC = "Startampel wird abgeglichen"
+START_SYNC = "Startampel synchronisiert"
 
 _HUD_HTML = """<!DOCTYPE html>
 <html lang="de">
@@ -122,6 +126,7 @@ _HUD_HTML = """<!DOCTYPE html>
   var HINT_COUNTING = "__START_COUNTING__";
   var HINT_LOST = "__START_LOST__";
   var HINT_RESYNC = "__START_RESYNC__";
+  var HINT_SYNC = "__START_SYNC__";
   var limits = {min: 1, max: 8192};
   var fit = document.getElementById("fit");
   var stage = document.getElementById("stage");
@@ -141,12 +146,24 @@ _HUD_HTML = """<!DOCTYPE html>
   var startGate = false;
   var queuedScene = null;
   var startDisplay = freshStart("idle");
+  var syncSamples = [];
+  var pendingProbes = {};
+  var probeSerial = 0;
+  var syncOffset = null;
+  var syncLocal = false;
+  var syncQuality = "poor";
+  var syncTimer = 0;
+  var lampTimer = 0;
+  var lampFrame = 0;
+  var lampPeak = 0;
+  var plan = null;
   var resizeTimer = 0;
   var retryTimer = 0;
   var retryDelay = 1000;
   var probe = null;
   var sessionOver = false;
 
+  __SYNC_SOURCE__
   function whole(value) {
     if (typeof value !== "number" || !isFinite(value)) return null;
     if (Math.floor(value) !== value) return null;
@@ -227,7 +244,7 @@ _HUD_HTML = """<!DOCTYPE html>
     if (typeof sequenceId !== "string" || !sequenceId) return state;
     if (stepIndex === null || lit === null || lit < 1 || stepIndex < 0) return state;
     if (sequenceId !== state.sequence_id || stepIndex <= state.step_index) return state;
-    if ("at_ns" in payload && whole(payload.at_ns) === null) return state;
+    if ("at_ns" in payload && hostNs(payload.at_ns) === null) return state;
     return copyStart(state, {
       lit_lights: lit,
       step_index: stepIndex,
@@ -240,7 +257,7 @@ _HUD_HTML = """<!DOCTYPE html>
     if (state.state !== "counting" || seq <= state.commit_seq) return state;
     if (payload.authorizes_go !== true || payload.race_status !== "running") return state;
     var sequenceId = payload.sequence_id;
-    var actual = whole(payload.actual_start_ns);
+    var actual = storeNs(payload.actual_start_ns);
     if (typeof sequenceId !== "string" || !sequenceId) return state;
     if (actual === null || actual < 0 || sequenceId !== state.sequence_id) return state;
     return copyStart(state, {
@@ -269,7 +286,7 @@ _HUD_HTML = """<!DOCTYPE html>
       return freshStart("idle");
     }
     if (kind === "scene" || state.state === "disconnected") return state;
-    if (!event || event.protocol_version !== 2) return state;
+    if (!event || event.protocol_version !== 3) return state;
     var seq = whole(event.seq);
     var payload = event.payload;
     if (seq === null || !payload || typeof payload !== "object") return state;
@@ -280,7 +297,9 @@ _HUD_HTML = """<!DOCTYPE html>
     return state;
   }
   function startCaption() {
-    if (startDisplay.state === "counting" && startDisplay.sequence_id) return HINT_COUNTING;
+    if (startDisplay.state === "counting" && startDisplay.sequence_id) {
+      return syncLocal && !document.hidden ? HINT_SYNC : HINT_COUNTING;
+    }
     if (startDisplay.state === "disconnected" && startDisplay.sequence_id) return HINT_LOST;
     if (startDisplay.state === "resyncing") return HINT_RESYNC;
     return "";
@@ -405,9 +424,180 @@ _HUD_HTML = """<!DOCTYPE html>
       sendViewport();
     }, 150);
   }
+  function clearLampTimer() {
+    if (lampTimer) {
+      clearTimeout(lampTimer);
+      lampTimer = 0;
+    }
+    if (lampFrame && window.cancelAnimationFrame) {
+      window.cancelAnimationFrame(lampFrame);
+      lampFrame = 0;
+    }
+  }
+  function armLamps() {
+    clearLampTimer();
+    if (!syncLocal || document.hidden) return;
+    if (startDisplay.state !== "counting" || startDisplay.authorizes_go) return;
+    if (!plan || plan.sequence_id !== startDisplay.sequence_id) return;
+    var now = estimatedPc();
+    if (now === null) return;
+    var wake = nextLampNs(plan.phases, plan.planned_go, now, true);
+    if (wake === null) return;
+    var delay = wake - now;
+    if (delay < 0n) delay = 0n;
+    if (delay > 60000000000n) delay = 60000000000n;
+    var ms = Number(delay / 1000000n);
+    if (ms < 16 && window.requestAnimationFrame) {
+      lampFrame = window.requestAnimationFrame(function () {
+        lampFrame = 0;
+        paintLights(lastLights);
+        armLamps();
+      });
+      return;
+    }
+    lampTimer = setTimeout(function () {
+      lampTimer = 0;
+      paintLights(lastLights);
+      armLamps();
+    }, ms);
+  }
+  function dropSync() {
+    syncSamples = [];
+    pendingProbes = {};
+    syncOffset = null;
+    syncQuality = "poor";
+    syncLocal = false;
+    lampPeak = 0;
+    clearLampTimer();
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = 0;
+    }
+  }
+  function sendProbe() {
+    if (!socket || socket.readyState !== 1 || !startGate) return;
+    var now = clientNowNs();
+    if (now === null) return;
+    probeSerial += 1;
+    var id = "p" + String(probeSerial);
+    var t1 = (now / 1000n).toString();
+    pendingProbes[id] = t1;
+    socket.send(JSON.stringify({
+      type: "time_probe", protocol_version: 3, probe_id: id, t1_us: t1
+    }));
+    setTimeout(function () { delete pendingProbes[id]; }, 2000);
+  }
+  function burst(count, gap) {
+    var left = count;
+    function step() {
+      if (left <= 0 || !startGate) return;
+      left -= 1;
+      sendProbe();
+      if (left > 0) setTimeout(step, gap);
+    }
+    step();
+  }
+  function scheduleSync() {
+    if (syncTimer) clearTimeout(syncTimer);
+    var jitter = Math.floor(Math.random() * 5000);
+    syncTimer = setTimeout(function () {
+      syncTimer = 0;
+      if (!startGate) return;
+      burst(syncQuality === "poor" ? 8 : 2, 40);
+      scheduleSync();
+    }, 30000 + jitter);
+  }
+  function takePlan(msg) {
+    var payload = msg.payload || {};
+    var sequenceId = payload.sequence_id;
+    var revoked = msg.type === "start_schedule_revoked" || payload.status === "revoked";
+    if (revoked) {
+      if (!plan || plan.sequence_id === sequenceId) plan = null;
+      return;
+    }
+    var go = hostNs(payload.planned_go_ns);
+    if (go === null || typeof sequenceId !== "string" || !sequenceId) {
+      plan = null;
+      return;
+    }
+    var rows = payload.phases || [];
+    var phases = [];
+    var index;
+    for (index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      if (!row || row.phase !== "counting") continue;
+      var at = hostNs(row.at_ns);
+      var lit = whole(row.lit_lights);
+      if (at === null || lit === null || lit < 1) continue;
+      phases.push({at: at, lit: lit, step: index});
+    }
+    plan = {sequence_id: sequenceId, planned_go: go, phases: phases};
+  }
+  function applySync() {
+    var now = clientNowNs();
+    if (now === null) return;
+    var estimate = assessSync(syncSamples, now, syncQuality, syncOffset);
+    syncQuality = estimate.quality;
+    syncOffset = estimate.offset;
+    syncLocal = estimate.local && !document.hidden;
+    paintLights(lastLights);
+    armLamps();
+  }
+  function onSample(payload) {
+    var id = payload.probe_id;
+    if (typeof id !== "string" || pendingProbes[id] === undefined) return;
+    var sent = pendingProbes[id];
+    delete pendingProbes[id];
+    if (payload.t1_us !== sent) return;
+    var t4 = clientNowNs();
+    var t1 = hostNs(sent);
+    var t2 = hostNs(payload.t2_ns);
+    var t3 = hostNs(payload.t3_ns);
+    if (t4 === null || t1 === null || t2 === null || t3 === null) return;
+    var pruned = pruneSamples(syncSamples, t4);
+    if (pruned.jumped) {
+      syncSamples = [];
+      syncOffset = null;
+      syncQuality = "poor";
+      syncLocal = false;
+      clearLampTimer();
+      paintLights(lastLights);
+      burst(8, 40);
+      return;
+    }
+    var sample = ntpSample(t1 * 1000n, t2, t3, t4);
+    if (!sample) return;
+    syncSamples = pruned.samples;
+    syncSamples.push({t4: t4, rtt: sample.rtt, offset: sample.offset});
+    if (syncSamples.length > 16) syncSamples = syncSamples.slice(-16);
+    applySync();
+  }
+  function currentLit() {
+    var local = syncLocal && !document.hidden;
+    var predicted = null;
+    if (local && plan && plan.sequence_id === startDisplay.sequence_id) {
+      var now = estimatedPc();
+      if (now !== null) {
+        var found = predictRed(plan.phases, plan.planned_go, now, true);
+        if (found) predicted = found.lit_lights;
+      }
+    }
+    var lit = shownLamps(
+      true, false, startDisplay.lit_lights, predicted, lampPeak, local
+    );
+    if (local) {
+      if (lit > lampPeak) lampPeak = lit;
+    } else lampPeak = startDisplay.lit_lights;
+    return lit;
+  }
+  function estimatedPc() {
+    var now = clientNowNs();
+    if (now === null || syncOffset === null) return null;
+    return now + syncOffset;
+  }
   function phaseLit(index) {
-    if (startDisplay.state !== "counting" || startDisplay.authorizes_go) return false;
-    return index < startDisplay.lit_lights;
+    if (startDisplay.authorizes_go || startDisplay.state !== "counting") return false;
+    return index < currentLit();
   }
   function paintLights(lights) {
     lastLights = lights || null;
@@ -1033,8 +1223,19 @@ _HUD_HTML = """<!DOCTYPE html>
   }
   function onStart(msg) {
     if (!startGate) return;
+    var previous = startDisplay.sequence_id;
+    var previousState = startDisplay.state;
     startDisplay = reduceStart(startDisplay, msg);
+    if (msg.type === "start_schedule" || msg.type === "start_schedule_revoked") {
+      takePlan(msg);
+    }
+    var entered = startDisplay.state === "counting" &&
+      (startDisplay.sequence_id !== previous || previousState !== "counting");
+    if (entered || startDisplay.state === "revoked") lampPeak = 0;
+    if (entered) burst(4, 40);
+    if (startDisplay.state !== "counting") clearLampTimer();
     paintLights(lastLights);
+    armLamps();
   }
   function apply(raw) {
     var msg;
@@ -1046,12 +1247,20 @@ _HUD_HTML = """<!DOCTYPE html>
       if (box && typeof box.min === "number" && typeof box.max === "number") {
         limits = {min: box.min, max: box.max};
       }
-      startGate = msg.protocol_version === 2 &&
+      startGate = msg.protocol_version === 3 &&
         payload.start_authorization === "start_committed";
+      if (startGate) {
+        burst(8, 40);
+        scheduleSync();
+      }
       if (payload.receiving_hud === false && lastSceneSeq < 0) {
         connection = "no-race";
         showBanner();
       }
+      return;
+    }
+    if (msg.type === "time_sample") {
+      onSample(msg.payload || {});
       return;
     }
     if (msg.type === "scene") onScene(msg);
@@ -1077,6 +1286,9 @@ _HUD_HTML = """<!DOCTYPE html>
       oldSocket.close();
     }
     connection = "expired";
+    startGate = false;
+    dropSync();
+    plan = null;
     startDisplay = reduceStart(startDisplay, {type: "disconnect"});
     paintLights(lastLights);
     showBanner();
@@ -1135,6 +1347,8 @@ _HUD_HTML = """<!DOCTYPE html>
     fitted = false;
     mismatchSeq = null;
     startGate = false;
+    dropSync();
+    plan = null;
     startDisplay = reduceStart(startDisplay, {type: "reconnect"});
     paintLights(lastLights);
     var openedSocket = new WebSocket("ws://" + location.host + "/live" + location.search);
@@ -1166,6 +1380,9 @@ _HUD_HTML = """<!DOCTYPE html>
       socket = null;
       if (sessionOver) return;
       connection = "disconnected";
+      startGate = false;
+      dropSync();
+      plan = null;
       startDisplay = reduceStart(startDisplay, {type: "disconnect"});
       paintLights(lastLights);
       showBanner();
@@ -1190,6 +1407,21 @@ _HUD_HTML = """<!DOCTYPE html>
   document.addEventListener("fullscreenchange", scheduleViewport);
   document.addEventListener("webkitfullscreenchange", scheduleViewport);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleViewport);
+  document.addEventListener("visibilitychange", function () {
+    syncLocal = false;
+    clearLampTimer();
+    if (document.hidden) {
+      paintLights(lastLights);
+      return;
+    }
+    syncSamples = [];
+    pendingProbes = {};
+    syncOffset = null;
+    syncQuality = "poor";
+    lampPeak = startDisplay.state === "counting" ? startDisplay.lit_lights : 0;
+    paintLights(lastLights);
+    if (socket && socket.readyState === 1 && startGate) burst(8, 40);
+  });
   showBanner();
   connect();
 })();
@@ -1201,7 +1433,9 @@ _HUD_HTML = """<!DOCTYPE html>
 
 def hud_page() -> bytes:
     """The live HUD. The session token is not part of this document."""
-    page = _HUD_HTML.replace("__START_COUNTING__", START_HINT)
+    page = _HUD_HTML.replace("__SYNC_SOURCE__", sync_source())
+    page = page.replace("__START_COUNTING__", START_HINT)
     page = page.replace("__START_LOST__", START_LOST)
     page = page.replace("__START_RESYNC__", START_RESYNC)
+    page = page.replace("__START_SYNC__", START_SYNC)
     return page.encode("utf-8")

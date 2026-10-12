@@ -468,6 +468,17 @@ and scrolls vertically. Pause and resume are separate buttons and only call `Rac
 A fullscreen window can host the same stage later; this step does not add one, and it does
 not add a library of named layouts.
 
+### Browser clock estimate
+
+A browser on the LAN can estimate the PC's monotonic clock (ADR 0014) and light
+red start lamps from the current start schedule. The estimate uses
+`performance.now()` and four timestamps on a `time_probe` / `time_sample` pair
+answered on the broadcast thread. Host nanoseconds are decimal strings.
+`planned_go_ns` still does not start the race: at that time the last red phase
+stays on until `start_committed`. A poor, stale, or missing estimate falls back
+to the server's `start_phase` messages. The estimate is not a real-time
+guarantee, and the race clock does not wait for it.
+
 ## Dependency rules
 
 | Rule | Enforced by |

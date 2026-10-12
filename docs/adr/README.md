@@ -15,5 +15,6 @@
 | [0011](0011-camera-configuration.md) | Camera configuration is global and not tied to a track |
 | [0012](0012-camera-setup-ui.md) | Camera setup page edits that global document visually |
 | [0013](0013-configurable-race-hud.md) | Race HUD layout is a versioned settings document |
+| [0014](0014-browser-clock-sync.md) | Browser clock estimate for red start lamps, GO stays server-confirmed |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

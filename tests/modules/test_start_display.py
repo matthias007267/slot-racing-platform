@@ -70,7 +70,7 @@ def _commit(seq: int = 1, **overrides: object) -> dict[str, object]:
 
 
 def test_protocol_version_is_the_broadcast_version() -> None:
-    assert PROTOCOL_VERSION == 2
+    assert PROTOCOL_VERSION == 3
     assert BROADCAST_PROTOCOL_VERSION == PROTOCOL_VERSION
 
 
@@ -214,7 +214,7 @@ def test_the_page_reducer_matches_the_python_rules() -> None:
         pytest.skip("node is not installed")
     script = hud_page().decode().split("<script>", 1)[1].split("</script>", 1)[0]
     reducer_end = _function_end(script, "function reduceStart(")
-    source = script[script.index("function whole(") : reducer_end]
+    source = script[script.index("function hostNs(") : reducer_end]
     cases: list[list[dict[str, object]]] = [
         [_schedule(), *[_phase(lit, lit) for lit in range(1, 6)], _commit(1)],
         [_schedule(), _phase(4, 4), _phase(2, 5), _phase(3, 3)],
@@ -223,7 +223,7 @@ def test_the_page_reducer_matches_the_python_rules() -> None:
             _phase(2, 2),
             {
                 "type": "scene",
-                "protocol_version": 2,
+                "protocol_version": PROTOCOL_VERSION,
                 "seq": 1,
                 "payload": {"status": "running", "lights": {"go": True}},
             },
@@ -248,6 +248,7 @@ def test_the_page_reducer_matches_the_python_rules() -> None:
             _event("start_schedule_revoked", 4, {"sequence_id": "seq", "status": "revoked"}),
         ],
         [_commit(1), _schedule(planned_go_ns=5)],
+        [_schedule(), _phase(1, 1), _commit(1, actual_start_ns="80")],
     ]
     payload = []
     expected = []

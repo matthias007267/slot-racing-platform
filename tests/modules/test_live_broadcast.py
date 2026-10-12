@@ -91,6 +91,9 @@ def test_messages_are_versioned_json_and_client_text_is_not_a_command() -> None:
     assert parsed["payload"]["start_authorization"] == "start_committed"
     assert "start_phase" in parsed["payload"]["capabilities"]
     assert "start_committed" in parsed["payload"]["capabilities"]
+    assert "time_probe" in parsed["payload"]["capabilities"]
+    assert "time_sample" in parsed["payload"]["capabilities"]
+    assert parsed["payload"]["timestamp_encoding"] == "decimal_nanoseconds"
     assert parsed["payload"]["time_base"] == TIME_BASE
     assert parsed["payload"]["transport"] == "unencrypted_local_network"
     assert parsed["payload"]["race_active"] is False
@@ -122,6 +125,14 @@ def test_messages_are_versioned_json_and_client_text_is_not_a_command() -> None:
     huge = classify_client_message('{"type": "viewport", "width": 99999, "height": 0}')
     assert huge.code == "viewport"
     assert huge.viewport == HudViewport(8192, 1)
+    probe = classify_client_message(
+        '{"type":"time_probe","protocol_version":3,"probe_id":"p1","t1_us":"15"}'
+    )
+    assert probe.code == "time_probe"
+    assert probe.probe is not None
+    assert probe.probe.probe_id == "p1"
+    assert classify_client_message('{"type":"time_probe"}').code == "ignore"
+    assert classify_client_message('{"type":"time_probe","protocol_version":2}').code == "ignore"
     error = error_message("read_only")
     assert error["seq"] == 0
     assert error["payload"] == {"code": "read_only", "detail": "display_only"}
@@ -216,7 +227,12 @@ def test_schedule_and_revoke_are_kept_apart_from_replaceable_scenes() -> None:
     assert document["type"] == "start_schedule_revoked"
     assert document["protocol_version"] == BROADCAST_PROTOCOL_VERSION
     body = _payload(document)
-    assert body["planned_go_ns"] == schedule.planned_go_ns
+    assert _wire_ns(body["planned_go_ns"]) == schedule.planned_go_ns
+    phases = body["phases"]
+    assert isinstance(phases, list) and phases
+    first_phase = phases[0]
+    assert isinstance(first_phase, dict)
+    assert _wire_ns(first_phase["at_ns"]) == schedule.steps[0].at_ns
     assert body["status"] == "revoked"
     scene = scene_message(current)
     assert scene is not None and scene["type"] == "scene"
@@ -292,6 +308,9 @@ def test_access_checks_token_host_and_origin_without_opening_files() -> None:
     assert "Slot-Racing Platform" in page
     assert "nicht verschlüsselt" in page
     assert "keine Startfreigabe" in page
+    assert "Schätzung" in page
+    assert "keine Echtzeitgarantie" in page
+    assert "time_probe" in page
     assert "setInterval" not in page
     assert "/session" in page
     assert "sitzung abgelaufen" in page
@@ -385,7 +404,7 @@ def test_a_client_receives_hello_scene_schedule_and_revoke(display: LiveBroadcas
         assert [item["type"] for item in messages] == ["hello", "start_schedule", "scene"]
         assert messages[0]["protocol_version"] == BROADCAST_PROTOCOL_VERSION
         assert _payload(messages[1])["sequence_id"] == schedule.sequence_id
-        assert _payload(messages[1])["planned_go_ns"] == schedule.planned_go_ns
+        assert _wire_ns(_payload(messages[1])["planned_go_ns"]) == schedule.planned_go_ns
         assert _payload(messages[2])["race_name"] == "Finale"
         assert messages[2]["seq"] == 1
         display.publish_schedule(schedule.revoke().to_document(), revoked=True)
@@ -771,7 +790,7 @@ def test_a_client_receives_confirmed_lamps_and_go_only_after_commit(qtbot: QtBot
             committed = client.wait_for(lambda item: item.get("type") == "start_committed")
             body = _payload(committed)
             assert _race_status(runner) is RaceStatus.RUNNING
-            assert body["actual_start_ns"] == runner.started_at_ns
+            assert _wire_ns(body["actual_start_ns"]) == runner.started_at_ns
             assert body["race_status"] == "running"
             assert body["authorizes_go"] is True
             assert body["sequence_id"] == first["sequence_id"]
@@ -808,7 +827,7 @@ def test_a_late_clock_does_not_release_go_before_the_engine_starts(qtbot: QtBot,
             live.sync_start_cue()
             committed = client.wait_for(lambda item: item.get("type") == "start_committed")
             assert _race_status(runner) is RaceStatus.RUNNING
-            assert _payload(committed)["actual_start_ns"] == runner.started_at_ns
+            assert _wire_ns(_payload(committed)["actual_start_ns"]) == runner.started_at_ns
         finally:
             client.close()
     finally:
@@ -889,7 +908,7 @@ def test_ten_clients_receive_the_same_confirmed_start(display: LiveBroadcast) ->
                 "start_schedule",
                 "start_committed",
             ]
-            assert _payload(messages[2])["actual_start_ns"] == 9_100
+            assert _wire_ns(_payload(messages[2])["actual_start_ns"]) == 9_100
             assert _payload(messages[2])["authorizes_go"] is True
             assert all(item.get("type") != "start_phase" for item in messages)
     finally:
@@ -938,10 +957,14 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "Startampel wird abgeglichen" in page
     assert "function reduceStart" in page
     assert "start_authorization" in page
-    assert "msg.protocol_version === 2" in page
+    assert "msg.protocol_version === 3" in page
     assert "authorizes_go" in page
     assert "startSynchronized" not in page
-    assert "planned_go" not in page
+    assert "planned_go_ns" in page
+    assert "time_probe" in page
+    assert "performance.now" in page
+    assert "requestAnimationFrame" in page
+    assert "visibilitychange" in page
     assert "Date.now" not in page
     assert "setInterval" not in page
     assert "innerHTML" not in page
@@ -967,7 +990,7 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "primary_ids" in page
     assert "width_floor_px" in page
     assert "requestFullscreen" in page
-    assert page.count("socket.send(") == 1
+    assert page.count("socket.send(") == 2
     assert "token=" not in page
     script = page.split("<script>", 1)[1].split("</script>", 1)[0]
     assert '.join("\\n")' in script
@@ -1015,6 +1038,96 @@ def test_clients_keep_separate_viewports(display: LiveBroadcast, count: int) -> 
         assert layout.fields is fields
     finally:
         watcher.close()
+        for client in clients:
+            client.close()
+
+
+def test_a_clock_probe_is_answered_without_touching_the_race_mailbox(
+    display: LiveBroadcast,
+) -> None:
+    host, port, token = _endpoint(display)
+    before = display.diagnostics().control_updates_sent
+    client = _Client.connect(host, port, token)
+    try:
+        client.send_text(
+            json.dumps(
+                {
+                    "type": "time_probe",
+                    "protocol_version": BROADCAST_PROTOCOL_VERSION,
+                    "probe_id": "clock",
+                    "t1_us": "1000",
+                }
+            )
+        )
+        sample = client.wait_for(lambda item: item.get("type") == "time_sample")
+        body = _payload(sample)
+        assert sample["seq"] == 0
+        assert body["probe_id"] == "clock"
+        assert body["t1_us"] == "1000"
+        t2 = _wire_ns(body["t2_ns"])
+        t3 = _wire_ns(body["t3_ns"])
+        assert t3 >= t2
+        assert display.diagnostics().control_updates_sent == before
+    finally:
+        client.close()
+
+
+def test_extra_clock_probes_are_dropped_and_the_browser_stays_connected(qapp: object) -> None:
+    assert qapp is not None
+    clock = ManualClock(5_000_000_000)
+    service = LiveBroadcast(now_ns=clock.now_ns)
+    assert service.start(_HOST, 0).running
+    try:
+        host, port, token = _endpoint(service)
+        client = _Client.connect(host, port, token)
+        try:
+            client.send_text('{"type":"time_probe"}')
+            for index in range(11):
+                client.send_text(
+                    json.dumps(
+                        {
+                            "type": "time_probe",
+                            "protocol_version": BROADCAST_PROTOCOL_VERSION,
+                            "probe_id": f"p{index}",
+                            "t1_us": "1000",
+                        }
+                    )
+                )
+            found = client.collect(1.0)
+            samples = [item for item in found if item.get("type") == "time_sample"]
+            assert len(samples) == 10
+            assert all(item.get("type") != "error" for item in found)
+            service.publish_scene(_scene_payload())
+            scene = client.wait_for(lambda item: item.get("type") == "scene")
+            assert _payload(scene)["race_name"] == "Finale"
+        finally:
+            client.close()
+    finally:
+        service.stop()
+
+
+def test_ten_browsers_can_sample_the_clock_together(display: LiveBroadcast) -> None:
+    host, port, token = _endpoint(display)
+    clients = [_Client.connect(host, port, token) for _ in range(10)]
+    started = time.perf_counter()
+    try:
+        for client in clients:
+            for index in range(8):
+                client.send_text(
+                    json.dumps(
+                        {
+                            "type": "time_probe",
+                            "protocol_version": BROADCAST_PROTOCOL_VERSION,
+                            "probe_id": f"c{index}",
+                            "t1_us": "2000",
+                        }
+                    )
+                )
+        for client in clients:
+            _await_samples(client, 8)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 5
+    finally:
         for client in clients:
             client.close()
 
@@ -1225,6 +1338,25 @@ def _payload(message: dict[str, object]) -> dict[str, object]:
     payload = message["payload"]
     assert isinstance(payload, dict)
     return payload
+
+
+def _await_samples(client: _Client, count: int) -> None:
+    """Count clock replies already queued, without an extra wait after the last one."""
+    found = 0
+    deadline = time.monotonic() + 2
+    while found < count and time.monotonic() < deadline:
+        client._ingest(0.05)
+        while client._cursor < len(client._inbox):
+            item = client._inbox[client._cursor]
+            client._cursor += 1
+            if item.get("type") == "time_sample":
+                found += 1
+    assert found == count
+
+
+def _wire_ns(value: object) -> int:
+    assert isinstance(value, str)
+    return int(value)
 
 
 def _endpoint(service: LiveBroadcast) -> tuple[str, int, str]:
