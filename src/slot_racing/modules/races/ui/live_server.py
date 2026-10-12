@@ -1,9 +1,10 @@
 """Local HTTP and WebSocket display. The race clock never waits on a socket.
 
-One ``QTcpServer`` on its own thread accepts browsers. HTTP serves a static
-diagnostic page. The same port upgrades to WebSocket and then only sends the
-mailbox. ``write`` queues bytes. Nothing here calls ``waitForBytesWritten`` or
-``flush``, and nothing here holds a race controller.
+One ``QTcpServer`` on its own thread accepts browsers. HTTP serves the live HUD,
+and ``/diagnostics`` keeps the diagnostic page. The same port upgrades to
+WebSocket and then only sends the mailbox. A viewport message recomposes that
+socket's scene. ``write`` queues bytes. Nothing here calls
+``waitForBytesWritten`` or ``flush``, and nothing here holds a race controller.
 
 The listen address is one IPv4 address, never every interface. The session
 token stays in the access URL and out of logs. HTTP and WebSocket on the LAN
@@ -56,11 +57,15 @@ from slot_racing.modules.races.broadcast import (
     normalize_bind_host,
     parse_http_request,
     plan_outbound,
-    scene_message,
+    scene_message_for,
     schedule_message,
     take_frames,
     websocket_upgrade,
 )
+from slot_racing.modules.races.hud import HudLayout
+from slot_racing.modules.races.hud_scene import HudPresentation, HudViewport
+from slot_racing.modules.races.live_page import hud_page
+from slot_racing.modules.races.runner import RaceSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +164,8 @@ class _Client:
     rejected: bool = False
     dropped: bool = False
     closing: bool = False
+    viewport: HudViewport | None = None
+    viewport_pending: bool = False
 
 
 class _Poster(QObject):
@@ -197,6 +204,8 @@ class _Worker(QObject):
         self._clients: dict[int, _Client] = {}
         self._closed = False
         self._rewriting = False
+        self._scene_cache: dict[tuple[int, tuple[int, int] | None], str] = {}
+        self._cache_seq = -1
 
     @Slot()
     def listen(self) -> None:
@@ -225,6 +234,9 @@ class _Worker(QObject):
             return
         self._mailbox.wake.acknowledge()
         frame = self._mailbox.current()
+        if self._cache_seq != frame.scene_seq:
+            self._scene_cache.clear()
+            self._cache_seq = frame.scene_seq
         for client in list(self._clients.values()):
             if client.websocket and not client.dropped:
                 self._flush_client(client, frame)
@@ -346,8 +358,9 @@ class _Worker(QObject):
             self._reject(client, 400, "Anfrage abgelehnt")
             return
         decision = decide_access(request, bound_host=self._host, port=self._port, token=self._token)
-        if decision.kind == "page":
-            if client.socket.write(http_response(200, "OK", diagnostic_page(), _HTML)) < 0:
+        if decision.kind in {"page", "diagnostics"}:
+            body = diagnostic_page() if decision.kind == "diagnostics" else hud_page()
+            if client.socket.write(http_response(200, "OK", body, _HTML)) < 0:
                 self._release(client, abort=True)
                 return
             client.socket.disconnectFromHost()
@@ -373,33 +386,46 @@ class _Worker(QObject):
         if error is not None:
             self._close_ws(client, 1002)
             return
+        refresh = False
         for frame in frames:
             if client.dropped:
                 return
-            self._handle_frame(client, frame)
+            if self._handle_frame(client, frame):
+                refresh = True
+        if refresh and not client.dropped:
+            self._flush_client(client, self._mailbox.current())
 
-    def _handle_frame(self, client: _Client, frame: DecodedFrame) -> None:
+    def _handle_frame(self, client: _Client, frame: DecodedFrame) -> bool:
+        """Return true when this socket needs its scene again. A viewport is not a command."""
         if frame.opcode == 0x8:
             self._close_ws(client, 1000)
-            return
+            return False
         if frame.opcode == 0x9:
             self._write_raw(client, encode_control_frame(0xA, frame.payload))
-            return
+            return False
         if frame.opcode == 0xA:
-            return
+            return False
         if frame.opcode != 0x1:
             self._close_ws(client, 1002)
-            return
+            return False
         if client.rejected:
-            return
+            return False
         try:
             text = frame.payload.decode("utf-8")
         except UnicodeDecodeError:
-            code = "invalid_message"
+            verdict_code = "invalid_message"
+            viewport = None
         else:
-            code = classify_client_message(text).code
+            verdict = classify_client_message(text)
+            verdict_code = verdict.code
+            viewport = verdict.viewport
+        if verdict_code == "viewport" and viewport is not None:
+            client.viewport = viewport
+            client.viewport_pending = True
+            return True
         client.rejected = True
-        self._send_text(client, dump_message(error_message(code)), kind="")
+        self._send_text(client, dump_message(error_message(verdict_code)), kind="")
+        return False
 
     def _flush_client(self, client: _Client, frame: BroadcastFrame) -> None:
         if client.dropped or not client.websocket:
@@ -408,7 +434,8 @@ class _Worker(QObject):
             client.socket.bytesToWrite(),
             hello_due=not client.hello_sent,
             schedule_due=frame.schedule is not None and frame.schedule_seq != client.schedule_seq,
-            scene_due=frame.scene is not None and frame.scene_seq != client.scene_seq,
+            scene_due=frame.scene is not None
+            and (frame.scene_seq != client.scene_seq or client.viewport_pending),
             soft_bytes=SOFT_OUTBOUND_BYTES,
             hard_bytes=HARD_OUTBOUND_BYTES,
         )
@@ -428,11 +455,24 @@ class _Worker(QObject):
             ):
                 client.schedule_seq = frame.schedule_seq
         if plan.send_scene:
-            document = scene_message(frame)
-            if document is not None and self._send_text(
-                client, dump_message(document), kind=TYPE_SCENE
-            ):
+            text = self._scene_text(frame, client.viewport)
+            if text is not None and self._send_text(client, text, kind=TYPE_SCENE):
                 client.scene_seq = frame.scene_seq
+                client.viewport_pending = False
+
+    def _scene_text(self, frame: BroadcastFrame, viewport: HudViewport | None) -> str | None:
+        key = (frame.scene_seq, None if viewport is None else (viewport.width, viewport.height))
+        cached = self._scene_cache.get(key)
+        if cached is not None:
+            return cached
+        document = scene_message_for(frame, viewport)
+        if document is None:
+            return None
+        text = dump_message(document)
+        if len(self._scene_cache) >= MAX_CLIENTS:
+            self._scene_cache.clear()
+        self._scene_cache[key] = text
+        return text
 
     def _send_text(self, client: _Client, text: str, *, kind: str) -> bool:
         try:
@@ -599,6 +639,18 @@ class LiveBroadcast:
         self._done.set()
         if self._stats.snapshot().running:
             self._stats.stopped()
+
+    def publish_source(
+        self, layout: HudLayout, snapshot: RaceSnapshot, presentation: HudPresentation
+    ) -> int:
+        """Copy one live view into the mailbox. Per-client sizes are composed later."""
+        if not self._accepting:
+            return 0
+        try:
+            return self._mailbox.publish_source(layout, snapshot, presentation)
+        except Exception:
+            logger.exception("Live display ignored a scene that cannot be sent")
+            return 0
 
     def publish_scene(self, payload: Mapping[str, object]) -> int:
         if not self._accepting:

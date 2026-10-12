@@ -26,7 +26,6 @@ from slot_racing.core.events import (
     WinnerDetermined,
 )
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.races.broadcast import compose_scene
 from slot_racing.modules.races.hud import (
     RECORDS_MIN_HEIGHT,
     VIEW_BETWEEN,
@@ -717,7 +716,7 @@ class LiveRaceView(QWidget):
                 can_stop=self.stop_button.isEnabled(),
                 can_results=self.results_button.isEnabled(),
             )
-            broadcast.publish_scene(compose_scene(self.bound_layout(), snapshot, presentation))
+            broadcast.publish_source(self.bound_layout(), snapshot, presentation)
         except Exception:
             logger.exception("Could not publish the live display")
 

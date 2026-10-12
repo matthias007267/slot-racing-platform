@@ -42,8 +42,12 @@ the current scene. It does not wait for the next lap. After a reconnect the
 same full state is sent again. Older scenes are not replayed.
 
 The reference viewport is 1280 by 720. :func:`compose_scene` accepts another
-viewport for a later per-client view. Passing one does not write the PC layout.
-Phase 2A always publishes the reference viewport. A client viewport is ignored.
+viewport and does not write the PC layout. A client may ask for its own size
+with ``{"type": "viewport", "width": <int>, "height": <int>}``. That request is
+display only. The service clamps it, composes a scene for that socket, and
+leaves the PC layout and every other client unchanged. A client that has not
+asked yet receives the reference scene. ``planned_go_ns`` stays a host
+monotonic timestamp and is not a start authorization.
 
 HTTP and WebSocket on the local network are not encrypted. The session token
 only keeps a casual visitor off the page. Anyone who can already see the
@@ -94,6 +98,9 @@ TYPE_SCENE = "scene"
 TYPE_START_SCHEDULE = "start_schedule"
 TYPE_START_SCHEDULE_REVOKED = "start_schedule_revoked"
 TYPE_ERROR = "error"
+TYPE_VIEWPORT = "viewport"
+VIEWPORT_MIN = 1
+VIEWPORT_MAX = 8192
 
 _ACTIVE_RACE = frozenset({RaceStatus.RUNNING.value, RaceStatus.PAUSED.value})
 _LOOPBACK = "127.0.0.1"
@@ -118,6 +125,15 @@ class BroadcastDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class SceneSource:
+    """Immutable inputs for one more viewport. The layout object is never written."""
+
+    layout: HudLayout
+    snapshot: RaceSnapshot
+    presentation: HudPresentation
+
+
+@dataclass(frozen=True, slots=True)
 class BroadcastFrame:
     """The one scene and the one schedule a client should know about."""
 
@@ -127,13 +143,15 @@ class BroadcastFrame:
     schedule_seq: int
     schedule_revoked: bool
     generation: int
+    source: SceneSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ClientVerdict:
-    """Why a client message was ignored. There is no race action to perform."""
+    """Why a client message was ignored, or the viewport it may display."""
 
     code: str
+    viewport: HudViewport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +231,7 @@ class BroadcastMailbox:
         self._schedule_seq = 0
         self._schedule_revoked = False
         self._generation = 0
+        self._source: SceneSource | None = None
 
     @property
     def wake(self) -> WakeGate:
@@ -223,6 +242,25 @@ class BroadcastMailbox:
         with self._lock:
             self._scene_seq += 1
             self._scene = copied
+            self._source = None
+            self._generation += 1
+            seq = self._scene_seq
+        self._wake.kick()
+        return seq
+
+    def publish_source(
+        self,
+        layout: HudLayout,
+        snapshot: RaceSnapshot,
+        presentation: HudPresentation,
+    ) -> int:
+        """Store the reference scene and the inputs a client viewport can reuse."""
+        reference = copy_document(compose_scene(layout, snapshot, presentation))
+        source = SceneSource(layout, snapshot, presentation)
+        with self._lock:
+            self._scene_seq += 1
+            self._scene = reference
+            self._source = source
             self._generation += 1
             seq = self._scene_seq
         self._wake.kick()
@@ -251,6 +289,7 @@ class BroadcastMailbox:
             self._schedule_seq = 0
             self._schedule_revoked = False
             self._generation = 0
+            self._source = None
 
     def current(self) -> BroadcastFrame:
         with self._lock:
@@ -261,6 +300,7 @@ class BroadcastMailbox:
                 schedule_seq=self._schedule_seq,
                 schedule_revoked=self._schedule_revoked,
                 generation=self._generation,
+                source=self._source,
             )
 
 
@@ -308,7 +348,8 @@ def hello_message(frame: BroadcastFrame) -> dict[str, object]:
                 "width": REFERENCE_VIEWPORT.width,
                 "height": REFERENCE_VIEWPORT.height,
             },
-            "viewport_note": "client_viewport_is_ignored",
+            "viewport_note": "client_viewport_selects_a_scene",
+            "viewport_limits": {"min": VIEWPORT_MIN, "max": VIEWPORT_MAX},
             "planned_go_note": "host_monotonic_not_a_start_authorization",
             "transport": "unencrypted_local_network",
             "race_active": status in _ACTIVE_RACE,
@@ -323,6 +364,46 @@ def scene_message(frame: BroadcastFrame) -> dict[str, object] | None:
     return message(TYPE_SCENE, frame.scene_seq, frame.scene)
 
 
+def scene_payload_for(
+    frame: BroadcastFrame, viewport: HudViewport | None
+) -> dict[str, object] | None:
+    """The scene for one client. A missing source keeps the shared reference scene."""
+    if frame.scene is None:
+        return None
+    source = frame.source
+    if source is None or viewport is None or viewport == REFERENCE_VIEWPORT:
+        return frame.scene
+    try:
+        return compose_scene(source.layout, source.snapshot, source.presentation, viewport)
+    except Exception:
+        logger.exception("Live display kept the reference scene")
+        return frame.scene
+
+
+def scene_message_for(
+    frame: BroadcastFrame, viewport: HudViewport | None
+) -> dict[str, object] | None:
+    payload = scene_payload_for(frame, viewport)
+    if payload is None:
+        return None
+    return message(TYPE_SCENE, frame.scene_seq, payload)
+
+
+def parse_viewport(payload: Mapping[str, object]) -> HudViewport | None:
+    """Clamp a display size. Anything that is not an integer is refused."""
+    width = payload.get("width")
+    height = payload.get("height")
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    return HudViewport(_clamp_viewport(width), _clamp_viewport(height))
+
+
+def _clamp_viewport(value: int) -> int:
+    return min(VIEWPORT_MAX, max(VIEWPORT_MIN, value))
+
+
 def schedule_message(frame: BroadcastFrame) -> dict[str, object] | None:
     if frame.schedule is None:
         return None
@@ -335,11 +416,18 @@ def error_message(code: str) -> dict[str, object]:
 
 
 def classify_client_message(raw: str) -> ClientVerdict:
-    """Every client message is ignored. Unknown and forbidden ones do not differ in effect."""
+    """A viewport is a display request. Every other client message is ignored."""
     parsed = json_object(raw)
     kind = None if parsed is None else parsed.get("type")
     if not isinstance(kind, str) or not kind:
         return ClientVerdict("invalid_message")
+    if kind == TYPE_VIEWPORT:
+        if parsed is None:
+            return ClientVerdict("invalid_message")
+        viewport = parse_viewport(parsed)
+        if viewport is None:
+            return ClientVerdict("invalid_message")
+        return ClientVerdict("viewport", viewport)
     return ClientVerdict("read_only")
 
 
@@ -473,7 +561,7 @@ def decide_access(
     if not token_matches(token, request_token(request.target)):
         return AccessDecision("deny", 403, "Zugriff verweigert")
     path = urlsplit(request.target).path
-    if ".." in request.target or path not in {"/", "/live"}:
+    if ".." in request.target or path not in {"/", "/live", "/diagnostics"}:
         return AccessDecision("deny", 404, "Nicht gefunden")
     if request.method != "GET":
         return AccessDecision("deny", 405, "Nicht erlaubt")
@@ -482,6 +570,8 @@ def decide_access(
         return AccessDecision("deny", 400, "Anfrage abgelehnt")
     upgrade = request.headers.get("upgrade", "")
     if not upgrade:
+        if path == "/diagnostics":
+            return AccessDecision("diagnostics", 200, "OK")
         return AccessDecision("page", 200, "OK")
     if upgrade.lower() != "websocket" or path != "/live":
         return AccessDecision("deny", 400, "Upgrade nicht unterstützt")
@@ -659,13 +749,15 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
 <body>
 <main>
   <h1 id="app">Slot-Racing Platform</h1>
-  <p>Diagnose der lokalen Live-Anzeige. Dies ist noch keine Rennansicht.</p>
+  <p>Diagnose der lokalen Live-Anzeige. Die Rennansicht liegt auf der Hauptadresse.</p>
   <dl>
     <dt>Verbindung</dt><dd id="connection">getrennt</dd>
     <dt>Rennen aktiv</dt><dd id="race">unbekannt</dd>
     <dt>HUD-Daten</dt><dd id="hud">nein</dd>
     <dt>Letzte Aktualisierung (Empfangszeit dieses Geräts)</dt><dd id="last">—</dd>
     <dt>Nachrichten</dt><dd id="count">0</dd>
+    <dt>Protokollfehler</dt><dd id="errors">0</dd>
+    <dt>Viewport</dt><dd id="viewport">—</dd>
     <dt>Startzeitplan</dt><dd id="plan">keiner</dd>
   </dl>
   <p>Die Verbindung im lokalen Netzwerk ist nicht verschlüsselt.</p>
@@ -679,24 +771,48 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
   var last = document.getElementById("last");
   var count = document.getElementById("count");
   var plan = document.getElementById("plan");
+  var errors = document.getElementById("errors");
+  var viewport = document.getElementById("viewport");
   var messages = 0;
+  var protocolErrors = 0;
+  var socket = null;
   function text(node, value) { node.textContent = value; }
+  function showViewport() {
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+    text(viewport, String(width) + " x " + String(height));
+  }
+  function noteError() {
+    protocolErrors += 1;
+    text(errors, String(protocolErrors));
+  }
   function connect() {
-    text(connection, "verbinde");
-    var socket = new WebSocket("ws://" + location.host + "/live" + location.search);
-    socket.onopen = function () { text(connection, "verbunden"); };
-    socket.onerror = function () { text(connection, "fehler"); };
-    socket.onclose = function () {
+    text(connection, socket ? "wiederverbindung" : "verbinde");
+    var opened = new WebSocket("ws://" + location.host + "/live" + location.search);
+    socket = opened;
+    opened.onopen = function () {
+      if (socket !== opened) return;
+      text(connection, "verbunden");
+      showViewport();
+    };
+    opened.onerror = function () {
+      if (socket === opened) text(connection, "fehler");
+    };
+    opened.onclose = function () {
+      if (socket !== opened) return;
       text(connection, "getrennt");
       setTimeout(connect, 1000);
     };
-    socket.onmessage = function (event) {
+    opened.onmessage = function (event) {
+      if (socket !== opened) return;
       messages += 1;
       text(count, String(messages));
       text(last, new Date().toLocaleString());
       var msg;
-      try { msg = JSON.parse(event.data); } catch (error) { return; }
+      try { msg = JSON.parse(event.data); } catch (error) { noteError(); return; }
+      if (!msg || typeof msg.type !== "string") { noteError(); return; }
       var payload = msg.payload || {};
+      if (msg.type === "error") noteError();
       if (msg.type === "hello") {
         text(document.getElementById("app"), payload.application || "Slot-Racing Platform");
         text(race, payload.race_active ? "ja" : "nein");
@@ -709,6 +825,10 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
           text(hud, "ja");
           var active = payload.status === "running" || payload.status === "paused";
           text(race, active ? "ja" : "nein");
+          var box = payload.viewport || {};
+          if (box.width && box.height) {
+            text(viewport, String(box.width) + " x " + String(box.height));
+          }
         }
       } else if (msg.type === "start_schedule" || msg.type === "start_schedule_revoked") {
         text(plan, "Sequenz " + payload.sequence_id + ", Status " + payload.status
@@ -717,6 +837,8 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
       }
     };
   }
+  window.addEventListener("resize", showViewport);
+  showViewport();
   connect();
 })();
 </script>

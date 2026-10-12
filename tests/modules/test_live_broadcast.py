@@ -37,14 +37,23 @@ from slot_racing.modules.races.broadcast import (
     new_session_token,
     normalize_bind_host,
     parse_http_request,
+    parse_viewport,
     plan_outbound,
     scene_message,
+    scene_payload_for,
     schedule_message,
     take_frames,
     token_matches,
 )
 from slot_racing.modules.races.hud import factory_layout
-from slot_racing.modules.races.hud_scene import HudViewport, build_hud_scene, scene_payload
+from slot_racing.modules.races.hud_scene import (
+    HudViewport,
+    build_hud_scene,
+    ranking_column_visible,
+    ranking_width_hidden,
+    scene_payload,
+)
+from slot_racing.modules.races.live_page import START_HINT, hud_page
 from slot_racing.modules.races.start_schedule import TIME_BASE, StartSchedule
 from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_view import LiveRaceView
@@ -89,11 +98,22 @@ def test_messages_are_versioned_json_and_client_text_is_not_a_command() -> None:
         '{"type": "abort"}',
         '{"type": "set_lap"}',
         '{"type": "edit_driver"}',
-        '{"type": "viewport", "width": 100}',
     ):
         verdict = classify_client_message(raw)
         assert verdict.code == "read_only"
         assert not hasattr(verdict, "action")
+    for raw in (
+        '{"type": "viewport", "width": 100}',
+        '{"type": "viewport", "width": true, "height": 100}',
+        '{"type": "viewport", "width": "100", "height": 100}',
+    ):
+        assert classify_client_message(raw).code == "invalid_message"
+    fitted = classify_client_message('{"type": "viewport", "width": 1024, "height": 768}')
+    assert fitted.code == "viewport"
+    assert fitted.viewport == HudViewport(1024, 768)
+    huge = classify_client_message('{"type": "viewport", "width": 99999, "height": 0}')
+    assert huge.code == "viewport"
+    assert huge.viewport == HudViewport(8192, 1)
     error = error_message("read_only")
     assert error["seq"] == 0
     assert error["payload"] == {"code": "read_only", "detail": "display_only"}
@@ -120,6 +140,39 @@ def test_the_scene_is_the_hud_scene_and_the_layout_stays_put() -> None:
     again_viewport = compose_scene(layout, snapshot, presentation)["viewport"]
     assert isinstance(again_viewport, dict)
     assert again_viewport["width"] == 1280
+    box = BroadcastMailbox()
+    box.publish_source(layout, snapshot, presentation)
+    held = box.current()
+    assert held.source is not None
+    reference = scene_payload_for(held, None)
+    assert isinstance(reference, dict)
+    assert reference["viewport"] == {"width": 1280, "height": 720}
+    phone = scene_payload_for(held, HudViewport(390, 844))
+    assert isinstance(phone, dict)
+    assert phone["viewport"] == {"width": 390, "height": 844}
+    assert scene_payload_for(held, HudViewport(1280, 720)) == reference
+    assert layout.fields is fields
+    ranking = phone["ranking"]
+    assert isinstance(ranking, dict)
+    columns = ranking["columns"]
+    assert isinstance(columns, list)
+    panel_width = 0
+    panels = phone["panels"]
+    assert isinstance(panels, list)
+    for panel in panels:
+        assert isinstance(panel, dict)
+        if panel.get("id") == "ranking":
+            assert isinstance(panel["width"], int)
+            panel_width = panel["width"]
+    assert panel_width > 0
+    for column in columns:
+        assert isinstance(column, dict)
+        assert column["visible"] is ranking_column_visible(str(column["id"]), panel_width)
+    assert ranking_width_hidden(39) is None
+    assert ranking_width_hidden(980) == frozenset()
+    assert 2 in (ranking_width_hidden(299) or frozenset())
+    assert 8 not in (ranking_width_hidden(299) or frozenset())
+    assert parse_viewport({"width": 10, "height": 10}) == HudViewport(10, 10)
 
 
 def test_schedule_and_revoke_are_kept_apart_from_replaceable_scenes() -> None:
@@ -260,11 +313,17 @@ def test_http_page_and_rejected_tokens(display: LiveBroadcast) -> None:
     text = body.decode()
     assert status == 200
     assert "Slot-Racing Platform" in text
-    assert "Verbindung" in text
-    assert "Rennen aktiv" in text
-    assert "HUD-Daten" in text
-    assert "Nachrichten" in text
+    assert "Verbindung unterbrochen" in text
+    assert "Kein Rennen aktiv" in text
     assert token not in text
+    diagnosed, diagnosed_body = _http(host, port, f"/diagnostics?token={token}")
+    diagnosed_text = diagnosed_body.decode()
+    assert diagnosed == 200
+    assert "HUD-Daten" in diagnosed_text
+    assert "Nachrichten" in diagnosed_text
+    assert "Protokollfehler" in diagnosed_text
+    assert "Viewport" in diagnosed_text
+    assert token not in diagnosed_text
     denied, denied_body = _http(host, port, "/live?token=not-the-session")
     assert denied == 403
     assert b"not-the-session" not in denied_body
@@ -483,6 +542,12 @@ def test_client_commands_do_not_change_the_race(qtbot: QtBot, env: Env) -> None:
             assert viewport["width"] == 1280
             layout_id = live.bound_layout().id
             font_scale = live.bound_layout().font_scale
+            client.send_text('{"type":"viewport","width":390,"height":844,"action":"start"}')
+            fitted = client.take_matching(lambda item: item.get("type") == "scene", timeout=2)
+            fitted_view = _payload(fitted[-1])["viewport"]
+            assert isinstance(fitted_view, dict)
+            assert fitted_view["width"] == 390
+            assert fitted_view["height"] == 844
             client.send_text('{"type":"pause"}')
             client.send_text('{"type":"stop"}')
             client.send_text("not-json")
@@ -565,6 +630,64 @@ def test_enabling_the_display_does_not_block_startup(qtbot: QtBot) -> None:
     assert service.is_running() is False
 
 
+def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
+    page = hud_page().decode()
+    assert START_HINT in page
+    assert "var startSynchronized = false" in page
+    assert "planned_go" not in page
+    assert "setInterval" not in page
+    assert "innerHTML" not in page
+    assert "fetch(" not in page
+    assert "XMLHttpRequest" not in page
+    assert "http://" not in page
+    assert "https://" not in page
+    assert "textContent" in page
+    assert "button.disabled = true" in page
+    assert 'type: "viewport"' in page
+    assert "fit_floor" in page
+    assert "visible !== false" in page
+    assert "seq < lastSceneSeq" in page
+    assert "Verbindung unterbrochen" in page
+    assert "Wiederverbindung läuft" in page
+    assert "Kein Rennen aktiv" in page
+    assert "requestFullscreen" in page
+    assert page.count("socket.send(") == 1
+    assert "token=" not in page
+
+
+@pytest.mark.parametrize("count", [2, 5, 10])
+def test_clients_keep_separate_viewports(display: LiveBroadcast, count: int) -> None:
+    layout = factory_layout()
+    fields = layout.fields
+    snapshot = _snapshot(RaceStatus.RUNNING)
+    presentation = _presentation()
+    assert display.publish_source(layout, snapshot, presentation) == 1
+    host, port, token = _endpoint(display)
+    clients = [_Client.connect(host, port, token) for _ in range(count)]
+    watcher = _Client.connect(host, port, token)
+    widths = [480 + index * 70 for index in range(count)]
+    try:
+        for client, width in zip(clients, widths, strict=True):
+            client.send_text(json.dumps({"type": "viewport", "width": width, "height": 720}))
+        for client, width in zip(clients, widths, strict=True):
+            found = client.take_matching(_width_is(width), timeout=3)
+            assert _viewport_width(found[-1]) == width
+        assert display.publish_source(layout, snapshot, presentation) == 2
+        for client, width in zip(clients, widths, strict=True):
+            found = client.take_matching(_update_is(width), timeout=3)
+            assert _viewport_width(found[-1]) == width
+        reference = watcher.take_matching(
+            lambda item: item.get("type") == "scene" and item.get("seq") == 2,
+            timeout=3,
+        )
+        assert _viewport_width(reference[-1]) == 1280
+        assert layout.fields is fields
+    finally:
+        watcher.close()
+        for client in clients:
+            client.close()
+
+
 class _Client:
     def __init__(self, sock: socket.socket, status: int, rest: bytes) -> None:
         self.sock = sock
@@ -643,6 +766,38 @@ class _Client:
             return
         if chunk:
             self.buffer.extend(chunk)
+
+
+def _width_is(expected: int) -> Callable[[dict[str, object]], bool]:
+    def predicate(item: dict[str, object]) -> bool:
+        return _viewport_width(item) == expected
+
+    return predicate
+
+
+def _update_is(expected: int) -> Callable[[dict[str, object]], bool]:
+    def predicate(item: dict[str, object]) -> bool:
+        return (
+            item.get("type") == "scene"
+            and item.get("seq") == 2
+            and _viewport_width(item) == expected
+        )
+
+    return predicate
+
+
+def _viewport_width(message: dict[str, object]) -> int | None:
+    if message.get("type") != "scene":
+        return None
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    viewport = payload.get("viewport")
+    if not isinstance(viewport, dict) or not isinstance(viewport.get("width"), int):
+        return None
+    width = viewport["width"]
+    assert isinstance(width, int)
+    return width
 
 
 def _has_marker(message: dict[str, object], marker: int) -> bool:
