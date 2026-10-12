@@ -40,7 +40,12 @@ from slot_racing.modules.races.hud import (
 from slot_racing.modules.races.hud_scene import HudCue, HudPresentation
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
-from slot_racing.modules.races.start_schedule import StartDeviation
+from slot_racing.modules.races.start_display import (
+    commit_document,
+    phase_document,
+    start_is_committed,
+)
+from slot_racing.modules.races.start_schedule import StartDeviation, StartSchedulePhase
 from slot_racing.modules.races.time_trial_board import TimeTrialBoard, build_time_trial_board
 from slot_racing.modules.races.types import HeatBriefing
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, status_message
@@ -239,6 +244,7 @@ class LiveRaceView(QWidget):
         schedule = cue.schedule
         if schedule is not None:
             self._hand_schedule(schedule.to_document(), revoked=False)
+        self._publish_reached_phase()
         self._publish_live()
 
     def advance_start_cue(self) -> None:
@@ -267,6 +273,8 @@ class LiveRaceView(QWidget):
             return
         self.start_lights.show_lights(step.lit_lights, go=step.phase is StartPhase.START_SIGNAL)
         self._place_lights()
+        if step.phase is StartPhase.COUNTING:
+            self._hand_phase(step)
 
     def _play_start_sound(self, step: object) -> None:
         """Start the step's tone. The cue does not wait for it, and neither does the race."""
@@ -328,6 +336,10 @@ class LiveRaceView(QWidget):
         happens from the cue after this returns, so the stamp is not waiting
         on a repaint. A blocked GUI thread can still delay this call; the
         deviation then says how late the start was.
+
+        ``start_committed`` is published only after that stamp exists and the
+        runner is running. A scene published from ``refresh`` is not the
+        authorization, and a failed start publishes none.
         """
         runner = self._runner
         cue = self._cue
@@ -347,6 +359,13 @@ class LiveRaceView(QWidget):
         if cue is not None and started is not None:
             cue.record_actual_start(started)
             self._remember_deviation(cue)
+        if (
+            cue is not None
+            and cue.schedule is not None
+            and started is not None
+            and start_is_committed(started, runner.status.value)
+        ):
+            self._hand_commit(cue.schedule.sequence_id, started)
         self._timer.start()
         self.refresh()
 
@@ -728,6 +747,64 @@ class LiveRaceView(QWidget):
             broadcast.publish_schedule(document, revoked=revoked)
         except Exception:
             logger.exception("Could not publish the start schedule")
+
+    def _publish_reached_phase(self) -> None:
+        """Publish the lamp ``begin`` already showed, after its schedule exists."""
+        cue = self._cue
+        current = None if cue is None else cue.current
+        if current is not None and current.phase is StartPhase.COUNTING:
+            self._hand_phase(current)
+
+    def _hand_phase(self, step: StartCueStep) -> None:
+        cue = self._cue
+        schedule = None if cue is None else cue.schedule
+        if schedule is None or step.phase is not StartPhase.COUNTING:
+            return
+        matched = next(
+            (
+                item
+                for item in schedule.steps
+                if item.phase is StartSchedulePhase.COUNTING and item.lit_lights == step.lit_lights
+            ),
+            None,
+        )
+        if matched is None:
+            return
+        try:
+            document = phase_document(
+                sequence_id=schedule.sequence_id,
+                step_index=matched.index,
+                lit_lights=matched.lit_lights,
+                at_ns=matched.at_ns,
+            )
+        except ValueError:
+            return
+        self._hand_start_document(document, committed=False)
+
+    def _hand_commit(self, sequence_id: str, actual_start_ns: int) -> None:
+        try:
+            document = commit_document(
+                sequence_id=sequence_id,
+                actual_start_ns=actual_start_ns,
+                race_status=RaceStatus.RUNNING.value,
+            )
+        except ValueError:
+            logger.exception("Could not describe the confirmed start")
+            return
+        self._hand_start_document(document, committed=True)
+
+    def _hand_start_document(self, document: dict[str, object], *, committed: bool) -> None:
+        """Queue one start document. A slow browser must not delay the race clock."""
+        broadcast = self._broadcast
+        if broadcast is None or not broadcast.is_running():
+            return
+        try:
+            if committed:
+                broadcast.publish_start_committed(document)
+            else:
+                broadcast.publish_start_phase(document)
+        except Exception:
+            logger.exception("Could not publish the start light")
 
     def _clear_broadcast(self) -> None:
         broadcast = self._broadcast

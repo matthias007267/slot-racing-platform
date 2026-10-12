@@ -10,12 +10,13 @@ JSON envelope
 -------------
 Every message is one JSON object:
 
-``{"protocol_version": 1, "type": "<type>", "seq": <int>, "payload": { ... }}``
+``{"protocol_version": 2, "type": "<type>", "seq": <int>, "payload": { ... }}``
 
-``protocol_version`` is the broadcast protocol, currently ``1``.
-``seq`` identifies the state. Scene messages use the scene sequence, schedule
-messages use the schedule sequence, and ``hello`` uses the mailbox generation.
+``protocol_version`` is the broadcast protocol, currently ``2``.
+``seq`` identifies the state. Scene, schedule, start-phase and start-commit
+messages each have their own sequence. ``hello`` uses the mailbox generation.
 An ``error`` reply uses ``seq`` 0 because it is not a race state.
+A client that does not speak version 2 must not treat any message as GO.
 
 Message types that are sent:
 
@@ -29,17 +30,35 @@ Message types that are sent:
   Timestamps are host monotonic nanoseconds (``time_base`` ``host_monotonic_ns``).
   They are not a browser clock and not permission to start.
 - ``start_schedule_revoked`` — the same document after ``revoke``. A scene update
-  cannot replace it. A newer schedule can.
+  cannot replace it. A newer schedule can. A revoke for an older sequence does
+  not replace the sequence now held.
+- ``start_phase`` — one red lamp phase the race PC has already reached.
+  ``authorizes_go`` is false. A later or duplicate phase cannot restore an
+  older lamp count. The newest phase replaces the previous one, so a slow
+  client skips intermediates and does not replay them.
+- ``start_committed`` — the race engine has started. ``actual_start_ns`` is
+  that engine stamp and ``authorizes_go`` is true. This is the only start
+  authorization. It is not sent for a planned time, a timer callback, or a
+  failed start. A scene cannot replace it. After it is sent the held red
+  phase is dropped, so a new connection does not replay the countdown.
 - ``error`` — the client sent something. The display is read-only, so the code
   is ``invalid_message`` or ``read_only``. No race action follows.
+  ``start_phase`` and ``start_committed`` from a client are ``read_only``.
 
 ``snapshot``, ``race_update`` and ``connection_status`` are not sent. The scene
 already contains the snapshot, a partial update could contradict the last scene,
 and an open socket is the connection.
 
-A new client receives ``hello``, then the current schedule if one is held, then
-the current scene. It does not wait for the next lap. After a reconnect the
-same full state is sent again. Older scenes are not replayed.
+A new client receives ``hello``, then the current schedule if one is held,
+then the current red phase if one is still held, then ``start_committed`` if
+the race start was confirmed, then the current scene. It does not wait for
+the next lap. After a reconnect the same current state is sent again. Older
+scenes and finished lamp steps are not replayed.
+
+Safety-critical documents are not merged into a scene. Under the soft send
+limit a scene may be skipped; a pending schedule, phase or commit is still
+sent. At the hard limit the client is dropped and must reconnect for a fresh
+snapshot. A dropped browser has no effect on the race clock.
 
 The reference viewport is 1280 by 720. :func:`compose_scene` accepts another
 viewport and does not write the PC layout. A client may ask for its own size
@@ -77,11 +96,18 @@ from slot_racing.modules.races.hud_scene import (
     scene_payload,
 )
 from slot_racing.modules.races.runner import RaceSnapshot
+from slot_racing.modules.races.start_display import (
+    PROTOCOL_VERSION as _START_PROTOCOL,
+)
+from slot_racing.modules.races.start_display import (
+    parse_commit_document,
+    parse_phase_document,
+)
 from slot_racing.modules.races.start_schedule import TIME_BASE, TIMESTAMP_MEANING
 
 logger = logging.getLogger(__name__)
 
-BROADCAST_PROTOCOL_VERSION = 1
+BROADCAST_PROTOCOL_VERSION = _START_PROTOCOL
 APP_NAME = "Slot-Racing Platform"
 REFERENCE_VIEWPORT = HudViewport(1280, 720)
 DEFAULT_PORT = 8765
@@ -97,6 +123,8 @@ TYPE_HELLO = "hello"
 TYPE_SCENE = "scene"
 TYPE_START_SCHEDULE = "start_schedule"
 TYPE_START_SCHEDULE_REVOKED = "start_schedule_revoked"
+TYPE_START_PHASE = "start_phase"
+TYPE_START_COMMITTED = "start_committed"
 TYPE_ERROR = "error"
 TYPE_VIEWPORT = "viewport"
 VIEWPORT_MIN = 1
@@ -143,6 +171,10 @@ class BroadcastFrame:
     schedule_seq: int
     schedule_revoked: bool
     generation: int
+    phase: dict[str, object] | None = None
+    phase_seq: int = 0
+    commit: dict[str, object] | None = None
+    commit_seq: int = 0
     source: SceneSource | None = None
 
 
@@ -162,6 +194,8 @@ class OutboundPlan:
     send_hello: bool
     send_schedule: bool
     send_scene: bool
+    send_phase: bool = False
+    send_commit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +264,11 @@ class BroadcastMailbox:
         self._schedule: dict[str, object] | None = None
         self._schedule_seq = 0
         self._schedule_revoked = False
+        self._phase: dict[str, object] | None = None
+        self._phase_seq = 0
+        self._phase_step = -1
+        self._commit: dict[str, object] | None = None
+        self._commit_seq = 0
         self._generation = 0
         self._source: SceneSource | None = None
 
@@ -269,11 +308,60 @@ class BroadcastMailbox:
     def publish_schedule(self, document: Mapping[str, object], *, revoked: bool) -> int:
         copied = copy_document(document)
         with self._lock:
+            incoming = copied.get("sequence_id")
+            held = self._schedule
+            held_id = None if held is None else held.get("sequence_id")
+            if revoked and held_id is not None and incoming != held_id:
+                return 0
+            if revoked or held_id != incoming or self._schedule_revoked:
+                self._phase = None
+                self._phase_step = -1
+                self._commit = None
             self._schedule_seq += 1
             self._schedule = copied
             self._schedule_revoked = revoked
             self._generation += 1
             seq = self._schedule_seq
+        self._wake.kick()
+        return seq
+
+    def publish_start_phase(self, document: Mapping[str, object]) -> int:
+        """Hold the newest red phase. A stale lamp, a revoke, or GO is refused."""
+        copied = copy_document(document)
+        sequence_id, step_index, _lit = parse_phase_document(copied)
+        with self._lock:
+            schedule = self._schedule
+            if schedule is None or self._schedule_revoked:
+                return 0
+            if schedule.get("sequence_id") != sequence_id or step_index <= self._phase_step:
+                return 0
+            if self._commit is not None and self._commit.get("sequence_id") == sequence_id:
+                return 0
+            self._phase_step = step_index
+            self._phase = copied
+            self._phase_seq += 1
+            self._generation += 1
+            seq = self._phase_seq
+        self._wake.kick()
+        return seq
+
+    def publish_start_committed(self, document: Mapping[str, object]) -> int:
+        """Hold GO after the engine stamp. The same sequence is not announced twice."""
+        copied = copy_document(document)
+        sequence_id, _actual = parse_commit_document(copied)
+        with self._lock:
+            schedule = self._schedule
+            if schedule is None or self._schedule_revoked:
+                return 0
+            if schedule.get("sequence_id") != sequence_id:
+                return 0
+            if self._commit is not None and self._commit.get("sequence_id") == sequence_id:
+                return self._commit_seq
+            self._commit = copied
+            self._phase = None
+            self._commit_seq += 1
+            self._generation += 1
+            seq = self._commit_seq
         self._wake.kick()
         return seq
 
@@ -288,6 +376,11 @@ class BroadcastMailbox:
             self._schedule = None
             self._schedule_seq = 0
             self._schedule_revoked = False
+            self._phase = None
+            self._phase_seq = 0
+            self._phase_step = -1
+            self._commit = None
+            self._commit_seq = 0
             self._generation = 0
             self._source = None
 
@@ -300,6 +393,10 @@ class BroadcastMailbox:
                 schedule_seq=self._schedule_seq,
                 schedule_revoked=self._schedule_revoked,
                 generation=self._generation,
+                phase=self._phase,
+                phase_seq=self._phase_seq,
+                commit=self._commit,
+                commit_seq=self._commit_seq,
                 source=self._source,
             )
 
@@ -351,6 +448,16 @@ def hello_message(frame: BroadcastFrame) -> dict[str, object]:
             "viewport_note": "client_viewport_selects_a_scene",
             "viewport_limits": {"min": VIEWPORT_MIN, "max": VIEWPORT_MAX},
             "planned_go_note": "host_monotonic_not_a_start_authorization",
+            "start_authorization": TYPE_START_COMMITTED,
+            "start_lights": "server_confirmed_red_phases",
+            "capabilities": [
+                TYPE_HELLO,
+                TYPE_SCENE,
+                TYPE_START_SCHEDULE,
+                TYPE_START_SCHEDULE_REVOKED,
+                TYPE_START_PHASE,
+                TYPE_START_COMMITTED,
+            ],
             "transport": "unencrypted_local_network",
             "race_active": status in _ACTIVE_RACE,
             "receiving_hud": present,
@@ -404,6 +511,18 @@ def _clamp_viewport(value: int) -> int:
     return min(VIEWPORT_MAX, max(VIEWPORT_MIN, value))
 
 
+def phase_message(frame: BroadcastFrame) -> dict[str, object] | None:
+    if frame.phase is None:
+        return None
+    return message(TYPE_START_PHASE, frame.phase_seq, frame.phase)
+
+
+def commit_message(frame: BroadcastFrame) -> dict[str, object] | None:
+    if frame.commit is None:
+        return None
+    return message(TYPE_START_COMMITTED, frame.commit_seq, frame.commit)
+
+
 def schedule_message(frame: BroadcastFrame) -> dict[str, object] | None:
     if frame.schedule is None:
         return None
@@ -437,13 +556,16 @@ def plan_outbound(
     hello_due: bool,
     schedule_due: bool,
     scene_due: bool,
+    phase_due: bool = False,
+    commit_due: bool = False,
     soft_bytes: int = SOFT_OUTBOUND_BYTES,
     hard_bytes: int = HARD_OUTBOUND_BYTES,
 ) -> OutboundPlan:
-    """Prefer the newest scene, but do not drop a pending schedule to make room for one.
+    """Prefer the newest scene, but do not drop a start document to make room.
 
-    At the hard cap the client is disconnected. It reconnects and receives the
-    current scene and the current schedule. Memory stays bounded either way.
+    A schedule, a red phase and a start confirmation still go out while the
+    buffer is above the soft limit. The scene can wait. At the hard cap the
+    client is disconnected and reconnects for the current snapshot.
     """
     if pending_bytes >= hard_bytes:
         return OutboundPlan(drop=True, send_hello=False, send_schedule=False, send_scene=False)
@@ -451,6 +573,8 @@ def plan_outbound(
         drop=False,
         send_hello=hello_due,
         send_schedule=schedule_due,
+        send_phase=phase_due,
+        send_commit=commit_due,
         send_scene=scene_due and pending_bytes < soft_bytes,
     )
 
@@ -764,6 +888,7 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
   </dl>
   <p>Die Verbindung im lokalen Netzwerk ist nicht verschlüsselt.</p>
   <p>Der geplante GO-Zeitpunkt ist eine Host-Zeit und keine Startfreigabe.</p>
+  <p>Rote Lampen bestätigen nur den Renn-PC. GO gilt erst mit start_committed.</p>
 </main>
 <script>
 (function () {
@@ -839,6 +964,10 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
         text(plan, "Sequenz " + payload.sequence_id + ", Status " + payload.status
           + ", geplantes GO " + payload.planned_go_ns
           + " (Host-Zeit, keine Startfreigabe)");
+      } else if (msg.type === "start_phase") {
+        text(plan, "Rote Lampen " + payload.lit_lights + " (keine Startfreigabe)");
+      } else if (msg.type === "start_committed") {
+        text(plan, "Start freigegeben, Sequenz " + payload.sequence_id);
       }
     };
   }
