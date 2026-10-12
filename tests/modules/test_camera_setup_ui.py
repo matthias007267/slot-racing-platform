@@ -792,6 +792,8 @@ def _open_fluid(qtbot: QtBot) -> tuple[CameraSetupPage, FakeOpener]:
     qtbot.addWidget(page)
     qtbot.waitUntil(lambda: page.stage.width() > 400 and page.stage.height() > 300)
     _flush()
+    # A styled application can refuse a window shorter than the controls.
+    # The checks below hold the size Qt actually kept.
     return page, opener
 
 
@@ -817,6 +819,7 @@ def _assert_letterboxed(page: CameraSetupPage) -> None:
 def test_sensitivity_does_not_resize_the_preview(qtbot: QtBot) -> None:
     page, _opener = _open_fluid(qtbot)
     stable = page.stage.size()
+    window = page.size()
     column = _settings_column(page).width()
     assert page.stage.hasHeightForWidth() is False
     for value in range(101):
@@ -824,13 +827,13 @@ def test_sensitivity_does_not_resize_the_preview(qtbot: QtBot) -> None:
         _flush()
         assert page.stage.size() == stable
         assert _settings_column(page).width() == column
-    assert page.width() == 1100
-    assert page.height() == 720
+        assert page.size() == window
 
 
 def test_detection_resolution_does_not_resize_the_preview(qtbot: QtBot) -> None:
     page, _opener = _open_fluid(qtbot)
     stable = page.stage.size()
+    window = page.size()
     column = _settings_column(page).width()
     seen: list[str] = []
     for value in range(page.detection_resolution.maximum() + 1):
@@ -842,10 +845,11 @@ def test_detection_resolution_does_not_resize_the_preview(qtbot: QtBot) -> None:
         seen.append(caption)
         assert page.stage.size() == stable
         assert _settings_column(page).width() == column
-    assert page.width() == 1100 and page.height() == 720
+        assert page.size() == window
     page.resolution_value.setText("Sehr fein - 5 x 5 px, zusaetzlich ein langer Hinweis zur Kachel")
     _flush()
     assert page.stage.size() == stable
+    assert page.size() == window
     assert _settings_column(page).width() == column
 
 
@@ -853,6 +857,7 @@ def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
     page, _opener = _open_fluid(qtbot)
     stage = page.stage
     stable = stage.size()
+    window = page.size()
     column = _settings_column(page).width()
     zones = stage.zones()
 
@@ -896,20 +901,21 @@ def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
     assert stage is page.stage
     assert stage.size() == stable
     assert _settings_column(page).width() == column
-    assert page.width() == 1100 and page.height() == 720
+    assert page.size() == window
     assert stage.zones()[:1] == zones
 
 
 def test_camera_frames_do_not_resize_the_preview(qtbot: QtBot) -> None:
     page, opener = _open_fluid(qtbot)
     stable = page.stage.size()
+    window = page.size()
     zones = page.stage.zones()
     viewports = []
     for width, height in ((640, 480), (1280, 720), (1920, 1080)):
         _feed(page, opener, width, height)
         assert page.stage.frame_size() == (width, height)
         assert page.stage.size() == stable
-        assert page.width() == 1100 and page.height() == 720
+        assert page.size() == window
         assert page.stage.zones() == zones
         _assert_letterboxed(page)
         viewports.append(page.stage.viewport_rect().size())
@@ -920,12 +926,13 @@ def test_camera_frames_do_not_resize_the_preview(qtbot: QtBot) -> None:
 def test_the_preview_grows_with_the_window_and_then_stays_stable(qtbot: QtBot) -> None:
     page, opener = _open_fluid(qtbot)
     stable = page.stage.size()
-    page.resize(1400, 900)
+    page.resize(page.width() + 300, page.height() + 180)
     _flush()
     qtbot.waitUntil(
         lambda: page.stage.width() > stable.width() and page.stage.height() > stable.height()
     )
     grown = page.stage.size()
+    window = page.size()
     column = _settings_column(page).width()
     for value in (0, 50, 100):
         page.sensitivity.setValue(value)
@@ -948,7 +955,7 @@ def test_the_preview_grows_with_the_window_and_then_stays_stable(qtbot: QtBot) -
         assert page.stage.size() == grown
     assert page.stage.size() == grown
     assert _settings_column(page).width() == column
-    assert page.width() == 1400 and page.height() == 900
+    assert page.size() == window
 
 
 def test_letterboxing_keeps_zone_coordinates_and_hit_testing(qtbot: QtBot) -> None:
