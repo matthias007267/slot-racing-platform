@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QFormLayout, QLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFormLayout, QLayout, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.i18n import Translator
@@ -751,3 +751,257 @@ def _field_row(form: QFormLayout, widget: QWidget) -> int:
         if item is not None and item.widget() is widget:
             return row
     raise AssertionError(widget)
+
+
+def _flush() -> None:
+    app = QApplication.instance()
+    assert app is not None
+    app.processEvents()
+
+
+def _settings_column(page: CameraSetupPage) -> QWidget:
+    column = page.findChild(QWidget, "camera-settings")
+    assert isinstance(column, QWidget)
+    return column
+
+
+def _open_fluid(qtbot: QtBot) -> tuple[CameraSetupPage, FakeOpener]:
+    """A camera page whose preview is laid out, not pinned to a fixed size."""
+    stored = database()
+    CameraConfigurationStore(stored).save(
+        CameraConfiguration(
+            camera=StoredCamera(width=640, height=480, fps=30),
+            detection=StoredDetection(
+                zones=(
+                    StoredDetectionZone(
+                        position_id="start_finish",
+                        lane=1,
+                        roi=NormalizedRoi(x=0.35, y=0.2, width=0.3, height=0.2),
+                    ),
+                ),
+                sensitivity=40,
+                block_size=20,
+            ),
+        )
+    )
+    opener = FakeOpener()
+    page = CameraSetupPage(translator(), CameraConfigurationStore(stored), opener)
+    page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    page.resize(1100, 720)
+    page.show()
+    qtbot.addWidget(page)
+    qtbot.waitUntil(lambda: page.stage.width() > 400 and page.stage.height() > 300)
+    _flush()
+    return page, opener
+
+
+def _feed(page: CameraSetupPage, opener: FakeOpener, width: int, height: int) -> None:
+    assert opener.sources
+    opener.sources[-1].frame = GrayFrame.blank(width, height, 40)
+    page._pull_frame()
+    _flush()
+
+
+def _assert_letterboxed(page: CameraSetupPage) -> None:
+    rect = page.stage.viewport_rect()
+    frame_width, frame_height = page.stage.frame_size()
+    assert rect.width() >= 1 and rect.height() >= 1
+    assert rect.width() <= page.stage.width()
+    assert rect.height() <= page.stage.height()
+    assert rect.width() == page.stage.width() or rect.height() == page.stage.height()
+    # Integer scaling keeps the frame's aspect. One pixel of rounding is expected.
+    mismatch = abs(rect.width() * frame_height - rect.height() * frame_width)
+    assert mismatch <= frame_height + frame_width
+
+
+def test_sensitivity_does_not_resize_the_preview(qtbot: QtBot) -> None:
+    page, _opener = _open_fluid(qtbot)
+    stable = page.stage.size()
+    column = _settings_column(page).width()
+    assert page.stage.hasHeightForWidth() is False
+    for value in range(101):
+        page.sensitivity.setValue(value)
+        _flush()
+        assert page.stage.size() == stable
+        assert _settings_column(page).width() == column
+    assert page.width() == 1100
+    assert page.height() == 720
+
+
+def test_detection_resolution_does_not_resize_the_preview(qtbot: QtBot) -> None:
+    page, _opener = _open_fluid(qtbot)
+    stable = page.stage.size()
+    column = _settings_column(page).width()
+    seen: list[str] = []
+    for value in range(page.detection_resolution.maximum() + 1):
+        page.detection_resolution.setValue(value)
+        _flush()
+        caption = page.resolution_value.text()
+        assert caption
+        assert caption not in seen
+        seen.append(caption)
+        assert page.stage.size() == stable
+        assert _settings_column(page).width() == column
+    assert page.width() == 1100 and page.height() == 720
+    page.resolution_value.setText("Sehr fein - 5 x 5 px, zusaetzlich ein langer Hinweis zur Kachel")
+    _flush()
+    assert page.stage.size() == stable
+    assert _settings_column(page).width() == column
+
+
+def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
+    page, _opener = _open_fluid(qtbot)
+    stage = page.stage
+    stable = stage.size()
+    column = _settings_column(page).width()
+    zones = stage.zones()
+
+    page.sensitivity.setValue(15)
+    _flush()
+    page.detection_resolution.setValue(page.detection_resolution.maximum())
+    _flush()
+    for index in range(page.direction.count()):
+        page.direction.setCurrentIndex(index)
+        _flush()
+        assert stage.size() == stable
+    page.check_direction.setChecked(False)
+    _flush()
+    page.check_direction.setChecked(True)
+    _flush()
+    page.add_zone.click()
+    _flush()
+    page.zones.setCurrentRow(0)
+    _flush()
+    page.zones.setCurrentRow(1)
+    _flush()
+    page.zone_hint.setText("kurz")
+    _flush()
+    page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein. " * 20)
+    _flush()
+    assert page.zone_hint.verticalScrollBar().maximum() > 0
+    page.zone_hint.setText("")
+    _flush()
+    page.position.setText("start_finish_with_a_much_longer_name")
+    _flush()
+    page.fps.setCurrentIndex(page.fps.count() - 1)
+    _flush()
+    page.resolution.setCurrentIndex(page.resolution.count() - 1)
+    _flush()
+    page.message.show_error(
+        "Die Erkennungszone ist für eine zuverlässige Richtungserkennung sehr klein. " * 6
+    )
+    _flush()
+    assert page.message.text()
+    assert page._message_slot.verticalScrollBar().maximum() > 0
+    assert stage is page.stage
+    assert stage.size() == stable
+    assert _settings_column(page).width() == column
+    assert page.width() == 1100 and page.height() == 720
+    assert stage.zones()[:1] == zones
+
+
+def test_camera_frames_do_not_resize_the_preview(qtbot: QtBot) -> None:
+    page, opener = _open_fluid(qtbot)
+    stable = page.stage.size()
+    zones = page.stage.zones()
+    viewports = []
+    for width, height in ((640, 480), (1280, 720), (1920, 1080)):
+        _feed(page, opener, width, height)
+        assert page.stage.frame_size() == (width, height)
+        assert page.stage.size() == stable
+        assert page.width() == 1100 and page.height() == 720
+        assert page.stage.zones() == zones
+        _assert_letterboxed(page)
+        viewports.append(page.stage.viewport_rect().size())
+    assert viewports[0] != viewports[1]
+    assert viewports[1] == viewports[2]
+
+
+def test_the_preview_grows_with_the_window_and_then_stays_stable(qtbot: QtBot) -> None:
+    page, opener = _open_fluid(qtbot)
+    stable = page.stage.size()
+    page.resize(1400, 900)
+    _flush()
+    qtbot.waitUntil(
+        lambda: page.stage.width() > stable.width() and page.stage.height() > stable.height()
+    )
+    grown = page.stage.size()
+    column = _settings_column(page).width()
+    for value in (0, 50, 100):
+        page.sensitivity.setValue(value)
+        _flush()
+    for value in range(page.detection_resolution.maximum() + 1):
+        page.detection_resolution.setValue(value)
+        _flush()
+    page.direction.setCurrentIndex(page.direction.count() - 1)
+    _flush()
+    page.check_direction.setChecked(False)
+    _flush()
+    page.zones.setCurrentRow(0)
+    _flush()
+    page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein. " * 12)
+    _flush()
+    page.message.show_info("Änderungen nicht gespeichert")
+    _flush()
+    for width, height in ((640, 480), (1280, 720), (1920, 1080)):
+        _feed(page, opener, width, height)
+        assert page.stage.size() == grown
+    assert page.stage.size() == grown
+    assert _settings_column(page).width() == column
+    assert page.width() == 1400 and page.height() == 900
+
+
+def test_letterboxing_keeps_zone_coordinates_and_hit_testing(qtbot: QtBot) -> None:
+    page, opener = _open_fluid(qtbot)
+    stable = page.stage.size()
+    original = page.stage.zones()
+    assert len(original) == 1
+
+    def roundtrip(frame: tuple[int, int]) -> None:
+        _feed(page, opener, *frame)
+        assert page.stage.size() == stable
+        assert page.stage.zones() == original
+        _assert_letterboxed(page)
+        frame_width, frame_height = frame
+        image_x = int(original[0].x * frame_width + original[0].width * frame_width / 2)
+        image_y = int(original[0].y * frame_height + original[0].height * frame_height / 2)
+        widget_point = page.stage.image_to_widget(image_x, image_y)
+        mapped = page.stage._image_point(widget_point)
+        assert mapped is not None
+        rect = page.stage.viewport_rect()
+        # One preview pixel covers several frame pixels once the picture is letterboxed.
+        assert abs(mapped[0] - image_x) <= frame_width // rect.width() + 1
+        assert abs(mapped[1] - image_y) <= frame_height // rect.height() + 1
+        qtbot.mouseClick(page.stage, Qt.MouseButton.LeftButton, pos=widget_point)  # type: ignore[no-untyped-call]
+        _flush()
+        assert page.stage.selected_index() == 0
+        assert page.stage.zones() == original
+        assert page.stage.size() == stable
+        rect = page.stage.viewport_rect()
+        assert rect.x() > 0 or rect.y() > 0
+        outside = QPoint(0, rect.center().y()) if rect.x() > 0 else QPoint(rect.center().x(), 0)
+        assert page.stage.rect().contains(outside)
+        assert not rect.contains(outside)
+        qtbot.mouseClick(page.stage, Qt.MouseButton.LeftButton, pos=outside)  # type: ignore[no-untyped-call]
+        _flush()
+        assert page.stage.selected_index() == 0
+        assert page.stage.zones() == original
+
+    roundtrip((640, 480))
+    roundtrip((1280, 720))
+    roundtrip((1920, 1080))
+
+    zone = page.stage.zones()[0]
+    origin = roi_to_pixels(zone, 1920, 1080)
+    center_x = origin.x + origin.width // 2
+    center_y = origin.y + origin.height // 2
+    drag(qtbot, page.stage, center_x, center_y, center_x + 40, center_y + 24)
+    _flush()
+    moved = roi_to_pixels(page.stage.zones()[0], 1920, 1080)
+    rect = page.stage.viewport_rect()
+    assert abs(moved.x - (origin.x + 40)) <= 1920 // rect.width() + 1
+    assert abs(moved.y - (origin.y + 24)) <= 1080 // rect.height() + 1
+    assert moved.width == origin.width
+    assert moved.height == origin.height
+    assert page.stage.size() == stable
+    assert page.stage.zones() != original
