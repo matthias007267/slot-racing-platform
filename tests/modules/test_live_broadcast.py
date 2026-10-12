@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
-import resource
 import socket
+import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -1152,8 +1153,7 @@ def test_several_browsers_sample_without_blocking_the_start(
     host, port, token = _endpoint(display)
     clients = [_Client.connect(host, port, token) for _ in range(count)]
     started = time.perf_counter()
-    cpu_started = resource.getrusage(resource.RUSAGE_SELF)
-    rss_started = _rss_kb()
+    linux_load = _linux_process_sample()
     try:
         for client in clients:
             for index in range(4):
@@ -1190,10 +1190,7 @@ def test_several_browsers_sample_without_blocking_the_start(
         assert body["actual_start_ns"] == "50000"
         assert display.diagnostics().client_count == count
         if count == 16:
-            cpu = resource.getrusage(resource.RUSAGE_SELF)
-            used = (cpu.ru_utime + cpu.ru_stime) - (cpu_started.ru_utime + cpu_started.ru_stime)
-            assert used < 2
-            assert _rss_kb() - rss_started < 32_000
+            _assert_linux_process_bounds(linux_load)
     finally:
         for client in clients:
             client.close()
@@ -1438,6 +1435,39 @@ def _payload(message: dict[str, object]) -> dict[str, object]:
     payload = message["payload"]
     assert isinstance(payload, dict)
     return payload
+
+
+def test_the_broadcast_suite_imports_without_the_unix_resource_module() -> None:
+    """Windows has no ``resource``. A top-level import would hide every test in this file."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported = {alias.name.split(".", 1)[0] for alias in node.names}
+            assert "resource" not in imported
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "resource"
+
+
+def _linux_process_sample() -> tuple[float, int] | None:
+    """CPU seconds and RSS on Linux. Windows has neither ``resource`` nor ``/proc``."""
+    if sys.platform != "linux":
+        return None
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return usage.ru_utime + usage.ru_stime, _rss_kb()
+
+
+def _assert_linux_process_bounds(before: tuple[float, int] | None) -> None:
+    """Keep the Linux ceilings. Other platforms still run the client behaviour above."""
+    if before is None:
+        return
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    used = (usage.ru_utime + usage.ru_stime) - before[0]
+    assert used < 2
+    assert _rss_kb() - before[1] < 32_000
 
 
 def _rss_kb() -> int:
