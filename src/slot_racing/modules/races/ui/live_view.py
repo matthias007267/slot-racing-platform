@@ -26,21 +26,19 @@ from slot_racing.core.events import (
 )
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
-    DISPLAY_ALWAYS,
-    DISPLAY_HIDE,
-    PANEL_RECORDS,
+    RECORDS_MIN_HEIGHT,
     VIEW_BETWEEN,
-    VIEW_LIVE,
     HudConfigurationStore,
     HudLayout,
     LightFrame,
     default_hud_configuration,
     light_pixels,
+    records_shown,
 )
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.time_trial_board import build_time_trial_board
-from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY
+from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, status_message
 from slot_racing.modules.races.ui.heat_gate import HeatGate
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.race_audio import RaceAudio
@@ -132,7 +130,7 @@ class LiveRaceView(QWidget):
         # stage's large hint keeps the panel wide enough to lay its cards out.
         self.stage.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.board.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.board.setMinimumHeight(240)
+        self.board.setMinimumHeight(RECORDS_MIN_HEIGHT)
         self.heat_gate = HeatGate(translator)
         self.start_lights = StartLightWidget(self)
         self.start_lights.use_as_overlay()
@@ -417,7 +415,7 @@ class LiveRaceView(QWidget):
         if lap_message:
             self._message = lap_message
         if not self._message:
-            self._message = _status_message(tr, snapshot)
+            self._message = status_message(tr, snapshot)
         self.messages.message_label.setText(self._message or EMPTY_DISPLAY)
         if snapshot.source_errors:
             self.messages.show_warning(
@@ -614,24 +612,7 @@ class LiveRaceView(QWidget):
 
 def _show_records(layout: HudLayout, *, time_trial: bool) -> bool:
     """The records table is one block of the shared HUD, not a second race screen."""
-    mode = layout.view(VIEW_LIVE).panel(PANEL_RECORDS)
-    if mode == DISPLAY_HIDE:
-        return False
-    if mode == DISPLAY_ALWAYS:
-        return True
-    return time_trial
-
-
-def _status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> str:
-    if snapshot.status is RaceStatus.RUNNING:
-        return translate("hud.message.started")
-    if snapshot.status is RaceStatus.PAUSED:
-        return translate("hud.message.paused")
-    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
-        return translate("hud.message.aborted")
-    if snapshot.status is RaceStatus.FINISHED:
-        return translate("hud.message.finished")
-    return ""
+    return records_shown(layout, time_trial=time_trial)
 
 
 def _name_on_lane(snapshot: RaceSnapshot, lane: int) -> str:

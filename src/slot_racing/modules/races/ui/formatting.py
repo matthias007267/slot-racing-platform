@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from slot_racing.modules.races.runner import LiveRow
+from slot_racing.core.clock import format_duration
+from slot_racing.core.domain import RaceStatus
+from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.time_trial_board import format_lap_seconds
 
 _MISSING_LAP = "-"
@@ -102,6 +105,74 @@ def best_lap_display(times: Sequence[int]) -> tuple[str, str]:
         return _MISSING_LAP, _MISSING_LAP
     number, time_ns = found
     return str(number), format_lap_seconds(time_ns)
+
+
+def remaining_laps(completed: int, target: int) -> str | None:
+    """Laps still to drive. A race without a positive target has no such number."""
+    if target < 1:
+        return None
+    return str(max(0, target - completed))
+
+
+def remaining_time(elapsed_ns: int, duration_minutes: int | None) -> str | None:
+    """Formatted time left in a time trial. No duration means the field does not exist."""
+    if duration_minutes is None or duration_minutes < 1:
+        return None
+    left = duration_minutes * 60 * 1_000_000_000 - max(0, elapsed_ns)
+    return format_duration(max(0, left))
+
+
+def status_tone(snapshot: RaceSnapshot) -> str:
+    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
+        return "error"
+    if snapshot.status is RaceStatus.RUNNING:
+        return "ok"
+    if snapshot.status is RaceStatus.PAUSED:
+        return "warn"
+    if snapshot.status is RaceStatus.FINISHED:
+        return "info"
+    return "muted"
+
+
+def status_presentation(translator: Translator, snapshot: RaceSnapshot) -> tuple[str, str]:
+    status_text = translator.translate(f"race.status.{snapshot.status.value}")
+    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
+        status_text = translator.translate("race.status.aborted")
+    return status_text, status_tone(snapshot)
+
+
+def status_message(translate: Callable[[str], str], snapshot: RaceSnapshot) -> str:
+    """The standing line when no lap or finish notice is waiting."""
+    if snapshot.status is RaceStatus.RUNNING:
+        return translate("hud.message.started")
+    if snapshot.status is RaceStatus.PAUSED:
+        return translate("hud.message.paused")
+    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
+        return translate("hud.message.aborted")
+    if snapshot.status is RaceStatus.FINISHED:
+        return translate("hud.message.finished")
+    return ""
+
+
+def ranking_cells(
+    translator: Translator, snapshot: RaceSnapshot, row: LiveRow, *, ended: bool, paused: bool
+) -> tuple[str, ...]:
+    """One ranking row, in the same column order as the live table."""
+    tr = translator.translate
+    return (
+        str(row.position),
+        row.driver_label,
+        row.vehicle_label,
+        start_number_text(row.start_number),
+        str(row.lane),
+        str(row.laps_completed),
+        format_progress_cell(row.current_lap, snapshot.laps),
+        format_duration(row.last_lap_ns),
+        format_duration(row.best_lap_ns),
+        format_duration(row.total_time_ns),
+        format_progress_cell(row.laps_completed, snapshot.laps),
+        tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),
+    )
 
 
 def format_lap_progress(current: int, target: int) -> str:
