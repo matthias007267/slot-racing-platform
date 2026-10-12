@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtGui import QFontInfo, QTextDocument, QTextOption
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFormLayout, QLabel, QLayout, QScrollArea, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QBoxLayout,
+    QFormLayout,
+    QLabel,
+    QLayout,
+    QScrollArea,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.i18n import Translator
@@ -814,6 +823,102 @@ def _hold_preview(
     assert page.size() == window
 
 
+def _zone_hint_facts(page: CameraSetupPage) -> str:
+    """Geometry of the zone hint. Temporary Linux-CI diagnosis; QScrollArea has no document."""
+    hint = page.zone_hint
+    label = hint.widget()
+    assert isinstance(label, QLabel)
+    bar = hint.verticalScrollBar()
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    screen = app.primaryScreen()
+    font = label.font()
+    info = QFontInfo(font)
+    metrics = label.fontMetrics()
+    width = max(hint.viewport().width(), 2)
+    flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
+    rect = metrics.boundingRect(0, 0, width, 10_000, flags, label.text())
+    document = QTextDocument()
+    document.setDefaultFont(font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WordWrap)
+    document.setDefaultTextOption(option)
+    document.setPlainText(label.text())
+    document.setTextWidth(width)
+    laid_out = document.documentLayout().documentSize()
+    column = _settings_column(page)
+    parent = hint.parentWidget()
+    parent_layout = None if parent is None else parent.layout()
+    stretch = None
+    item_geometry = None
+    if isinstance(parent_layout, QBoxLayout):
+        for index in range(parent_layout.count()):
+            item = parent_layout.itemAt(index)
+            if item is not None and item.widget() is hint:
+                stretch = parent_layout.stretch(index)
+                item_geometry = item.geometry()
+                break
+    screen_facts = None
+    if screen is not None:
+        screen_facts = (
+            screen.logicalDotsPerInch(),
+            screen.devicePixelRatio(),
+            screen.geometry().width(),
+            screen.geometry().height(),
+        )
+    return " ".join(
+        [
+            f"class={type(hint).__name__}",
+            f"child={type(label).__name__}",
+            f"document_api={hasattr(hint, 'document')}",
+            f"hint={hint.width()}x{hint.height()}",
+            f"hint_min={hint.minimumWidth()}x{hint.minimumHeight()}",
+            f"hint_max={hint.maximumWidth()}x{hint.maximumHeight()}",
+            f"vp={hint.viewport().width()}x{hint.viewport().height()}",
+            f"label={label.width()}x{label.height()}",
+            f"label_min={label.minimumHeight()}",
+            f"label_max={label.maximumHeight()}",
+            f"bar={bar.minimum()}/{bar.maximum()}",
+            f"page={bar.pageStep()}",
+            f"single={bar.singleStep()}",
+            f"value={bar.value()}",
+            f"bar_visible={bar.isVisible()}",
+            f"policy={hint.verticalScrollBarPolicy().name}",
+            f"visible={hint.isVisible()}",
+            f"polished={hint.testAttribute(Qt.WidgetAttribute.WA_WState_Polished)}",
+            f"font={info.family()}",
+            f"exact={info.exactMatch()}",
+            f"pt={info.pointSizeF()}",
+            f"px={info.pixelSize()}",
+            f"ls={metrics.lineSpacing()}",
+            f"font_height={metrics.height()}",
+            f"hint_ls={hint.fontMetrics().lineSpacing()}",
+            f"newlines={label.text().count(chr(10))}",
+            f"chars={len(label.text())}",
+            f"format={label.textFormat().name}",
+            f"rect={rect.width()}x{rect.height()}",
+            f"blocks={document.blockCount()}",
+            f"doc={document.size().width():.1f}x{document.size().height():.1f}",
+            f"layout={laid_out.width():.1f}x{laid_out.height():.1f}",
+            f"lines={rect.height() / max(metrics.lineSpacing(), 1):.2f}",
+            f"column={column.width()}x{column.height()}",
+            f"stretch={stretch}",
+            (
+                f"item={item_geometry.width()}x{item_geometry.height()}"
+                if item_geometry is not None
+                else "item=None"
+            ),
+            f"window={page.width()}x{page.height()}",
+            f"stage={page.stage.width()}x{page.stage.height()}",
+            f"platform={app.platformName()}",
+            f"style={app.style().objectName()}",
+            f"vpolicy={hint.sizePolicy().verticalPolicy().name}",
+            f"hpolicy={hint.sizePolicy().horizontalPolicy().name}",
+            f"screen={screen_facts}",
+        ]
+    )
+
+
 def _assert_wrapped_text_is_reachable(area: QScrollArea) -> None:
     """The label covers its wrapped text and scrolls when that text is taller than the slot.
 
@@ -924,17 +1029,32 @@ def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
     _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("kurz")
     _flush()
+    print("HINT kurz", _zone_hint_facts(page))
     assert page.zone_hint.verticalScrollBar().maximum() == 0
     _assert_wrapped_text_is_reachable(page.zone_hint)
     _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein. " * 20)
     _flush()
+    print("HINT prose20", _zone_hint_facts(page))
     _assert_wrapped_text_is_reachable(page.zone_hint)
     _hold_preview(page, stage, stable, window, column)
     # Eight explicit lines cannot fit the four-line slot at any column width.
     page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein.\n" * 8)
     _flush()
-    assert page.zone_hint.verticalScrollBar().maximum() > 0
+    before = _zone_hint_facts(page)
+    before_maximum = page.zone_hint.verticalScrollBar().maximum()
+    page.zone_hint.ensurePolished()
+    label = page.zone_hint.widget()
+    assert isinstance(label, QLabel)
+    label.ensurePolished()
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    app.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+    _flush()
+    after = _zone_hint_facts(page)
+    print("HINT lines8-before", before)
+    print("HINT lines8-after", after)
+    assert before_maximum > 0, f"before={before_maximum}\n{before}\n{after}"
     _assert_wrapped_text_is_reachable(page.zone_hint)
     _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("")
