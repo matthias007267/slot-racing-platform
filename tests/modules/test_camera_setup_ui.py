@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFormLayout, QLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFormLayout, QLabel, QLayout, QScrollArea, QWidget
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.i18n import Translator
@@ -804,6 +804,44 @@ def _feed(page: CameraSetupPage, opener: FakeOpener, width: int, height: int) ->
     _flush()
 
 
+def _hold_preview(
+    page: CameraSetupPage, stage: CameraStage, stable: QSize, window: QSize, column: int
+) -> None:
+    """Preview, settings column, and window stay at the size captured before the edit."""
+    assert page.stage is stage
+    assert stage.size() == stable
+    assert _settings_column(page).width() == column
+    assert page.size() == window
+
+
+def _assert_wrapped_text_is_reachable(area: QScrollArea) -> None:
+    """The label covers its wrapped text and scrolls when that text is taller than the slot.
+
+    Whether a wrapping paragraph overflows depends on the font and the column width.
+    A scrollbar is required only when the measured text is actually taller than the viewport.
+    """
+    label = area.widget()
+    assert isinstance(label, QLabel)
+    width = area.viewport().width()
+    viewport_height = area.viewport().height()
+    assert width >= 2
+    assert viewport_height >= 2
+    text = label.text()
+    assert text
+    flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
+    text_height = label.fontMetrics().boundingRect(0, 0, width, 10_000, flags, text).height()
+    assert text_height > 0
+    assert label.height() >= text_height
+    bar = area.verticalScrollBar()
+    if text_height > viewport_height + 2:
+        assert bar.maximum() > 0
+        bar.setValue(bar.maximum())
+        assert bar.value() == bar.maximum()
+        assert bar.maximum() + viewport_height >= text_height
+    elif text_height + 2 < viewport_height:
+        assert bar.maximum() == 0
+
+
 def _assert_letterboxed(page: CameraSetupPage) -> None:
     rect = page.stage.viewport_rect()
     frame_width, frame_height = page.stage.frame_size()
@@ -863,27 +901,42 @@ def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
 
     page.sensitivity.setValue(15)
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     page.detection_resolution.setValue(page.detection_resolution.maximum())
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     for index in range(page.direction.count()):
         page.direction.setCurrentIndex(index)
         _flush()
-        assert stage.size() == stable
+        _hold_preview(page, stage, stable, window, column)
     page.check_direction.setChecked(False)
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     page.check_direction.setChecked(True)
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     page.add_zone.click()
     _flush()
     page.zones.setCurrentRow(0)
     _flush()
     page.zones.setCurrentRow(1)
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("kurz")
     _flush()
+    assert page.zone_hint.verticalScrollBar().maximum() == 0
+    _assert_wrapped_text_is_reachable(page.zone_hint)
+    _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein. " * 20)
     _flush()
+    _assert_wrapped_text_is_reachable(page.zone_hint)
+    _hold_preview(page, stage, stable, window, column)
+    # Eight explicit lines cannot fit the four-line slot at any column width.
+    page.zone_hint.setText("Die Erkennungszone ist in Fahrtrichtung sehr klein.\n" * 8)
+    _flush()
     assert page.zone_hint.verticalScrollBar().maximum() > 0
+    _assert_wrapped_text_is_reachable(page.zone_hint)
+    _hold_preview(page, stage, stable, window, column)
     page.zone_hint.setText("")
     _flush()
     page.position.setText("start_finish_with_a_much_longer_name")
@@ -892,16 +945,21 @@ def test_combined_camera_settings_keep_the_preview_size(qtbot: QtBot) -> None:
     _flush()
     page.resolution.setCurrentIndex(page.resolution.count() - 1)
     _flush()
+    _hold_preview(page, stage, stable, window, column)
     page.message.show_error(
         "Die Erkennungszone ist für eine zuverlässige Richtungserkennung sehr klein. " * 6
     )
     _flush()
     assert page.message.text()
+    _assert_wrapped_text_is_reachable(page._message_slot)
+    _hold_preview(page, stage, stable, window, column)
+    page.message.show_error(
+        "Die Erkennungszone ist für eine zuverlässige Richtungserkennung sehr klein.\n" * 4
+    )
+    _flush()
     assert page._message_slot.verticalScrollBar().maximum() > 0
-    assert stage is page.stage
-    assert stage.size() == stable
-    assert _settings_column(page).width() == column
-    assert page.size() == window
+    _assert_wrapped_text_is_reachable(page._message_slot)
+    _hold_preview(page, stage, stable, window, column)
     assert stage.zones()[:1] == zones
 
 
