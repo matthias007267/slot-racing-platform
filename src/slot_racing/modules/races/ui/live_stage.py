@@ -13,13 +13,19 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QSizePolicy, QVB
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.races.hud import HudLayout, factory_layout
-from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
-from slot_racing.modules.races.ui.formatting import (
-    format_progress_cell,
-    participant_status_key,
-    start_number_text,
+from slot_racing.modules.races.hud import (
+    BOTTOM_MIN_HEIGHT,
+    CLOCK_MIN_HEIGHT,
+    CLOCK_MIN_WIDTH,
+    LANES_MIN_HEIGHT,
+    RANKING_MIN_HEIGHT,
+    RANKING_MIN_WIDTH,
+    STAGE_GAP,
+    HudLayout,
+    factory_layout,
 )
+from slot_racing.modules.races.runner import RaceSnapshot
+from slot_racing.modules.races.ui.formatting import ranking_cells, status_presentation
 from slot_racing.modules.races.ui.hud_widgets import (
     LiveRankingWidget,
     RaceClockWidget,
@@ -30,8 +36,6 @@ from slot_racing.modules.races.ui.hud_widgets import (
 from slot_racing.modules.races.ui.lane_card import LaneCardBoard
 from slot_racing.uikit import fill_table
 from slot_racing.uikit.theme import set_tone
-
-_SPACE_GAP = 8
 
 
 class LiveHudStage(QScrollArea):
@@ -54,25 +58,25 @@ class LiveHudStage(QScrollArea):
 
         for widget in (self.clock, self.status):
             widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-            widget.setMinimumSize(80, 96)
+            widget.setMinimumSize(CLOCK_MIN_WIDTH, CLOCK_MIN_HEIGHT)
         self.lanes.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        self.lanes.setMinimumHeight(180)
+        self.lanes.setMinimumHeight(LANES_MIN_HEIGHT)
         self.ranking.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        self.ranking.setMinimumSize(200, 120)
+        self.ranking.setMinimumSize(RANKING_MIN_WIDTH, RANKING_MIN_HEIGHT)
         for panel in (self.messages, self.controls):
             panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
-            panel.setMinimumHeight(120)
+            panel.setMinimumHeight(BOTTOM_MIN_HEIGHT)
 
         self._top = QHBoxLayout()
-        self._top.setSpacing(_SPACE_GAP)
+        self._top.setSpacing(STAGE_GAP)
         self._top.addWidget(self.clock, 1)
         self._top.addWidget(self.status, 1)
         self._middle = QHBoxLayout()
-        self._middle.setSpacing(_SPACE_GAP)
+        self._middle.setSpacing(STAGE_GAP)
         self._middle.addWidget(self.lanes, 3)
         self._middle.addWidget(self.ranking, 1)
         bottom = QHBoxLayout()
-        bottom.setSpacing(_SPACE_GAP)
+        bottom.setSpacing(STAGE_GAP)
         bottom.addWidget(self.messages, 1)
         bottom.addWidget(self.controls, 1)
         self.canvas = QWidget()
@@ -80,7 +84,7 @@ class LiveHudStage(QScrollArea):
         self.canvas.setMinimumSize(0, 0)
         body = QVBoxLayout(self.canvas)
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(_SPACE_GAP)
+        body.setSpacing(STAGE_GAP)
         body.addLayout(self._top, 1)
         body.addLayout(self._middle, 4)
         body.addLayout(bottom, 1)
@@ -123,7 +127,7 @@ class LiveHudStage(QScrollArea):
         fill_table(
             self.table,
             [
-                _cells(self._translator, snapshot, row, ended=ended, paused=paused)
+                ranking_cells(self._translator, snapshot, row, ended=ended, paused=paused)
                 for row in snapshot.rows
             ],
             [row.lane for row in snapshot.rows],
@@ -136,42 +140,3 @@ class LiveHudStage(QScrollArea):
             duration_minutes=duration_minutes,
         )
         return status_text, tone
-
-
-def status_presentation(translator: Translator, snapshot: RaceSnapshot) -> tuple[str, str]:
-    status_text = translator.translate(f"race.status.{snapshot.status.value}")
-    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
-        status_text = translator.translate("race.status.aborted")
-    return status_text, status_tone(snapshot)
-
-
-def status_tone(snapshot: RaceSnapshot) -> str:
-    if snapshot.status is RaceStatus.FINISHED and snapshot.aborted:
-        return "error"
-    if snapshot.status is RaceStatus.RUNNING:
-        return "ok"
-    if snapshot.status is RaceStatus.PAUSED:
-        return "warn"
-    if snapshot.status is RaceStatus.FINISHED:
-        return "info"
-    return "muted"
-
-
-def _cells(
-    translator: Translator, snapshot: RaceSnapshot, row: LiveRow, *, ended: bool, paused: bool
-) -> tuple[str, ...]:
-    tr = translator.translate
-    return (
-        str(row.position),
-        row.driver_label,
-        row.vehicle_label,
-        start_number_text(row.start_number),
-        str(row.lane),
-        str(row.laps_completed),
-        format_progress_cell(row.current_lap, snapshot.laps),
-        format_duration(row.last_lap_ns),
-        format_duration(row.best_lap_ns),
-        format_duration(row.total_time_ns),
-        format_progress_cell(row.laps_completed, snapshot.laps),
-        tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),
-    )

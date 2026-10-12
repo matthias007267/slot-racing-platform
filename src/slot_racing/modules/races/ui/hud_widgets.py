@@ -40,7 +40,10 @@ from slot_racing.uikit.widgets import StatusLabel, make_table
 
 _MIN_FONT = 12
 _MAX_FONT = 64
+_PLACEHOLDER_MAX_FONT = 22
 _MIN_TEXT_FONT = 6
+_STATUS_CAPTION_HEIGHT = 56
+_MESSAGE_CAPTION_HEIGHT = 64
 _CELL_PAD = 16
 _TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -159,7 +162,7 @@ class FitLabel(QLabel):
         font = self.font()
         chosen = _MIN_FONT
         placeholder = all(line.strip() in {EMPTY_DISPLAY, "-", ""} for line in lines)
-        maximum = 22 if placeholder else _MAX_FONT
+        maximum = _PLACEHOLDER_MAX_FONT if placeholder else _MAX_FONT
         low, high = _MIN_FONT, maximum
         while low <= high:
             mid = (low + high) // 2
@@ -754,7 +757,7 @@ class RaceStatusWidget(HudWidget):
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         # The status word stays readable when the panel cannot hold the caption as well.
-        self._caption.setVisible(self.height() >= 56)
+        self._caption.setVisible(self.height() >= _STATUS_CAPTION_HEIGHT)
 
     def emphasize(self, tone: str) -> None:
         """Running and paused stand out by a thin border. The fill stays dark."""
@@ -777,7 +780,7 @@ class RaceMessageWidget(HudWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._caption.setVisible(self.height() >= 64)
+        self._caption.setVisible(self.height() >= _MESSAGE_CAPTION_HEIGHT)
 
     def show_warning(self, text: str) -> None:
         self.warning.show_error(text)

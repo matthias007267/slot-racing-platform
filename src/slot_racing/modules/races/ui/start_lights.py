@@ -12,14 +12,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPaintEvent, QRadialGradient, QResizeEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from slot_racing.modules.races.hud import (
-    LIGHT_ASPECT,
-    LIGHT_GAP,
-    LIGHT_PAD_X,
-    LIGHT_PAD_Y,
-    LIGHT_UNIT_HEIGHT,
-    LIGHT_UNIT_WIDTH,
-)
+from slot_racing.modules.races.hud import LIGHT_ASPECT, light_gantry
 from slot_racing.modules.races.ui.start_cue import START_LIGHT_COUNT, StartCueStep, StartPhase
 from slot_racing.uikit.theme import COLORS
 
@@ -184,18 +177,7 @@ class StartLightWidget(QWidget):
 
 def _fit_gantry(width: int, height: int) -> _Gantry:
     """Scale the whole gantry into the box. Lamps stay round at every size."""
-    box_w = max(float(width), 1.0)
-    box_h = max(float(height), 1.0)
-    lamp = min(box_w / LIGHT_UNIT_WIDTH, box_h / LIGHT_UNIT_HEIGHT)
-    housing_w = LIGHT_UNIT_WIDTH * lamp
-    housing_h = LIGHT_UNIT_HEIGHT * lamp
-    origin_x = (box_w - housing_w) / 2
-    origin_y = (box_h - housing_h) / 2
-    housing = QRectF(origin_x, origin_y, housing_w, housing_h)
-    left = origin_x + LIGHT_PAD_X * lamp
-    top = origin_y + LIGHT_PAD_Y * lamp
-    step = lamp * (1.0 + LIGHT_GAP)
-    lamps = tuple(
-        QRectF(left + index * step, top, lamp, lamp) for index in range(START_LIGHT_COUNT)
-    )
+    placed = light_gantry(width, height, lamps=START_LIGHT_COUNT)
+    housing = QRectF(*placed.housing)
+    lamps = tuple(QRectF(*face) for face in placed.lamps)
     return _Gantry(housing, lamps)

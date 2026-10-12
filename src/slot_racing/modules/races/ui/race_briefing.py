@@ -13,6 +13,7 @@ from slot_racing.modules.races.hud import (
     TEXT_ROW,
     TEXT_TIME,
     ViewStyle,
+    briefing_px,
 )
 from slot_racing.modules.races.types import HeatBriefing, HeatInfo, RaceInfo
 from slot_racing.uikit.theme import (
@@ -33,8 +34,7 @@ def apply_text_size(label: QLabel, base: int, width: int, *, bold: bool, scale: 
     sheet otherwise replaces a font that was only set on the label.
     ``scale`` is a percent. 100 keeps the size this board already used.
     """
-    factor = min(1.3, max(0.85, width / 960))
-    pixels = min(96, max(16, round(base * factor * scale / 100)))
+    pixels = briefing_px(base, width, scale)
     font = label.font()
     font.setPixelSize(pixels)
     font.setBold(bold)

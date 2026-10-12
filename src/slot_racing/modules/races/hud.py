@@ -58,6 +58,27 @@ LIGHT_SCALE_MIN = 20
 LIGHT_SCALE_MAX = 200
 """100% is the factory width. 200% is the full HUD width, when the height still fits."""
 
+# The live stage uses these sizes. The HUD scene resolves the same grid.
+STAGE_GAP = 8
+CLOCK_MIN_WIDTH = 80
+CLOCK_MIN_HEIGHT = 96
+LANES_MIN_HEIGHT = 180
+RANKING_MIN_WIDTH = 200
+RANKING_MIN_HEIGHT = 120
+BOTTOM_MIN_HEIGHT = 120
+LANE_CARD_MIN_HEIGHT = 160
+LANE_COLUMN_WIDTH = 240
+LANE_LINE_GAP = 1
+LANE_FIT_FLOOR = 0.45
+LANE_FIT_SKIP_BELOW = 40
+RECORDS_MIN_HEIGHT = 240
+
+BRIEFING_REFERENCE_WIDTH = 960
+BRIEFING_FACTOR_MIN = 0.85
+BRIEFING_FACTOR_MAX = 1.3
+BRIEFING_PX_MIN = 16
+BRIEFING_PX_MAX = 96
+
 
 @dataclass(frozen=True, slots=True)
 class HudWindowPlacement:
@@ -344,6 +365,43 @@ def snap_display(value: object) -> str:
     return DISPLAY_AUTO
 
 
+def records_shown(layout: HudLayout, *, time_trial: bool) -> bool:
+    """The records table is one block of the shared HUD, not a second race screen."""
+    mode = layout.view(VIEW_LIVE).panel(PANEL_RECORDS)
+    if mode == DISPLAY_HIDE:
+        return False
+    if mode == DISPLAY_ALWAYS:
+        return True
+    return time_trial
+
+
+def lane_columns(lanes: int, width: int) -> int:
+    """Two lanes share one row. Further lanes wrap once a column would be narrower than 240 px."""
+    if lanes <= 1:
+        return 1
+    if lanes == 2:
+        return 2
+    if width < LANE_COLUMN_WIDTH:
+        return 1
+    return max(1, min(lanes, width // LANE_COLUMN_WIDTH))
+
+
+def lane_fit_factor(available: int, needed: int) -> float:
+    """Shrink every lane line together. The card measures ``needed``; this is only the ratio."""
+    if needed > available > 0:
+        return max(LANE_FIT_FLOOR, available / needed)
+    return 1.0
+
+
+def briefing_px(base: int, width: int, scale: int = 100) -> int:
+    """Grow with the window, and stay large enough to read on a narrow one.
+
+    ``scale`` is a percent. 100 keeps the size the briefing board already used.
+    """
+    factor = min(BRIEFING_FACTOR_MAX, max(BRIEFING_FACTOR_MIN, width / BRIEFING_REFERENCE_WIDTH))
+    return min(BRIEFING_PX_MAX, max(BRIEFING_PX_MIN, round(base * factor * scale / 100)))
+
+
 def field_shown(style: FieldStyle, field_id: str, mode: RaceMode, *, available: bool) -> bool:
     """Whether one lane field is drawn.
 
@@ -475,6 +533,30 @@ def light_pixels(frame: LightFrame, surface_w: int, surface_h: int) -> PixelRect
     x = min(max(0, round(frame.x * surface_w)), max(0, surface_w - width))
     y = min(max(0, round(frame.y * surface_h)), max(0, surface_h - height))
     return PixelRect(x, y, width, height)
+
+
+@dataclass(frozen=True, slots=True)
+class LightGantry:
+    """Housing and lamp faces in widget coordinates. ``(x, y, width, height)``."""
+
+    housing: tuple[float, float, float, float]
+    lamps: tuple[tuple[float, float, float, float], ...]
+
+
+def light_gantry(width: int, height: int, *, lamps: int = LIGHT_LAMP_COUNT) -> LightGantry:
+    """Scale the whole gantry into the box. Lamps stay round at every size."""
+    box_w = max(float(width), 1.0)
+    box_h = max(float(height), 1.0)
+    lamp = min(box_w / LIGHT_UNIT_WIDTH, box_h / LIGHT_UNIT_HEIGHT)
+    housing_w = LIGHT_UNIT_WIDTH * lamp
+    housing_h = LIGHT_UNIT_HEIGHT * lamp
+    origin_x = (box_w - housing_w) / 2
+    origin_y = (box_h - housing_h) / 2
+    left = origin_x + LIGHT_PAD_X * lamp
+    top = origin_y + LIGHT_PAD_Y * lamp
+    step = lamp * (1.0 + LIGHT_GAP)
+    faces = tuple((left + index * step, top, lamp, lamp) for index in range(lamps))
+    return LightGantry((origin_x, origin_y, housing_w, housing_h), faces)
 
 
 def light_frame_from_box(

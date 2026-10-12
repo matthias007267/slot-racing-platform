@@ -33,11 +33,16 @@ from slot_racing.modules.races.hud import (
     FIELD_TOTAL,
     FIELD_VEHICLE,
     FONT_FLOOR,
+    LANE_CARD_MIN_HEIGHT,
+    LANE_FIT_SKIP_BELOW,
+    LANE_LINE_GAP,
     HudLayout,
     caption_px,
     effective_px,
     factory_layout,
     field_shown,
+    lane_columns,
+    lane_fit_factor,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.ui.formatting import (
@@ -45,6 +50,8 @@ from slot_racing.modules.races.ui.formatting import (
     best_lap_display,
     format_lap_progress,
     participant_status_key,
+    remaining_laps,
+    remaining_time,
     start_number_text,
 )
 from slot_racing.uikit.theme import SPACE, set_role
@@ -73,7 +80,7 @@ class LaneCard(QFrame):
         self.setObjectName(f"live-lane-{lane}")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(0, 160)
+        self.setMinimumSize(0, LANE_CARD_MIN_HEIGHT)
         set_role(self, "hud-panel")
 
         self.lane_label = _value(f"live-lane-{lane}-number")
@@ -166,7 +173,7 @@ class LaneCard(QFrame):
         column.setContentsMargins(0, 0, 0, 0)
         # Tight gap so "Beste Rundenzeit" fits in the lane row. A looser gap
         # made the canvas a few pixels too tall and the scrollbar moved the clock.
-        column.setSpacing(1)
+        column.setSpacing(LANE_LINE_GAP)
         for field_id in FIELD_IDS:
             column.addWidget(self._boxes[field_id])
         self._column = QWidget()
@@ -200,8 +207,8 @@ class LaneCard(QFrame):
         duration_minutes: int | None = None,
     ) -> None:
         self._mode = mode
-        self._remaining_laps = _remaining_laps(row.laps_completed, laps)
-        self._remaining_time = _remaining_time(elapsed_ns, duration_minutes)
+        self._remaining_laps = remaining_laps(row.laps_completed, laps)
+        self._remaining_time = remaining_time(elapsed_ns, duration_minutes)
         self.position_label.setText(f"P{row.position}")
         self.driver_label.setText(row.driver_label)
         self.vehicle_label.setText(row.vehicle_label)
@@ -240,7 +247,7 @@ class LaneCard(QFrame):
         self._paint_style()
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 160)
+        return QSize(0, LANE_CARD_MIN_HEIGHT)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         available = event.size().width() - SPACE.sm * 2
@@ -288,16 +295,15 @@ class LaneCard(QFrame):
 
     def _fit(self) -> None:
         """Shrink every line together when the card is shorter than the chosen type."""
-        if self._fitting or self.height() < 40:
+        if self._fitting or self.height() < LANE_FIT_SKIP_BELOW:
             return
         self._fitting = True
         try:
             self._fit_factor = 1.0
             self._apply_fonts(1.0)
             needed = self._stack_height() + SPACE.sm * 2
-            available = self.height()
-            if needed > available > 0:
-                self._fit_factor = max(0.45, available / needed)
+            self._fit_factor = lane_fit_factor(self.height(), needed)
+            if self._fit_factor != 1.0:
                 self._apply_fonts(self._fit_factor)
         finally:
             self._fitting = False
@@ -408,7 +414,7 @@ class LaneCardBoard(QWidget):
     def _reflow(self) -> None:
         if self._lane_count < 1:
             return
-        columns = _columns_for(self._lane_count, self.width())
+        columns = lane_columns(self._lane_count, self.width())
         if columns == self._columns:
             return
         while self._grid.count():
@@ -431,28 +437,8 @@ class LaneCardBoard(QWidget):
         self._grid.activate()
 
 
-def _remaining_laps(completed: int, target: int) -> str | None:
-    if target < 1:
-        return None
-    return str(max(0, target - completed))
-
-
-def _remaining_time(elapsed_ns: int, duration_minutes: int | None) -> str | None:
-    if duration_minutes is None or duration_minutes < 1:
-        return None
-    left = duration_minutes * 60 * 1_000_000_000 - max(0, elapsed_ns)
-    return format_duration(max(0, left))
-
-
-def _columns_for(lanes: int, width: int) -> int:
-    """Two lanes share one row. Further lanes wrap once a column would be narrower than 240 px."""
-    if lanes <= 1:
-        return 1
-    if lanes == 2:
-        return 2
-    if width < 240:
-        return 1
-    return max(1, min(lanes, width // 240))
+# Kept for tests that import the previous private name.
+_columns_for = lane_columns
 
 
 def _value(object_name: str, *, wrap: bool = False) -> QLabel:
