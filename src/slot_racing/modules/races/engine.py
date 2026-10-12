@@ -156,12 +156,26 @@ class RaceEngine:
         return self._status
 
     @property
+    def started_at_ns(self) -> int | None:
+        """Monotonic stamp of ``start``, or ``None`` while the race has not started.
+
+        ``0`` is a real stamp when the clock began there. It is not a sentinel.
+        """
+        if self._status is RaceStatus.CREATED:
+            return None
+        return self._started_at_ns
+
+    @property
     def config(self) -> RaceConfig:
         return self._config
 
     def start(self) -> None:
         if self._status is not RaceStatus.CREATED:
             raise RaceStateError(f"cannot start a race that is {self._status}")
+        # The stamp is this call, which the start lights make at or after the
+        # planned lights-out. It is not moved back to that plan: the sensors
+        # are subscribed and the timing sources start later in this method, so
+        # an earlier stamp would count race time in which nothing was measuring.
         now = self._clock.now_ns()
         race_id = self._config.race_id
         self._bus.publish(RaceStarting(timestamp_ns=now, race_id=race_id))

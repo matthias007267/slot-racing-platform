@@ -10,6 +10,7 @@ from PySide6.QtGui import QCloseEvent, QHideEvent, QResizeEvent
 from PySide6.QtWidgets import QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 
 from slot_racing.core.config import AppConfig
+from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.events import (
     Event,
@@ -37,6 +38,7 @@ from slot_racing.modules.races.hud import (
 )
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.races.start_schedule import StartDeviation
 from slot_racing.modules.races.time_trial_board import build_time_trial_board
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, status_message
 from slot_racing.modules.races.ui.heat_gate import HeatGate
@@ -98,6 +100,7 @@ class LiveRaceView(QWidget):
         self._announced_finishers: set[int] = set()
         self._message = ""
         self._cue: StartCue | None = None
+        self._start_deviation: StartDeviation | None = None
         self._light_frame = LightFrame()
         self._layout_bound = False
         self.audio = RaceAudio(parent=self, config=config)
@@ -167,6 +170,11 @@ class LiveRaceView(QWidget):
     def runner(self) -> RaceRunner | None:
         return self._runner
 
+    @property
+    def start_deviation(self) -> StartDeviation | None:
+        """Measured start of the latest cue, including a cue that was canceled."""
+        return self._start_deviation
+
     def bound_layout(self) -> HudLayout:
         """The presentation this view is using. A running race keeps the one it opened with."""
         return self.stage.layout_spec()
@@ -205,8 +213,14 @@ class LiveRaceView(QWidget):
     def begin_start_cue(self, interval_ms: int | None = None) -> None:
         """Light the five lamps, then start the race when they go out."""
         self._cancel_cue()
+        self._start_deviation = None
         interval = self.cue_interval_ms if interval_ms is None else interval_ms
-        cue = StartCue(self._commit_start, interval_ms=interval, parent=self)
+        cue = StartCue(
+            self._commit_start,
+            interval_ms=interval,
+            clock=self._controller.clock,
+            parent=self,
+        )
         cue.changed.connect(self._show_cue)
         cue.changed.connect(self._play_start_sound)
         cue.finished.connect(self._hide_cue)
@@ -218,6 +232,12 @@ class LiveRaceView(QWidget):
         cue = self._cue
         if cue is not None:
             cue.advance()
+
+    def sync_start_cue(self) -> None:
+        """Show the lamp the race clock says is due. Does not move the clock."""
+        cue = self._cue
+        if cue is not None:
+            cue.wake()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
         """Leaving the live view must not let a hidden light sequence start the race."""
@@ -278,11 +298,19 @@ class LiveRaceView(QWidget):
         if cue is not None:
             cue.blockSignals(True)
             cue.stop()
+            self._remember_deviation(cue)
         self._hide_cue()
 
     def _commit_start(self) -> None:
-        """Start signal: hand control to the race engine and start its clock."""
+        """Start signal: hand control to the race engine and start its clock.
+
+        The engine stamps its own clock inside ``start``. Painting the lamps
+        happens from the cue after this returns, so the stamp is not waiting
+        on a repaint. A blocked GUI thread can still delay this call; the
+        deviation then says how late the start was.
+        """
         runner = self._runner
+        cue = self._cue
         if runner is None or runner.status is not RaceStatus.CREATED:
             return
         try:
@@ -291,10 +319,38 @@ class LiveRaceView(QWidget):
             if not is_expected(error):
                 logger.exception("Could not start the race after the countdown")
             self.messages.show_warning(describe_error(self.translator, error))
+            if cue is not None:
+                cue.note_start_failed()
             self._cancel_cue()
             return
+        started = runner.started_at_ns
+        if cue is not None and started is not None:
+            cue.record_actual_start(started)
+            self._remember_deviation(cue)
         self._timer.start()
         self.refresh()
+
+    def _remember_deviation(self, cue: StartCue) -> None:
+        deviation = cue.deviation
+        if deviation is None or deviation == self._start_deviation:
+            return
+        self._start_deviation = deviation
+        actual = deviation.actual_start_ns
+        delta_ns = deviation.deviation_ns
+        delta_ms = deviation.deviation_ms
+        record(
+            "RACE_START_DEVIATION",
+            module="races",
+            page="live",
+            result="canceled" if deviation.canceled else "measured",
+            sequence_id=deviation.sequence_id,
+            planned_go_ns=deviation.planned_go_ns,
+            actual_start_ns="" if actual is None else actual,
+            deviation_ns="" if delta_ns is None else delta_ns,
+            deviation_ms="" if delta_ms is None else delta_ms,
+            delay_reason=deviation.delay_reason or "",
+            canceled=deviation.canceled,
+        )
 
     def refresh(self) -> None:
         """Forward events a source has already produced, then redraw.

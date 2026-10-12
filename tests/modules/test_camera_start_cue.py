@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pytestqt.qtbot import QtBot
 
+from slot_racing.core.clock import ManualClock
 from slot_racing.modules.races.ui.start_cue import (
     START_LIGHT_COUNT,
     StartCue,
@@ -21,7 +22,7 @@ def test_the_race_starts_when_the_lights_go_out_and_not_before(qtbot: QtBot) -> 
     del qtbot
     started: list[str] = []
     heard: list[str] = []
-    cue = StartCue(lambda: started.append("go"), interval_ms=60_000)
+    cue = StartCue(lambda: started.append("go"), interval_ms=60_000, clock=ManualClock())
     cue.changed.connect(lambda step: heard.append(step.sound_id))
     cue.begin()
     assert cue.current is not None
@@ -50,7 +51,7 @@ def test_the_race_starts_when_the_lights_go_out_and_not_before(qtbot: QtBot) -> 
 
 def test_stopping_the_cue_blocks_a_later_start(qtbot: QtBot) -> None:
     started: list[str] = []
-    cue = StartCue(lambda: started.append("go"), interval_ms=30)
+    cue = StartCue(lambda: started.append("go"), interval_ms=30, clock=ManualClock())
     cue.begin()
     cue.advance()
     cue.stop()
