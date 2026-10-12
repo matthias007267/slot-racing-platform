@@ -34,6 +34,12 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud_scene import (
+    RANKING_BEST_RESERVE,
+    RANKING_CELL_PAD,
+    ranking_best_fits,
+    ranking_width_hidden,
+)
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
 from slot_racing.uikit.theme import COLORS, SPACE, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel, make_table
@@ -44,7 +50,7 @@ _PLACEHOLDER_MAX_FONT = 22
 _MIN_TEXT_FONT = 6
 _STATUS_CAPTION_HEIGHT = 56
 _MESSAGE_CAPTION_HEIGHT = 64
-_CELL_PAD = 16
+_CELL_PAD = RANKING_CELL_PAD
 _TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -54,9 +60,6 @@ COLUMN_VEHICLE = 2
 COLUMN_LAPS = 5
 COLUMN_BEST = 8
 _PRIMARY_COLUMNS = frozenset({COLUMN_POSITION, COLUMN_DRIVER, COLUMN_LAPS})
-_OPTIONAL_COLUMNS = frozenset({3, 4, 6, 7, 9, 10, 11})
-_VEHICLE_MIN_WIDTH = 300
-_FULL_TABLE_WIDTH = 980
 
 
 def _wrap_rows(
@@ -435,7 +438,7 @@ class LiveRankingWidget(HudWidget):
                 font.setPixelSize(size)
             self.table.setFont(font)
             self._reserve_vertical_bar()
-            extra = 64 if keep_best else 0
+            extra = RANKING_BEST_RESERVE if keep_best else 0
             if self._primary_width() + extra <= self._column_budget():
                 return True
         return False
@@ -484,19 +487,13 @@ class LiveRankingWidget(HudWidget):
         self.table.updateGeometries()
 
     def _apply_columns(self) -> None:
+        """Hide columns with the shared width rule, then fit the text that remains."""
         width = self._column_budget()
-        if width < 40:
+        hidden = ranking_width_hidden(width)
+        if hidden is None:
             return
-        show_vehicle = width >= _VEHICLE_MIN_WIDTH
-        show_rest = width >= _FULL_TABLE_WIDTH
         for column in range(self.table.columnCount()):
-            if column == COLUMN_VEHICLE:
-                hidden = not show_vehicle
-            elif column in _OPTIONAL_COLUMNS:
-                hidden = not show_rest
-            else:
-                hidden = False
-            self.table.setColumnHidden(column, hidden)
+            self.table.setColumnHidden(column, column in hidden)
         self._assign_widths(width)
 
     def _assign_widths(self, viewport: int) -> None:
@@ -511,14 +508,14 @@ class LiveRankingWidget(HudWidget):
         }
         remaining = viewport - sum(floors.values())
         secondary = [column for column in visible if column not in _PRIMARY_COLUMNS]
-        if COLUMN_BEST in secondary and remaining < 64:
+        if COLUMN_BEST in secondary and not ranking_best_fits(viewport, sum(floors.values())):
             self.table.setColumnHidden(COLUMN_BEST, True)
             secondary = [column for column in secondary if column != COLUMN_BEST]
             visible = [column for column in visible if column != COLUMN_BEST]
         chosen: dict[int, int] = dict(floors)
         if COLUMN_BEST in secondary:
-            chosen[COLUMN_BEST] = 64
-            remaining -= 64
+            chosen[COLUMN_BEST] = RANKING_BEST_RESERVE
+            remaining -= RANKING_BEST_RESERVE
         for column in secondary:
             if column == COLUMN_BEST:
                 continue

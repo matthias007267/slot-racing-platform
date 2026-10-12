@@ -35,6 +35,7 @@ from slot_racing.modules.races.hud import (
     FIELD_REMAINING_TIME,
     FIELD_START,
     FIELD_TOTAL,
+    FONT_FLOOR,
     LANE_CARD_MIN_HEIGHT,
     LANE_COLUMN_WIDTH,
     LANE_FIT_FLOOR,
@@ -259,8 +260,76 @@ class HudLaneCard:
     fields: tuple[HudField, ...]
     nominal_stack_px: int
     fit_floor: float
+    font_floor: int
     line_gap: int
     margin: int
+
+
+# Width gates of the PC ranking table, before it measures text and may drop the best lap.
+RANKING_WIDTH_FLOOR = 40
+RANKING_VEHICLE_MIN_WIDTH = 300
+RANKING_FULL_TABLE_WIDTH = 980
+RANKING_BEST_RESERVE = 64
+RANKING_CELL_PAD = 16
+RANKING_PRIMARY_IDS = ("position", "driver", "laps")
+RANKING_BEST_ID = "best_lap"
+_RANKING_INDEX = {column[0]: index for index, column in enumerate(_RANKING_COLUMNS)}
+_RANKING_VEHICLE = _RANKING_INDEX["vehicle"]
+_RANKING_OPTIONAL = frozenset(
+    _RANKING_INDEX[name]
+    for name in (
+        "start_number",
+        "lane",
+        "current_lap",
+        "last_lap",
+        "total_time",
+        "progress",
+        "status",
+    )
+)
+
+
+def ranking_width_hidden(width: int) -> frozenset[int] | None:
+    """Column indexes the PC table hides from width alone.
+
+    ``None`` means the panel is too narrow to remeasure, so the PC leaves the
+    columns as they are. The best-lap column is not in this set: the table may
+    still hide it when the measured text leaves fewer than
+    :data:`RANKING_BEST_RESERVE` pixels.
+    """
+    if width < RANKING_WIDTH_FLOOR:
+        return None
+    hidden: set[int] = set()
+    if width < RANKING_VEHICLE_MIN_WIDTH:
+        hidden.add(_RANKING_VEHICLE)
+    if width < RANKING_FULL_TABLE_WIDTH:
+        hidden.update(_RANKING_OPTIONAL)
+    return frozenset(hidden)
+
+
+def ranking_column_visible(column_id: str, width: int) -> bool:
+    """Whether one ranking column is shown at this panel width."""
+    hidden = ranking_width_hidden(width)
+    if hidden is None:
+        return True
+    index = _RANKING_INDEX.get(column_id)
+    if index is None:
+        return True
+    return index not in hidden
+
+
+def ranking_best_fits(viewport: int, primary_px: int) -> bool:
+    """Whether the best-lap column keeps its reserve after the primary columns.
+
+    ``primary_px`` is the host's measured width of place, driver and lap count,
+    including padding. Below the width floor the PC leaves every column alone.
+    The PC can still drop the column afterwards when the assigned pixel widths
+    overflow its own scrollbar. That last step needs the widget's layout, so a
+    browser that passed this check keeps the column and shortens the text.
+    """
+    if viewport < RANKING_WIDTH_FLOOR:
+        return True
+    return viewport - primary_px >= RANKING_BEST_RESERVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +339,7 @@ class HudColumn:
     priority: str
     color_role: str
     bold: str
+    visible: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +357,11 @@ class HudRanking:
     rows: tuple[HudRankingRow, ...]
     row_px: int
     columns_are_complete: bool
+    primary_ids: tuple[str, ...] = RANKING_PRIMARY_IDS
+    best_id: str = RANKING_BEST_ID
+    best_reserve_px: int = RANKING_BEST_RESERVE
+    width_floor_px: int = RANKING_WIDTH_FLOOR
+    cell_pad_px: int = RANKING_CELL_PAD
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +371,7 @@ class HudControl:
     enabled: bool
     host_only: bool
     tone: str
+    row: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,7 +597,11 @@ def build_hud_scene(
         lane_columns=columns,
         lane_rows=rows,
         lanes=cards,
-        ranking=_ranking(translator, snapshot),
+        ranking=_ranking(
+            translator,
+            snapshot,
+            next((item.width for item in panels if item.id == "ranking"), 0),
+        ),
         message_caption=_caption(
             translate("hud.widget.race_message"),
             visible=_panel_height(panels, "messages") >= MESSAGE_CAPTION_MIN_HEIGHT,
@@ -779,6 +859,7 @@ def _cards(
                 fields=fields,
                 nominal_stack_px=_nominal_stack(fields),
                 fit_floor=LANE_FIT_FLOOR,
+                font_floor=FONT_FLOOR,
                 line_gap=LANE_LINE_GAP,
                 margin=LANE_CARD_MARGIN,
             )
@@ -883,7 +964,7 @@ def _nominal_stack(fields: Sequence[HudField]) -> int:
     return body + LANE_LINE_GAP * (len(shown) - 1) + LANE_CARD_MARGIN * 2
 
 
-def _ranking(translator: Translator, snapshot: RaceSnapshot) -> HudRanking:
+def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudRanking:
     ended = snapshot.status is RaceStatus.FINISHED
     paused = snapshot.status is RaceStatus.PAUSED
     rows = []
@@ -898,7 +979,14 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot) -> HudRanking:
             )
         )
     columns = tuple(
-        HudColumn(column_id, translator.translate(key), priority, role, bold)
+        HudColumn(
+            column_id,
+            translator.translate(key),
+            priority,
+            role,
+            bold,
+            ranking_column_visible(column_id, width),
+        )
         for column_id, key, priority, role, bold in _RANKING_COLUMNS
     )
     return HudRanking(
@@ -907,6 +995,11 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot) -> HudRanking:
         rows=tuple(rows),
         row_px=RANKING_ROW_PX,
         columns_are_complete=True,
+        primary_ids=RANKING_PRIMARY_IDS,
+        best_id=RANKING_BEST_ID,
+        best_reserve_px=RANKING_BEST_RESERVE,
+        width_floor_px=RANKING_WIDTH_FLOOR,
+        cell_pad_px=RANKING_CELL_PAD,
     )
 
 
@@ -946,7 +1039,10 @@ def _caption(text: str, *, visible: bool) -> HudText:
 
 
 def _race_controls(
-    translate: Callable[[str], str], presentation: HudPresentation
+    translate: Callable[[str], str],
+    presentation: HudPresentation,
+    *,
+    single_row: bool = False,
 ) -> tuple[HudControl, ...]:
     enabled = {
         "pause": presentation.can_pause,
@@ -955,16 +1051,24 @@ def _race_controls(
         "results": presentation.can_results,
         "back": True,
     }
+    # The live stage uses two rows. The records board keeps the same buttons on one row.
     spec = (
-        ("pause", "hud.control.pause", ""),
-        ("resume", "hud.control.resume", ""),
-        ("abort", "hud.control.abort", "danger"),
-        ("results", "hud.control.results", "primary"),
-        ("back", "hud.control.back", "ghost"),
+        ("pause", "hud.control.pause", "", 0),
+        ("resume", "hud.control.resume", "", 0),
+        ("abort", "hud.control.abort", "danger", 1),
+        ("results", "hud.control.results", "primary", 1),
+        ("back", "hud.control.back", "ghost", 1),
     )
     return tuple(
-        HudControl(control_id, translate(key), enabled[control_id], True, tone)
-        for control_id, key, tone in spec
+        HudControl(
+            control_id,
+            translate(key),
+            enabled[control_id],
+            True,
+            tone,
+            0 if single_row else row,
+        )
+        for control_id, key, tone, row in spec
     )
 
 
@@ -1093,7 +1197,7 @@ def _records(
         row_px=RECORD_ROW_PX,
         header_px=RECORD_HEADER_PX,
         section_px=RECORD_SECTION_PX,
-        controls=_race_controls(translator.translate, presentation),
+        controls=_race_controls(translator.translate, presentation, single_row=True),
     )
 
 
@@ -1145,9 +1249,13 @@ def _briefing(
         hint_px=briefing_px(BRIEFING_HINT_BASE, width, view.text_scale(TEXT_TIME)),
         drivers=tuple(label for _participant_id, label in briefing.drivers),
         controls=(
-            HudControl("start", translator.translate("race.heat.start"), True, True, "primary"),
             HudControl(
-                "postpone", translator.translate("race.heat.postpone"), True, True, "secondary"
+                "postpone",
+                translator.translate("race.heat.postpone"),
+                True,
+                True,
+                "secondary",
+                0,
             ),
             HudControl(
                 "disqualify",
@@ -1155,7 +1263,9 @@ def _briefing(
                 True,
                 True,
                 "danger",
+                1,
             ),
+            HudControl("start", translator.translate("race.heat.start"), True, True, "primary", 2),
         ),
     )
 

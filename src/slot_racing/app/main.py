@@ -35,14 +35,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     runtime: Runtime | None = None
     completed = False
     try:
-        runtime = Runtime.create(load_config(config_path), config_path=config_path)
-        _remember_runtime(runtime)
+        # Qt services such as the local live display can start while plugins
+        # activate, so the application object has to exist first.
         existing = QApplication.instance()
         app = (
             existing
             if isinstance(existing, QApplication)
             else QApplication([sys.argv[0], *qt_args])
         )
+        runtime = Runtime.create(load_config(config_path), config_path=config_path)
+        _remember_runtime(runtime)
         install_qt_messages()
         remember_qt_versions()
         apply_theme(app)

@@ -19,6 +19,7 @@ from slot_racing.modules.races.hud import (
     FIELD_REMAINING_LAPS,
     FIELD_REMAINING_TIME,
     FIELD_TOTAL,
+    FONT_FLOOR,
     LANE_FIT_FLOOR,
     LIGHT_ASPECT,
     PANEL_RECORDS,
@@ -348,6 +349,11 @@ def test_building_a_scene_does_not_change_its_inputs() -> None:
     assert snapshot.elapsed_ns == 90_000_000_000
     assert scene.elapsed_ns == snapshot.elapsed_ns
     assert scene.lanes[0].fit_floor == LANE_FIT_FLOOR
+    assert scene.lanes[0].font_floor == FONT_FLOOR
+    assert scene.ranking.primary_ids == ("position", "driver", "laps")
+    assert scene.ranking.best_id == "best_lap"
+    assert scene.ranking.best_reserve_px == 64
+    assert scene.ranking.cell_pad_px == 16
     assert "lane-font-fit" in scene.measurements
     assert scene.measurements == HOST_MEASUREMENTS
     payload = scene_payload(scene)

@@ -29,6 +29,7 @@ from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
     RECORDS_MIN_HEIGHT,
     VIEW_BETWEEN,
+    VIEW_LIVE,
     HudConfigurationStore,
     HudLayout,
     LightFrame,
@@ -36,12 +37,15 @@ from slot_racing.modules.races.hud import (
     light_pixels,
     records_shown,
 )
+from slot_racing.modules.races.hud_scene import HudCue, HudPresentation
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.start_schedule import StartDeviation
-from slot_racing.modules.races.time_trial_board import build_time_trial_board
+from slot_racing.modules.races.time_trial_board import TimeTrialBoard, build_time_trial_board
+from slot_racing.modules.races.types import HeatBriefing
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, status_message
 from slot_racing.modules.races.ui.heat_gate import HeatGate
+from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.race_audio import RaceAudio
 from slot_racing.modules.races.ui.start_cue import (
@@ -86,6 +90,7 @@ class LiveRaceView(QWidget):
         store: HudConfigurationStore | None = None,
         service: RaceService | None = None,
         config: AppConfig | None = None,
+        broadcast: LiveBroadcast | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -99,6 +104,9 @@ class LiveRaceView(QWidget):
         self._lap_notice: tuple[int, int] | None = None
         self._announced_finishers: set[int] = set()
         self._message = ""
+        self._broadcast = broadcast
+        self._records: TimeTrialBoard | None = None
+        self._briefing: HeatBriefing | None = None
         self._cue: StartCue | None = None
         self._start_deviation: StartDeviation | None = None
         self._light_frame = LightFrame()
@@ -194,6 +202,8 @@ class LiveRaceView(QWidget):
         self._layout_bound = True
         self._runner = runner
         self._snapshot = None
+        self._records = None
+        self._briefing = None
         self._announced_end = False
         self.heat_gate.hide()
         self._lap_notice = None
@@ -226,6 +236,10 @@ class LiveRaceView(QWidget):
         cue.finished.connect(self._hide_cue)
         self._cue = cue
         cue.begin()
+        schedule = cue.schedule
+        if schedule is not None:
+            self._hand_schedule(schedule.to_document(), revoked=False)
+        self._publish_live()
 
     def advance_start_cue(self) -> None:
         """Move the lights on. The race starts only when they go out."""
@@ -290,16 +304,22 @@ class LiveRaceView(QWidget):
 
     def _release(self) -> None:
         self._cancel_cue()
+        self._clear_broadcast()
         self._unsubscribe()
 
     def _cancel_cue(self) -> None:
         cue = self._cue
         self._cue = None
         if cue is not None:
+            started = cue.started
             cue.blockSignals(True)
             cue.stop()
             self._remember_deviation(cue)
+            schedule = cue.schedule
+            if not started and schedule is not None:
+                self._hand_schedule(schedule.to_document(), revoked=True)
         self._hide_cue()
+        self._publish_live()
 
     def _commit_start(self) -> None:
         """Start signal: hand control to the race engine and start its clock.
@@ -455,6 +475,12 @@ class LiveRaceView(QWidget):
         runner = self._runner
         if runner is None:
             return
+        try:
+            self._draw(runner)
+        finally:
+            self._publish_live()
+
+    def _draw(self, runner: RaceRunner) -> None:
         snapshot = runner.snapshot()
         self._snapshot = snapshot
         tr = self.translator.translate
@@ -484,10 +510,13 @@ class LiveRaceView(QWidget):
         self.board.setVisible(_show_records(self.bound_layout(), time_trial=time_trial))
         if time_trial:
             self._show_time_trial(runner, snapshot, status_text, tone)
+        else:
+            self._records = None
         self._place_lights()
         self._update_buttons()
         if snapshot.status is not RaceStatus.FINISHED:
             self.heat_gate.hide()
+            self._briefing = None
             return
         self._timer.stop()
         # The engine session can end while another heat is still planned, or while the next
@@ -497,6 +526,7 @@ class LiveRaceView(QWidget):
                 self._show_heat_gate(snapshot.race_id)
             return
         self.heat_gate.hide()
+        self._briefing = None
         if not self._announced_end:
             self._announced_end = True
             self.race_over.emit(snapshot.race_id)
@@ -511,14 +541,14 @@ class LiveRaceView(QWidget):
             if self._service is None or race.track_id is None
             else self._service.list_time_measurements(track_id=race.track_id)
         )
-        self.board.show_board(
-            build_time_trial_board(
-                lane_count=race.lane_count,
-                race_id=race.id,
-                measurements=measurements,
-                participants=race.participants,
-            )
+        board = build_time_trial_board(
+            lane_count=race.lane_count,
+            race_id=race.id,
+            measurements=measurements,
+            participants=race.participants,
         )
+        self._records = board
+        self.board.show_board(board)
         warning = ""
         if snapshot.source_errors:
             warning = self.translator.format(
@@ -585,7 +615,9 @@ class LiveRaceView(QWidget):
         briefing = self._service.heat_briefing(race_id)
         if briefing is None:
             self.heat_gate.hide()
+            self._briefing = None
             return
+        self._briefing = briefing
         self.heat_gate.board.set_view_style(self.bound_layout().view(VIEW_BETWEEN))
         self.stage.hide()
         self.board.hide()
@@ -651,6 +683,60 @@ class LiveRaceView(QWidget):
         if self._service is None:
             raise RuntimeError("race service is not available")
         return self._service
+
+    def _publish_live(self) -> None:
+        """Hand the scene the PC just drew to the display. Failure stays off the race clock."""
+        broadcast = self._broadcast
+        if broadcast is None or not broadcast.is_running():
+            return
+        runner = self._runner
+        snapshot = self._snapshot
+        if runner is None or snapshot is None:
+            return
+        try:
+            warning = self.warning.text() if self.warning.isVisible() else ""
+            between = self._briefing is not None and not self.heat_gate.isHidden()
+            presentation = HudPresentation(
+                translator=self.translator,
+                mode=runner.race.mode,
+                lane_count=runner.race.lane_count,
+                duration_minutes=runner.race.duration_minutes,
+                message=self._message,
+                warning=warning,
+                cue=HudCue(
+                    active=self._cue is not None,
+                    lit_lights=self.start_lights.lit_lights,
+                    go=self.start_lights.showing_go,
+                ),
+                view=VIEW_BETWEEN if between else VIEW_LIVE,
+                briefing=self._briefing if between else None,
+                records=self._records,
+                can_pause=self.pause_button.isEnabled(),
+                can_resume=self.resume_button.isEnabled(),
+                can_stop=self.stop_button.isEnabled(),
+                can_results=self.results_button.isEnabled(),
+            )
+            broadcast.publish_source(self.bound_layout(), snapshot, presentation)
+        except Exception:
+            logger.exception("Could not publish the live display")
+
+    def _hand_schedule(self, document: dict[str, object], *, revoked: bool) -> None:
+        broadcast = self._broadcast
+        if broadcast is None or not broadcast.is_running():
+            return
+        try:
+            broadcast.publish_schedule(document, revoked=revoked)
+        except Exception:
+            logger.exception("Could not publish the start schedule")
+
+    def _clear_broadcast(self) -> None:
+        broadcast = self._broadcast
+        if broadcast is None or not broadcast.is_running():
+            return
+        try:
+            broadcast.clear_scene()
+        except Exception:
+            logger.exception("Could not clear the live display")
 
     def _guard(self, action: Callable[[], None]) -> None:
         try:
