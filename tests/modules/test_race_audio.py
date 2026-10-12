@@ -13,6 +13,7 @@ import pytest
 from PySide6.QtWidgets import QWidget
 from pytestqt.qtbot import QtBot
 
+from slot_racing.core.clock import ManualClock
 from slot_racing.core.config import AppConfig
 from slot_racing.core.config.models import AUDIO_VOLUME_DEFAULT
 from slot_racing.core.domain import RaceStatus
@@ -57,7 +58,7 @@ def test_each_lamp_plays_one_tone_and_go_plays_once() -> None:
     output = RecordingOutput()
     audio = RaceAudio(output)
     started: list[str] = []
-    cue = StartCue(lambda: started.append("go"), interval_ms=60_000)
+    cue = StartCue(lambda: started.append("go"), interval_ms=60_000, clock=ManualClock())
     cue.changed.connect(lambda step: audio.play(step.sound_id))
     cue.begin()
     assert [tone for tone, _volume in output.calls] == [LAMP_TONE]
@@ -90,7 +91,7 @@ def test_disabled_audio_and_a_missing_library_still_start_the_race() -> None:
         audio = RaceAudio(output)
         audio.enabled = enabled
         started: list[str] = []
-        cue = StartCue(_remember(started), interval_ms=60_000)
+        cue = StartCue(_remember(started), interval_ms=60_000, clock=ManualClock())
         cue.changed.connect(lambda step, player=audio: player.play(step.sound_id))
         cue.begin()
         for _ in range(START_LIGHT_COUNT):
@@ -109,7 +110,7 @@ def test_stopping_the_cue_does_not_play_go_later(qtbot: QtBot) -> None:
     output = RecordingOutput()
     audio = RaceAudio(output)
     started: list[str] = []
-    cue = StartCue(lambda: started.append("go"), interval_ms=30)
+    cue = StartCue(lambda: started.append("go"), interval_ms=30, clock=ManualClock())
     cue.changed.connect(lambda step: audio.play(step.sound_id))
     cue.begin()
     cue.advance()
@@ -196,6 +197,7 @@ import builtins
 builtins.__import__ = guard
 
 from PySide6.QtWidgets import QApplication
+from slot_racing.core.clock import ManualClock
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.race_audio import RaceAudio, SilentToneOutput
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -210,7 +212,7 @@ started = []
 def remember():
     started.append("go")
 
-cue = StartCue(remember, interval_ms=60_000)
+cue = StartCue(remember, interval_ms=60_000, clock=ManualClock())
 cue.changed.connect(lambda step: audio.play(step.sound_id))
 cue.begin()
 for _ in range(START_LIGHT_COUNT):

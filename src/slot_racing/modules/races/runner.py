@@ -97,6 +97,11 @@ class RaceRunner:
         return self._engine.status
 
     @property
+    def started_at_ns(self) -> int | None:
+        """The engine's start stamp. ``None`` until ``start`` has run."""
+        return self._engine.started_at_ns
+
+    @property
     def is_active(self) -> bool:
         return self._engine.status in (RaceStatus.RUNNING, RaceStatus.PAUSED)
 
@@ -213,6 +218,11 @@ class RaceController:
     def events(self) -> EventDispatcher:
         """Bus the running race publishes on. The live view redraws from these events."""
         return self._bus
+
+    @property
+    def clock(self) -> Clock:
+        """Monotonic clock the engine stamps. The start lights use this same clock."""
+        return self._clock
 
     def start_race(self, race_id: RaceId) -> RaceRunner:
         """Validate the race, resolve its timing provider, wire a fresh timing source and engine,

@@ -155,6 +155,22 @@ forbidden_modules = [
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
+name = "Start schedule is free of UI and does not start the race"
+type = "forbidden"
+source_modules = ["slot_racing.modules.races.start_schedule"]
+forbidden_modules = [
+    "PySide6",
+    "slot_racing.uikit",
+    "sqlalchemy",
+    "slot_racing.modules.races.engine",
+    "slot_racing.modules.races.service",
+    "slot_racing.modules.races.recorder",
+    "slot_racing.modules.races.runner",
+    "slot_racing.modules.races.ui",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
 name = "HUD configuration is free of UI and the race engine"
 type = "forbidden"
 source_modules = ["slot_racing.modules.races.hud"]
