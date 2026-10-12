@@ -29,6 +29,9 @@ shell with a sidebar and dynamic navigation. Usable in the application:
   selectable timing provider. The simulation is built in.
   Camera timing is an optional module, off by default, and a camera race uses the saved camera
   configuration. Further providers register themselves and then appear in the selection.
+  The dashboard can show a local QR code and link for the browser HUD
+  ([guide](docs/browser-hud.md)). The display stays up across races and does not
+  have to have a browser connected before the start.
 - **Timing-Konfiguration (Strecken):** each track can have a timing layout of logical positions
   (start/finish plus any number of sectors) with a sensor assigned to every position. Editor,
   six step wizard and a test mode with simulated events; the simulation and the camera provider

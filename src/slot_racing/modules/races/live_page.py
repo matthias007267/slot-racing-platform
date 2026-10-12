@@ -397,7 +397,7 @@ _HUD_HTML = """<!DOCTYPE html>
       title = "Verbindung wird hergestellt";
       cover = true;
     } else if (connection === "no-race") {
-      title = "Kein Rennen aktiv";
+      title = "Warte auf das nächste Rennen";
       cover = true;
     }
     banner.hidden = !cover;

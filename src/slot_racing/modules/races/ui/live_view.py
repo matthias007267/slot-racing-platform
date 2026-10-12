@@ -216,6 +216,7 @@ class LiveRaceView(QWidget):
         self._announced_finishers = set()
         self._message = ""
         self.messages.clear_warning()
+        self._claim_broadcast()
         self.refresh()
         if runner.is_active:
             self._timer.start()
@@ -227,10 +228,17 @@ class LiveRaceView(QWidget):
             self.begin_start_cue()
 
     def begin_start_cue(self, interval_ms: int | None = None) -> None:
-        """Light the five lamps, then start the race when they go out."""
+        """Light the five lamps, then start the race when they go out.
+
+        The browser server is reused when it is already listening. The schedule
+        is published before the first lamp, and the race does not wait for a
+        browser to connect.
+        """
         self._cancel_cue()
         self._phase_mark = None
         self._start_deviation = None
+        self._claim_broadcast()
+        self._prepare_broadcast()
         interval = self.cue_interval_ms if interval_ms is None else interval_ms
         cue = StartCue(
             self._commit_start,
@@ -242,10 +250,11 @@ class LiveRaceView(QWidget):
         cue.changed.connect(self._play_start_sound)
         cue.finished.connect(self._hide_cue)
         self._cue = cue
-        cue.begin()
+        cue.hold()
         schedule = cue.schedule
         if schedule is not None:
             self._hand_schedule(schedule.to_document(), revoked=False)
+        cue.wake()
         self._publish_reached_phase()
         self._publish_live()
 
@@ -313,8 +322,16 @@ class LiveRaceView(QWidget):
         self.back_requested.emit()
 
     def _release(self) -> None:
+        runner = self._runner
         self._cancel_cue()
-        self._clear_broadcast()
+        broadcast = self._broadcast
+        if (
+            broadcast is not None
+            and runner is not None
+            and broadcast.followed_race_id == int(runner.race.id)
+        ):
+            self._clear_broadcast()
+            broadcast.release(int(runner.race.id))
         self._unsubscribe()
 
     def _cancel_cue(self) -> None:
@@ -706,10 +723,41 @@ class LiveRaceView(QWidget):
             raise RuntimeError("race service is not available")
         return self._service
 
+    def _claim_broadcast(self) -> None:
+        broadcast = self._broadcast
+        runner = self._runner
+        if broadcast is None or runner is None:
+            return
+        broadcast.follow(int(runner.race.id))
+
+    def _prepare_broadcast(self) -> None:
+        """Open the display before the countdown when it is enabled. Failure stays local."""
+        broadcast = self._broadcast
+        if broadcast is None:
+            return
+        try:
+            diagnostics = broadcast.prepare_for_countdown()
+        except Exception:
+            logger.exception("Could not prepare the live display")
+            self.messages.show_warning(self.translator.translate("race.live.broadcast_failed"))
+            return
+        if broadcast.wanted and not broadcast.is_running():
+            detail = diagnostics.error or self.translator.translate("race.live.broadcast_failed")
+            self.messages.show_warning(
+                self.translator.format("race.live.broadcast_failed_detail", detail=detail)
+            )
+
+    def _may_publish(self) -> bool:
+        broadcast = self._broadcast
+        runner = self._runner
+        if broadcast is None or runner is None or not broadcast.is_running():
+            return False
+        return broadcast.accepts(int(runner.race.id))
+
     def _publish_live(self) -> None:
         """Hand the scene the PC just drew to the display. Failure stays off the race clock."""
         broadcast = self._broadcast
-        if broadcast is None or not broadcast.is_running():
+        if broadcast is None or not self._may_publish():
             return
         runner = self._runner
         snapshot = self._snapshot
@@ -744,7 +792,7 @@ class LiveRaceView(QWidget):
 
     def _hand_schedule(self, document: dict[str, object], *, revoked: bool) -> None:
         broadcast = self._broadcast
-        if broadcast is None or not broadcast.is_running():
+        if broadcast is None or not self._may_publish():
             return
         try:
             broadcast.publish_schedule(document, revoked=revoked)
@@ -812,7 +860,7 @@ class LiveRaceView(QWidget):
     def _hand_start_document(self, document: dict[str, object], *, committed: bool) -> None:
         """Queue one start document. A slow browser must not delay the race clock."""
         broadcast = self._broadcast
-        if broadcast is None or not broadcast.is_running():
+        if broadcast is None or not self._may_publish():
             return
         try:
             if committed:
