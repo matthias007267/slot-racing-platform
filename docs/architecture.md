@@ -468,6 +468,32 @@ and scrolls vertically. Pause and resume are separate buttons and only call `Rac
 A fullscreen window can host the same stage later; this step does not add one, and it does
 not add a library of named layouts.
 
+### Browser display
+
+One `LiveBroadcast` is created with the races plugin and kept for the whole
+session. Turning the display on (dashboard button **Übertragung starten**, or
+`live_broadcast_enabled` in the config) listens on one local address and port.
+The session token and the URL stay the same until that process stops, so a
+phone that scanned the dashboard QR code does not scan again for the next race.
+The dashboard reads `LiveDisplay` and draws the QR code locally. The URL is not
+written to logs or diagnostic records.
+
+Startup order for a race, when the display is enabled:
+
+1. Reuse the listening server, or start it once. A failure is shown and the
+   local race continues.
+2. Publish the current scene for the one race the live view claimed.
+3. Build the start schedule and publish it before the first red lamp.
+4. Show the lamps and run the countdown. No browser has to be connected.
+5. The engine starts at lights-out and `start_committed` is published afterwards.
+
+`RaceController` holds at most one runner. A second start is refused while that
+runner is still going. After finish or abort the runner is no longer active; the
+next race replaces it on the same server. A view that no longer owns the claim
+cannot publish over the new race. With no scene, the browser shows
+“Warte auf das nächste Rennen”. A finished scene stays visible and is labeled
+as finished until the next race or until the live view is released.
+
 ### Browser clock estimate
 
 A browser on the LAN can estimate the PC's monotonic clock (ADR 0014) and light

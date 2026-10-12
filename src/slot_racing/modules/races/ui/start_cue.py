@@ -182,6 +182,15 @@ class StartCue(QObject):
 
     def begin(self) -> None:
         """Show the lamp that is due now. The race stays stopped until lights-out."""
+        self.hold()
+        self.wake()
+
+    def hold(self) -> None:
+        """Build the schedule and leave every lamp off until :meth:`wake`.
+
+        The live view publishes this plan before ``wake``, so a connected browser
+        can receive the first red phase instead of joining after it has passed.
+        """
         self._timer.stop()
         self._shown_index = -1
         self._started = False
@@ -196,7 +205,6 @@ class StartCue(QObject):
             step_interval_ns=self._step_ns,
             steps=described,
         )
-        self.wake()
 
     def wake(self) -> None:
         """Apply the phase due at the current monotonic time.

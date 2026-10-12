@@ -370,7 +370,7 @@ def test_http_page_and_rejected_tokens(display: LiveBroadcast) -> None:
     assert status == 200
     assert "Slot-Racing Platform" in text
     assert "Verbindung unterbrochen" in text
-    assert "Kein Rennen aktiv" in text
+    assert "Warte auf das nächste Rennen" in text
     assert token not in text
     diagnosed, diagnosed_body = _http(host, port, f"/diagnostics?token={token}")
     diagnosed_text = diagnosed_body.decode()
@@ -997,7 +997,7 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "Wiederverbindung läuft" in page
     assert "Server nicht erreichbar" in page
     assert "Die Sitzung ist abgelaufen. Bitte öffne die aktuelle Anzeigeadresse erneut." in page
-    assert "Kein Rennen aktiv" in page
+    assert "Warte auf das nächste Rennen" in page
     assert "overflowY" in page
     assert "best_reserve_px" in page
     assert "primary_ids" in page

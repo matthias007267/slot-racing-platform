@@ -14,6 +14,7 @@ from slot_racing.core.catalog import (
 from slot_racing.core.config import AppConfig
 from slot_racing.core.diagnostics import record
 from slot_racing.core.events import PersistentStoreReplacing
+from slot_racing.core.live_display import LiveDisplay
 from slot_racing.core.plugin import (
     NavigationItem,
     Plugin,
@@ -97,6 +98,16 @@ class RacesPlugin(Plugin):
         broadcast = LiveBroadcast()
         self._broadcast = broadcast
         context.register_service(LiveBroadcast, broadcast)
+        from slot_racing.modules.races.live_display import BroadcastDisplay
+
+        context.register_service(
+            LiveDisplay,
+            BroadcastDisplay(broadcast, context.config, context.config_path),
+        )
+        broadcast.note_request(
+            enabled=context.config.live_broadcast_enabled,
+            port=context.config.live_broadcast_port,
+        )
         if context.config.live_broadcast_enabled:
             _start_live_broadcast(broadcast, context.config)
         translator = context.translator

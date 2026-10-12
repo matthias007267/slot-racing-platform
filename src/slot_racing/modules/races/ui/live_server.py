@@ -602,22 +602,31 @@ class LiveBroadcast:
         self._done = threading.Event()
         self._done.set()
         self._now_ns = time.perf_counter_ns if now_ns is None else now_ns
+        self._wants_listen = False
+        self._port = DEFAULT_PORT
+        self._followed: int | None = None
+        self._phase = "idle"
 
     def start(self, host: str | None = None, port: int = DEFAULT_PORT) -> BroadcastDiagnostics:
         """Listen until :meth:`stop`. A failure is reported and does not raise."""
         if self._accepting and self.is_running():
+            self._phase = "ready"
             return self.diagnostics()
         self.stop()
+        self._phase = "starting"
         if QCoreApplication.instance() is None:
             self._stats.failed("Der Live-Dienst braucht die laufende Anwendung.")
+            self._phase = "idle"
             return self.diagnostics()
         if port < 0 or port > 65535:
             self._stats.failed("Der Port liegt außerhalb des gültigen Bereichs.")
+            self._phase = "idle"
             return self.diagnostics()
         try:
             chosen = normalize_bind_host(host, interface_candidates())
         except BindError as error:
             self._stats.failed(str(error))
+            self._phase = "idle"
             return self.diagnostics()
         token = new_session_token()
         mailbox = BroadcastMailbox()
@@ -658,6 +667,7 @@ class LiveBroadcast:
             self.stop()
             return self.diagnostics()
         self._accepting = True
+        self._phase = "ready"
         snapshot = self.diagnostics()
         logger.info("Live display listening on %s:%s", snapshot.host, snapshot.port)
         record(
@@ -670,13 +680,53 @@ class LiveBroadcast:
         )
         return snapshot
 
+    def note_request(self, *, enabled: bool, port: int) -> None:
+        """Remember whether a later countdown may open the port. This does not listen."""
+        self._wants_listen = enabled
+        self._port = port
+
     def ensure_started(self, *, enabled: bool, port: int) -> BroadcastDiagnostics:
+        """Start when asked, and leave an already listening server in place."""
+        self.note_request(enabled=enabled, port=port)
         if not enabled or self.is_running():
             return self.diagnostics()
         return self.start(port=port)
 
+    def prepare_for_countdown(self) -> BroadcastDiagnostics:
+        """Be ready before the first lamp. A running server is not restarted."""
+        if self.is_running() or not self._wants_listen:
+            return self.diagnostics()
+        return self.start(port=self._port)
+
+    @property
+    def wanted(self) -> bool:
+        return self._wants_listen
+
+    @property
+    def phase(self) -> str:
+        """``idle``, ``starting``, ``ready`` or ``stopping``. Not a race status."""
+        return self._phase
+
+    def follow(self, race_id: int) -> None:
+        """Publish only this race until another view claims the display."""
+        self._followed = race_id
+
+    def accepts(self, race_id: int) -> bool:
+        """True when no race has claimed the display, or this race holds it."""
+        return self._followed is None or self._followed == race_id
+
+    @property
+    def followed_race_id(self) -> int | None:
+        return self._followed
+
+    def release(self, race_id: int) -> None:
+        """Drop the claim. A newer race's claim is left in place."""
+        if self._followed == race_id:
+            self._followed = None
+
     def stop(self) -> None:
         """Close the port. A running race is left untouched."""
+        self._phase = "stopping"
         self._accepting = False
         self._mailbox.wake.set_callback(None)
         poster = self._poster
@@ -695,6 +745,7 @@ class LiveBroadcast:
         self._done.set()
         if self._stats.snapshot().running:
             self._stats.stopped()
+        self._phase = "idle"
 
     def publish_source(
         self, layout: HudLayout, snapshot: RaceSnapshot, presentation: HudPresentation

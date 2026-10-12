@@ -98,6 +98,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "race.live.warning": "Warnung: {detail}",
         "race.live.no_race": "Es läuft kein Rennen.",
+        "race.live.broadcast_failed": (
+            "Die Browser-Anzeige konnte nicht gestartet werden. Das Rennen startet lokal."
+        ),
+        "race.live.broadcast_failed_detail": (
+            "Die Browser-Anzeige konnte nicht gestartet werden ({detail}). "
+            "Das Rennen startet lokal."
+        ),
         "race.live.detail": "Fahrerdetail",
         "race.live.detail_empty": "Wählen Sie einen Fahrer aus, um die Rundenzeiten zu sehen.",
         "race.live.lap_times": "Bisherige Rundenzeiten",
