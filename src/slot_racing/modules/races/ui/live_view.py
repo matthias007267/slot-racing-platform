@@ -113,6 +113,7 @@ class LiveRaceView(QWidget):
         self._records: TimeTrialBoard | None = None
         self._briefing: HeatBriefing | None = None
         self._cue: StartCue | None = None
+        self._phase_mark: tuple[str, int] | None = None
         self._start_deviation: StartDeviation | None = None
         self._light_frame = LightFrame()
         self._layout_bound = False
@@ -228,6 +229,7 @@ class LiveRaceView(QWidget):
     def begin_start_cue(self, interval_ms: int | None = None) -> None:
         """Light the five lamps, then start the race when they go out."""
         self._cancel_cue()
+        self._phase_mark = None
         self._start_deviation = None
         interval = self.cue_interval_ms if interval_ms is None else interval_ms
         cue = StartCue(
@@ -318,6 +320,7 @@ class LiveRaceView(QWidget):
     def _cancel_cue(self) -> None:
         cue = self._cue
         self._cue = None
+        self._phase_mark = None
         if cue is not None:
             started = cue.started
             cue.blockSignals(True)
@@ -770,12 +773,24 @@ class LiveRaceView(QWidget):
         )
         if matched is None:
             return
+        observed = self._controller.clock.now_ns()
+        previous = self._phase_mark
+        if previous is None or previous[0] != schedule.sequence_id:
+            skipped = matched.index
+        else:
+            skipped = matched.index - previous[1] - 1
+        if skipped < 0:
+            skipped = 0
+        self._phase_mark = (schedule.sequence_id, matched.index)
         try:
             document = phase_document(
                 sequence_id=schedule.sequence_id,
                 step_index=matched.index,
                 lit_lights=matched.lit_lights,
                 at_ns=matched.at_ns,
+                observed_ns=observed,
+                lateness_ns=observed - matched.at_ns,
+                skipped_steps=skipped,
             )
         except ValueError:
             return
@@ -787,6 +802,7 @@ class LiveRaceView(QWidget):
                 sequence_id=sequence_id,
                 actual_start_ns=actual_start_ns,
                 race_status=RaceStatus.RUNNING.value,
+                published_ns=self._controller.clock.now_ns(),
             )
         except ValueError:
             logger.exception("Could not describe the confirmed start")

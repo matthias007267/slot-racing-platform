@@ -479,6 +479,14 @@ stays on until `start_committed`. A poor, stale, or missing estimate falls back
 to the server's `start_phase` messages. The estimate is not a real-time
 guarantee, and the race clock does not wait for it.
 
+The PC publishes the time it showed each red phase (`observed_ns`) and the
+time it handed `start_committed` to the broadcast (`published_ns`). A browser
+keeps a bounded log of its own lamp and GO times and can save JSON or CSV
+locally. Those numbers are measurements or estimates, not the moment a pixel
+became visible. Comparing several browsers is an offline step on those files.
+The live protocol still accepts only a viewport and a clock probe. Quality
+thresholds are unchanged; see `docs/start-light-measurement.md` and ADR 0015.
+
 ## Dependency rules
 
 | Rule | Enforced by |

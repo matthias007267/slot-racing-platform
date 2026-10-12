@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import resource
 import socket
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -310,8 +312,12 @@ def test_access_checks_token_host_and_origin_without_opening_files() -> None:
     assert "keine Startfreigabe" in page
     assert "Schätzung" in page
     assert "keine Echtzeitgarantie" in page
+    assert "Letzte Lampenabweichung" in page
+    assert "JSON exportieren" in page
+    assert "nur diese Sitzung" in page
     assert "time_probe" in page
     assert "setInterval" not in page
+    assert "Date.now" not in page
     assert "/session" in page
     assert "sitzung abgelaufen" in page
     assert token not in page
@@ -779,6 +785,10 @@ def test_a_client_receives_confirmed_lamps_and_go_only_after_commit(qtbot: QtBot
             assert first["lit_lights"] == 1
             assert first["authorizes_go"] is False
             assert first["phase"] == "counting"
+            assert isinstance(first["observed_ns"], str)
+            assert isinstance(first["at_ns"], str)
+            assert _wire_ns(first["observed_ns"]) >= _wire_ns(first["at_ns"])
+            assert isinstance(first["lateness_ns"], str)
             for lit in range(2, 6):
                 live.advance_start_cue()
                 seen = client.wait_for(_phase_with_lamps(lit))
@@ -794,6 +804,8 @@ def test_a_client_receives_confirmed_lamps_and_go_only_after_commit(qtbot: QtBot
             assert body["race_status"] == "running"
             assert body["authorizes_go"] is True
             assert body["sequence_id"] == first["sequence_id"]
+            assert isinstance(body["published_ns"], str)
+            assert _wire_ns(body["published_ns"]) >= _wire_ns(body["actual_start_ns"])
         finally:
             client.close()
     finally:
@@ -1132,6 +1144,94 @@ def test_ten_browsers_can_sample_the_clock_together(display: LiveBroadcast) -> N
             client.close()
 
 
+@pytest.mark.parametrize("count", [1, 2, 5, 16])
+def test_several_browsers_sample_without_blocking_the_start(
+    display: LiveBroadcast, count: int
+) -> None:
+    """Probes stay on the server thread. A start confirmation is still queued at once."""
+    host, port, token = _endpoint(display)
+    clients = [_Client.connect(host, port, token) for _ in range(count)]
+    started = time.perf_counter()
+    cpu_started = resource.getrusage(resource.RUSAGE_SELF)
+    rss_started = _rss_kb()
+    try:
+        for client in clients:
+            for index in range(4):
+                client.send_text(
+                    json.dumps(
+                        {
+                            "type": "time_probe",
+                            "protocol_version": BROADCAST_PROTOCOL_VERSION,
+                            "probe_id": f"m{index}",
+                            "t1_us": "3000",
+                        }
+                    )
+                )
+        for client in clients:
+            _await_samples(client, 4)
+        assert time.perf_counter() - started < 5
+        schedule = StartSchedule.build(
+            reference_ns=1_000, step_interval_ns=1_000, sequence_id="measure"
+        )
+        assert display.publish_schedule(schedule.to_document(), revoked=False) >= 1
+        document = commit_document(
+            sequence_id="measure",
+            actual_start_ns=50_000,
+            race_status="running",
+            published_ns=51_000,
+        )
+        queued = time.perf_counter()
+        assert display.publish_start_committed(document) == 1
+        assert time.perf_counter() - queued < 0.1
+        committed = clients[0].wait_for(lambda item: item.get("type") == "start_committed")
+        body = _payload(committed)
+        assert body["authorizes_go"] is True
+        assert body["published_ns"] == "51000"
+        assert body["actual_start_ns"] == "50000"
+        assert display.diagnostics().client_count == count
+        if count == 16:
+            cpu = resource.getrusage(resource.RUSAGE_SELF)
+            used = (cpu.ru_utime + cpu.ru_stime) - (cpu_started.ru_utime + cpu_started.ru_stime)
+            assert used < 2
+            assert _rss_kb() - rss_started < 32_000
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_a_seventeenth_browser_is_refused(display: LiveBroadcast) -> None:
+    host, port, token = _endpoint(display)
+    clients = [_Client.connect(host, port, token) for _ in range(16)]
+    extra: socket.socket | None = None
+    try:
+        extra = socket.create_connection((host, port), timeout=2)
+        extra.sendall(
+            (
+                f"GET /live?token={token} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: MDEyMzQ1Njc4OWFiY2RlZg==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        extra.settimeout(2)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = extra.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status = data.split(b" ", 2)[1]
+        assert status == b"503"
+        assert display.diagnostics().client_count == 16
+    finally:
+        if extra is not None:
+            extra.close()
+        for client in clients:
+            client.close()
+
+
 class _Client:
     def __init__(self, sock: socket.socket, status: int, rest: bytes) -> None:
         self.sock = sock
@@ -1338,6 +1438,13 @@ def _payload(message: dict[str, object]) -> dict[str, object]:
     payload = message["payload"]
     assert isinstance(payload, dict)
     return payload
+
+
+def _rss_kb() -> int:
+    for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return 0
 
 
 def _await_samples(client: _Client, count: int) -> None:

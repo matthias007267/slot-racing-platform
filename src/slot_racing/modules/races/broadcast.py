@@ -121,6 +121,7 @@ from slot_racing.modules.races.start_display import (
     parse_commit_document,
     parse_phase_document,
 )
+from slot_racing.modules.races.start_metrics import metrics_source
 from slot_racing.modules.races.start_schedule import TIME_BASE, TIMESTAMP_MEANING
 from slot_racing.modules.races.time_sync import encode_timestamps, sync_source
 
@@ -886,7 +887,9 @@ def take_frames(
 
 def diagnostic_page() -> bytes:
     """Static diagnostic page. It estimates the clock and does not start a race."""
-    return _DIAGNOSTIC_HTML.replace("__SYNC_SOURCE__", sync_source()).encode("utf-8")
+    page = _DIAGNOSTIC_HTML.replace("__SYNC_SOURCE__", sync_source())
+    page = page.replace("__METRICS_SOURCE__", metrics_source())
+    return page.encode("utf-8")
 
 
 def _frame(opcode: int, payload: bytes) -> bytes:
@@ -966,9 +969,26 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     <dt>Alter der letzten Probe</dt><dd id="age">—</dd>
     <dt>Proben</dt><dd id="samples">0</dd>
     <dt>Sequenz</dt><dd id="sequence">—</dd>
+    <dt>Aktive Lampenphase</dt><dd id="lamp-phase">—</dd>
     <dt>Lampenmodus</dt><dd id="lamp-mode">servergesteuert</dd>
-    <dt>GO-Verzögerung (Schätzung)</dt><dd id="go-delay">nicht messbar</dd>
+    <dt>Letzte Lampenabweichung (Schätzung)</dt><dd id="lamp-deviation">—</dd>
+    <dt>Durchschnittliche Lampenabweichung (Schätzung)</dt><dd id="lamp-average">—</dd>
+    <dt>Letzte GO-Verzögerung (Schätzung)</dt><dd id="go-delay">nicht messbar</dd>
+    <dt>Engine bis Veröffentlichung (Messwert)</dt><dd id="engine-publish">—</dd>
+    <dt>Veröffentlichung bis Empfang (Schätzung)</dt><dd id="publish-receive">—</dd>
+    <dt>Empfang bis Darstellung (Messwert, Browseruhr)</dt><dd id="receive-paint">—</dd>
+    <dt>Startsequenzen dieser Sitzung</dt><dd id="sequences">0</dd>
+    <dt>Verbindungsabbrüche</dt><dd id="disconnects">0</dd>
+    <dt>Fallback-Wechsel</dt><dd id="fallbacks">0</dd>
+    <dt>Verworfene Proben</dt><dd id="discarded">0</dd>
   </dl>
+  <p>
+    <button type="button" id="export-json">JSON exportieren</button>
+    <button type="button" id="export-csv">CSV exportieren</button>
+  </p>
+  <p>Der Export bleibt in diesem Browser. Er enthält nur diese Sitzung,
+  kein Sitzungstoken und keine Messwerte anderer Geräte.</p>
+  <p>Ein JavaScript-Zeitpunkt ist nicht der Moment, in dem ein Pixel sichtbar wurde.</p>
   <p>Die Verbindung im lokalen Netzwerk ist nicht verschlüsselt.</p>
   <p>Der geplante GO-Zeitpunkt ist eine Host-Zeit und keine Startfreigabe.</p>
   <p>Rote Lampen können lokal geschätzt werden. GO gilt erst mit start_committed.</p>
@@ -1004,7 +1024,16 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
   var planPhases = [];
   var lastLocal = false;
   var goDelay = null;
+  var serverLit = 0;
+  var lampPeak = 0;
+  var lampLit = -1;
+  var lampTimer = 0;
+  var lampFrame = 0;
+  var sawConnection = false;
+  var commitStamp = null;
   __SYNC_SOURCE__
+  __METRICS_SOURCE__
+  measureEnabled = true;
   function text(node, value) { node.textContent = value; }
   function showViewport() {
     var width = window.innerWidth;
@@ -1019,11 +1048,6 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     text(connection, socket ? "wiederverbindung" : "verbinde");
     var opened = new WebSocket("ws://" + location.host + "/live" + location.search);
     socket = opened;
-    opened.onopen = function () {
-      if (socket !== opened) return;
-      text(connection, "verbunden");
-      showViewport();
-    };
     opened.onmessage = function (event) {
       if (socket !== opened) return;
       messages += 1;
@@ -1048,9 +1072,17 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     opened.onclose = function () {
       if (socket !== opened) return;
       text(connection, "getrennt");
+      noteDisconnect();
       dropSync();
       paintSync();
       schedule();
+    };
+    opened.onopen = function () {
+      if (socket !== opened) return;
+      text(connection, "verbunden");
+      showViewport();
+      if (sawConnection) noteResync();
+      sawConnection = true;
     };
   }
   function onHello(msg, payload) {
@@ -1087,6 +1119,10 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
         counting = false;
         planGo = null;
         planPhases = [];
+        serverLit = 0;
+        lampPeak = 0;
+        lampLit = -1;
+        clearLampTimer();
       }
       paintSync();
       return;
@@ -1096,6 +1132,10 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     committed = false;
     counting = true;
     goDelay = null;
+    commitStamp = null;
+    serverLit = 0;
+    lampPeak = 0;
+    lampLit = -1;
     planGo = hostNs(payload.planned_go_ns);
     planPhases = [];
     var rows = payload.phases || [];
@@ -1110,23 +1150,161 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     }
     if (planGo === null) counting = false;
     paintSync();
+    noteDiagnosticLamp();
+    armLamps();
     burst(4, 40);
   }
   function onPhase(payload) {
     if (payload.sequence_id !== sequenceId || payload.authorizes_go !== false) return;
+    if (typeof payload.lit_lights === "number" && payload.lit_lights >= 1) {
+      serverLit = payload.lit_lights;
+    }
     text(plan, "Rote Lampen " + payload.lit_lights + " (keine Startfreigabe)");
+    noteDiagnosticLamp();
+    attachObserved(sequenceId, serverLit, payload.observed_ns, payload.at_ns);
     paintSync();
   }
   function onCommit(payload) {
     if (payload.sequence_id !== sequenceId || payload.authorizes_go !== true) return;
+    if (payload.race_status !== "running") return;
     committed = true;
     counting = false;
+    clearLampTimer();
     var actual = hostNs(payload.actual_start_ns);
+    var published = hostNs(payload.published_ns);
     var now = clientNowNs();
-    if (actual === null || now === null || syncOffset === null) goDelay = null;
-    else goDelay = (now + syncOffset) - actual;
+    var estimated = now === null || syncOffset === null ? null : now + syncOffset;
+    if (actual === null || estimated === null) goDelay = null;
+    else goDelay = estimated - actual;
+    commitStamp = {
+      sequence: sequenceId,
+      actual: actual === null ? "" : actual.toString(),
+      published: published === null ? "" : published.toString(),
+      receiveBrowser: now === null ? "" : now.toString(),
+      receiveEstimated: estimated === null ? "" : estimated.toString()
+    };
+    var uncertainty = currentUncertainty();
+    noteCommitArrival({
+      sequence: sequenceId,
+      actual: commitStamp.actual,
+      published: commitStamp.published,
+      receiveBrowser: commitStamp.receiveBrowser,
+      receiveEstimated: commitStamp.receiveEstimated,
+      quality: syncQuality,
+      uncertainty: uncertainty
+    });
     text(plan, "Start freigegeben, Sequenz " + payload.sequence_id);
+    var paint = clientNowNs();
+    var paintEstimated = paint === null || syncOffset === null ? null : paint + syncOffset;
+    noteGoPaint({
+      sequence: sequenceId,
+      actual: commitStamp.actual,
+      receiveBrowser: commitStamp.receiveBrowser,
+      paintBrowser: paint === null ? "" : paint.toString(),
+      paintEstimated: paintEstimated === null ? "" : paintEstimated.toString(),
+      quality: syncQuality,
+      uncertainty: uncertainty
+    });
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(function () {
+        var frame = clientNowNs();
+        recordMeasure({
+          sequence_id: sequenceId,
+          event: "frame",
+          phase: "go",
+          time_basis: "browser",
+          browser_ns: frame === null ? "" : frame.toString(),
+          note: "Nächster Frame-Callback, nicht der sichtbare Pixel"
+        });
+      });
+    }
     paintSync();
+  }
+  function clearLampTimer() {
+    if (lampTimer) {
+      clearTimeout(lampTimer);
+      lampTimer = 0;
+    }
+    if (lampFrame && window.cancelAnimationFrame) {
+      window.cancelAnimationFrame(lampFrame);
+      lampFrame = 0;
+    }
+  }
+  function currentUncertainty() {
+    var now = clientNowNs();
+    if (now === null) return "";
+    var estimate = assessSync(syncSamples, now, syncQuality, syncOffset);
+    if (estimate.uncertainty === null || estimate.uncertainty === undefined) return "";
+    return estimate.uncertainty.toString();
+  }
+  function noteDiagnosticLamp() {
+    if (!counting || committed || !sequenceId) return;
+    var browser = clientNowNs();
+    var estimated = browser === null || syncOffset === null ? null : browser + syncOffset;
+    var predicted = null;
+    var local = lastLocal && !document.hidden && estimated !== null && planGo !== null;
+    if (local) {
+      var found = predictRed(planPhases, planGo, estimated, true);
+      if (found) predicted = found.lit_lights;
+    }
+    var lit = shownLamps(true, false, serverLit, predicted, lampPeak, local);
+    if (local && lit > lampPeak) lampPeak = lit;
+    if (lit === lampLit) return;
+    var skipped = lampLit >= 0 && lit > lampLit + 1 ? lit - lampLit - 1 : 0;
+    lampLit = lit;
+    recordMeasure({
+      sequence_id: sequenceId,
+      event: "lamp",
+      phase: String(lit),
+      time_basis: "estimated_pc",
+      browser_ns: browser === null ? "" : browser.toString(),
+      estimated_pc_ns: estimated === null ? "" : estimated.toString(),
+      quality: syncQuality,
+      uncertainty_ns: currentUncertainty(),
+      note: skipped
+        ? "JavaScript-Zustandswechsel, übersprungene Phasen " + String(skipped)
+        : "JavaScript-Zustandswechsel, nicht der sichtbare Pixel"
+    });
+    if (window.requestAnimationFrame) {
+      var shown = lit;
+      window.requestAnimationFrame(function () {
+        var frame = clientNowNs();
+        recordMeasure({
+          sequence_id: sequenceId,
+          event: "frame",
+          phase: String(shown),
+          time_basis: "browser",
+          browser_ns: frame === null ? "" : frame.toString(),
+          note: "Nächster Frame-Callback, nicht der sichtbare Pixel"
+        });
+      });
+    }
+  }
+  function armLamps() {
+    clearLampTimer();
+    if (!lastLocal || document.hidden || !counting || committed) return;
+    if (planGo === null || syncOffset === null) return;
+    var now = clientNowNs();
+    if (now === null) return;
+    var wake = nextLampNs(planPhases, planGo, now + syncOffset, true);
+    if (wake === null) return;
+    var delay = wake - (now + syncOffset);
+    if (delay < 0n) delay = 0n;
+    if (delay > 60000000000n) delay = 60000000000n;
+    var ms = Number(delay / 1000000n);
+    if (ms < 16 && window.requestAnimationFrame) {
+      lampFrame = window.requestAnimationFrame(function () {
+        lampFrame = 0;
+        noteDiagnosticLamp();
+        armLamps();
+      });
+      return;
+    }
+    lampTimer = setTimeout(function () {
+      lampTimer = 0;
+      noteDiagnosticLamp();
+      armLamps();
+    }, ms);
   }
   function sendProbe() {
     if (!socket || socket.readyState !== 1) return;
@@ -1167,6 +1345,8 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     syncOffset = null;
     syncQuality = "poor";
     lastLocal = false;
+    noteMode(false);
+    clearLampTimer();
     if (syncTimer) {
       clearTimeout(syncTimer);
       syncTimer = 0;
@@ -1182,11 +1362,18 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     var t1 = hostNs(sent);
     var t2 = hostNs(payload.t2_ns);
     var t3 = hostNs(payload.t3_ns);
-    if (t4 === null || t1 === null || t2 === null || t3 === null) return;
+    if (t4 === null || t1 === null || t2 === null || t3 === null) {
+      noteDiscarded();
+      return;
+    }
     var sample = ntpSample(t1 * 1000n, t2, t3, t4);
-    if (!sample) return;
+    if (!sample) {
+      noteDiscarded();
+      return;
+    }
     var pruned = pruneSamples(syncSamples, t4);
     if (pruned.jumped) {
+      noteDiscarded();
       dropSync();
       burst(8, 40);
       scheduleSync();
@@ -1205,6 +1392,9 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     syncQuality = estimate.quality;
     syncOffset = estimate.offset;
     lastLocal = estimate.local && !document.hidden;
+    noteMode(lastLocal);
+    noteDiagnosticLamp();
+    armLamps();
     paintSync(estimate);
   }
   function paintSync(estimate) {
@@ -1231,8 +1421,20 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     var predictable = counting && !committed && planGo !== null && !document.hidden;
     var mode = lastLocal && predictable ? "lokal synchronisiert" : "servergesteuert";
     text(document.getElementById("lamp-mode"), mode);
+    var summary = measureSummary();
+    text(document.getElementById("lamp-phase"), summary.phase || "—");
+    text(document.getElementById("lamp-deviation"), delayText(summary.lastDeviation));
+    text(document.getElementById("lamp-average"), delayText(summary.averageDeviation));
     var delayNode = document.getElementById("go-delay");
-    text(delayNode, goDelay === null ? "nicht messbar" : goDelay.toString() + " ns");
+    var goShown = summary.lastGo || (goDelay === null ? "" : goDelay.toString());
+    text(delayNode, goShown ? delayText(goShown) : "nicht messbar");
+    text(document.getElementById("engine-publish"), delayText(summary.engineToPublish));
+    text(document.getElementById("publish-receive"), delayText(summary.publishToReceive));
+    text(document.getElementById("receive-paint"), delayText(summary.receiveToPaint));
+    text(document.getElementById("sequences"), String(summary.sequences));
+    text(document.getElementById("disconnects"), String(summary.disconnects));
+    text(document.getElementById("fallbacks"), String(summary.fallbacks));
+    text(document.getElementById("discarded"), String(summary.discarded));
   }
   function nsText(value) {
     if (value === null || value === undefined) return "—";
@@ -1281,6 +1483,12 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
       burst(8, 40);
       scheduleSync();
     }
+  });
+  document.getElementById("export-json").addEventListener("click", function () {
+    downloadMeasure("json");
+  });
+  document.getElementById("export-csv").addEventListener("click", function () {
+    downloadMeasure("csv");
   });
   showViewport();
   connect();
