@@ -43,6 +43,18 @@ class HistoryParticipant:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryHeat:
+    """One heat that was driven. ``seats`` is ``(participant_id, lane)`` as stored.
+
+    Planned heats that never started are not included. The sequence is the stored
+    heat number and is not derived from lap numbers.
+    """
+
+    sequence: int
+    seats: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryRace:
     """One stored race that has ended, with the laps that were actually written."""
 
@@ -56,6 +68,7 @@ class HistoryRace:
     finished_at: datetime | None
     participants: tuple[HistoryParticipant, ...]
     laps: tuple[HistoryLap, ...]
+    heats: tuple[HistoryHeat, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

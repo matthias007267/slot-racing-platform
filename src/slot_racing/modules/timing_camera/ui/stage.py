@@ -44,6 +44,9 @@ class CameraStage(QLabel):
         self.setObjectName("camera-stage")
         self.setMargin(0)
         self.setMinimumSize(320, 240)
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(False)
+        self.setSizePolicy(policy)
         self.setMouseTracking(True)
         self._frame_size = (640, 480)
         self._image: QImage | None = None
@@ -69,6 +72,14 @@ class CameraStage(QLabel):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(320, 240)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        """The frame is letterboxed. Its pixels must not ask the layout for a new height."""
+        return False
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        del width
+        return self.sizeHint().height()
 
     def set_frame(self, frame: GrayFrame) -> None:
         self._frame_size = (frame.width, frame.height)

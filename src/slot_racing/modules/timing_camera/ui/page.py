@@ -171,6 +171,100 @@ class _ZoneHint(QScrollArea):
             self._fitting = False
 
 
+class _Caption(QLabel):
+    """A setting caption whose text cannot resize the column or the preview."""
+
+    def __init__(self, object_name: str, lines: int = 2) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setMinimumWidth(0)
+        self._height = self.fontMetrics().lineSpacing() * lines + 4
+        self.setFixedHeight(self._height)
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        policy.setHeightForWidth(False)
+        self.setSizePolicy(policy)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return False
+
+
+class _SlotStatus(StatusLabel):
+    """Status text that refits inside a slot without changing that slot's size."""
+
+    def __init__(self, object_name: str, on_text: Callable[[], None]) -> None:
+        super().__init__(object_name)
+        self._on_text = on_text
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        self._on_text()
+
+
+class _MessageSlot(QScrollArea):
+    """Two status lines. Longer text scrolls, so the bar height stays put."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("camera-message-slot")
+        self._label = _SlotStatus("camera-message", self._fit)
+        self.setWidget(self._label)
+        self.setWidgetResizable(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._height = self.fontMetrics().lineSpacing() * 2 + 8
+        self.setFixedHeight(self._height)
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        policy.setHeightForWidth(False)
+        self.setSizePolicy(policy)
+        self._fitting = False
+
+    @property
+    def label(self) -> StatusLabel:
+        return self._label
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self._height)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return False
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        if self._fitting:
+            return
+        width = self.viewport().width()
+        if width < 2:
+            return
+        self._fitting = True
+        try:
+            wrapped = _wrapped_height(self._label, width)
+            height = max(self.viewport().height(), wrapped)
+            if self._label.width() != width:
+                self._label.setFixedWidth(width)
+            if self._label.height() != height:
+                self._label.setFixedHeight(height)
+        finally:
+            self._fitting = False
+
+
 @dataclass
 class ZoneDraft:
     """One zone while it is being edited. Geometry stays normalized."""
@@ -221,7 +315,9 @@ class CameraSetupPage(QWidget):
         self.destroyed.connect(self._stop_preview)
 
         self.stage = CameraStage()
-        self.stage.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        stage_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        stage_policy.setHeightForWidth(False)
+        self.stage.setSizePolicy(stage_policy)
         self.device = QComboBox()
         self.device.setObjectName("camera-device")
         self.resolution = QComboBox()
@@ -247,8 +343,7 @@ class CameraSetupPage(QWidget):
         self.detection_resolution.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.resolution_coarse = QLabel(self._tr("camera.resolution.coarse"))
         self.resolution_fine = QLabel(self._tr("camera.resolution.very_fine"))
-        self.resolution_value = QLabel()
-        self.resolution_value.setObjectName("camera-detection-resolution-value")
+        self.resolution_value = _Caption("camera-detection-resolution-value")
         self.zone_hint = _ZoneHint()
         self.zones = QListWidget()
         self.zones.setObjectName("camera-zones")
@@ -277,7 +372,8 @@ class CameraSetupPage(QWidget):
         set_role(self.save, "primary")
         self.status = QLabel()
         self.status.setObjectName("camera-status")
-        self.message = StatusLabel("camera-message")
+        self._message_slot = _MessageSlot()
+        self.message = self._message_slot.label
 
         camera_form = QFormLayout()
         camera_form.addRow(self._tr("camera.field.device"), self.device)
@@ -300,7 +396,9 @@ class CameraSetupPage(QWidget):
         zone_form.addRow(self._tr("camera.field.position"), self.position)
 
         side = QWidget()
-        side.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Expanding)
+        side.setObjectName("camera-settings")
+        side.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._side = side
         side_layout = QVBoxLayout(side)
         side_layout.addWidget(_section(self._tr("camera.section.camera")))
         side_layout.addLayout(camera_form)
@@ -319,7 +417,7 @@ class CameraSetupPage(QWidget):
         body.addWidget(side)
         bar = QHBoxLayout()
         bar.addWidget(self.status)
-        bar.addWidget(self.message, 1)
+        bar.addWidget(self._message_slot, 1)
         bar.addWidget(self.cancel)
         bar.addWidget(self.save)
         root = QVBoxLayout(self)
@@ -349,6 +447,17 @@ class CameraSetupPage(QWidget):
         self.stage.zone_drawn.connect(self._on_zone_drawn)
         self.stage.draw_rejected.connect(self._on_draw_rejected)
         self._apply(self._read_store(), restart=False)
+        self._freeze_side_column()
+
+    def _freeze_side_column(self) -> None:
+        """Lock the settings column to the width of its controls.
+
+        The column used to follow its widest child. The resolution caption is
+        wider for some tile sizes than for others, and that extra width was
+        taken from the preview. Captions now report no width of their own, and
+        the column keeps the width the controls needed when the page was built.
+        """
+        self._side.setFixedWidth(self._side.sizeHint().width())
 
     def showEvent(self, event: object) -> None:  # noqa: N802
         super().showEvent(event)  # type: ignore[arg-type]
