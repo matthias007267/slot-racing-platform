@@ -10,13 +10,14 @@ JSON envelope
 -------------
 Every message is one JSON object:
 
-``{"protocol_version": 2, "type": "<type>", "seq": <int>, "payload": { ... }}``
+``{"protocol_version": 3, "type": "<type>", "seq": <int>, "payload": { ... }}``
 
-``protocol_version`` is the broadcast protocol, currently ``2``.
+``protocol_version`` is the broadcast protocol, currently ``3``.
 ``seq`` identifies the state. Scene, schedule, start-phase and start-commit
 messages each have their own sequence. ``hello`` uses the mailbox generation.
-An ``error`` reply uses ``seq`` 0 because it is not a race state.
-A client that does not speak version 2 must not treat any message as GO.
+An ``error`` reply and a ``time_sample`` use ``seq`` 0 because they are not a
+race state. A client that does not speak version 3 must not treat any message
+as GO.
 
 Message types that are sent:
 
@@ -27,8 +28,9 @@ Message types that are sent:
   older ones. A slow client may skip intermediates and then receives the latest
   complete scene.
 - ``start_schedule`` — the schedule document from ``StartSchedule.to_document``.
-  Timestamps are host monotonic nanoseconds (``time_base`` ``host_monotonic_ns``).
-  They are not a browser clock and not permission to start.
+  Timestamps are host monotonic nanoseconds (``time_base`` ``host_monotonic_ns``)
+  written as decimal strings so a browser does not round them. They are not a
+  browser clock and not permission to start.
 - ``start_schedule_revoked`` — the same document after ``revoke``. A scene update
   cannot replace it. A newer schedule can. A revoke for an older sequence does
   not replace the sequence now held.
@@ -41,9 +43,20 @@ Message types that are sent:
   authorization. It is not sent for a planned time, a timer callback, or a
   failed start. A scene cannot replace it. After it is sent the held red
   phase is dropped, so a new connection does not replay the countdown.
-- ``error`` — the client sent something. The display is read-only, so the code
+- ``error`` — the client sent something this display does not accept. The code
   is ``invalid_message`` or ``read_only``. No race action follows.
   ``start_phase`` and ``start_committed`` from a client are ``read_only``.
+- ``time_probe`` — a browser asks for one clock sample. It carries a probe id,
+  ``protocol_version``, and ``t1_us`` (browser ``performance.now()`` in
+  microseconds, as a decimal string). The server thread stamps ``t2`` when the
+  frame is in hand and ``t3`` immediately before the reply. The reply is a
+  ``time_sample`` and does not pass through the mailbox or the GUI thread.
+  A client may send about ten probes a second. Further probes are ignored.
+  A malformed probe is ignored and does not close the socket.
+- ``time_sample`` — ``probe_id``, echoed ``t1_us``, and ``t2_ns`` / ``t3_ns``
+  as decimal host nanoseconds. The browser stamps ``t4`` on receipt. The
+  resulting offset is an estimate. It may light red phases early. It must not
+  light GO.
 
 ``snapshot``, ``race_update`` and ``connection_status`` are not sent. The scene
 already contains the snapshot, a partial update could contradict the last scene,
@@ -66,7 +79,11 @@ with ``{"type": "viewport", "width": <int>, "height": <int>}``. That request is
 display only. The service clamps it, composes a scene for that socket, and
 leaves the PC layout and every other client unchanged. A client that has not
 asked yet receives the reference scene. ``planned_go_ns`` stays a host
-monotonic timestamp and is not a start authorization.
+monotonic timestamp, on the wire as a decimal string, and is not a start
+authorization. A browser with a fresh offset may show the red phases of the
+current schedule from that estimate. Poor, stale, or missing samples fall
+back to ``start_phase``. Disconnect stops that estimate. GO is still only
+``start_committed``. The offset is not a real-time guarantee.
 
 HTTP and WebSocket on the local network are not encrypted. The session token
 only keeps a casual visitor off the page. Anyone who can already see the
@@ -81,6 +98,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -104,6 +122,7 @@ from slot_racing.modules.races.start_display import (
     parse_phase_document,
 )
 from slot_racing.modules.races.start_schedule import TIME_BASE, TIMESTAMP_MEANING
+from slot_racing.modules.races.time_sync import encode_timestamps, sync_source
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +146,8 @@ TYPE_START_PHASE = "start_phase"
 TYPE_START_COMMITTED = "start_committed"
 TYPE_ERROR = "error"
 TYPE_VIEWPORT = "viewport"
+TYPE_TIME_PROBE = "time_probe"
+TYPE_TIME_SAMPLE = "time_sample"
 VIEWPORT_MIN = 1
 VIEWPORT_MAX = 8192
 
@@ -179,11 +200,20 @@ class BroadcastFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class TimeProbe:
+    """One clock request. ``t1_us`` is the browser send time in microseconds."""
+
+    probe_id: str
+    t1_us: str
+
+
+@dataclass(frozen=True, slots=True)
 class ClientVerdict:
-    """Why a client message was ignored, or the viewport it may display."""
+    """Why a client message was ignored, or the display request it contained."""
 
     code: str
     viewport: HudViewport | None = None
+    probe: TimeProbe | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,8 +478,10 @@ def hello_message(frame: BroadcastFrame) -> dict[str, object]:
             "viewport_note": "client_viewport_selects_a_scene",
             "viewport_limits": {"min": VIEWPORT_MIN, "max": VIEWPORT_MAX},
             "planned_go_note": "host_monotonic_not_a_start_authorization",
+            "timestamp_encoding": "decimal_nanoseconds",
+            "sync_note": "estimate_only_not_a_start_authorization",
             "start_authorization": TYPE_START_COMMITTED,
-            "start_lights": "server_confirmed_red_phases",
+            "start_lights": "red_phases_local_when_synced",
             "capabilities": [
                 TYPE_HELLO,
                 TYPE_SCENE,
@@ -457,6 +489,8 @@ def hello_message(frame: BroadcastFrame) -> dict[str, object]:
                 TYPE_START_SCHEDULE_REVOKED,
                 TYPE_START_PHASE,
                 TYPE_START_COMMITTED,
+                TYPE_TIME_PROBE,
+                TYPE_TIME_SAMPLE,
             ],
             "transport": "unencrypted_local_network",
             "race_active": status in _ACTIVE_RACE,
@@ -514,20 +548,34 @@ def _clamp_viewport(value: int) -> int:
 def phase_message(frame: BroadcastFrame) -> dict[str, object] | None:
     if frame.phase is None:
         return None
-    return message(TYPE_START_PHASE, frame.phase_seq, frame.phase)
+    return message(TYPE_START_PHASE, frame.phase_seq, encode_timestamps(frame.phase))
 
 
 def commit_message(frame: BroadcastFrame) -> dict[str, object] | None:
     if frame.commit is None:
         return None
-    return message(TYPE_START_COMMITTED, frame.commit_seq, frame.commit)
+    return message(TYPE_START_COMMITTED, frame.commit_seq, encode_timestamps(frame.commit))
 
 
 def schedule_message(frame: BroadcastFrame) -> dict[str, object] | None:
     if frame.schedule is None:
         return None
     kind = TYPE_START_SCHEDULE_REVOKED if frame.schedule_revoked else TYPE_START_SCHEDULE
-    return message(kind, frame.schedule_seq, frame.schedule)
+    return message(kind, frame.schedule_seq, encode_timestamps(frame.schedule))
+
+
+def time_sample_message(probe: TimeProbe, t2_ns: int, t3_ns: int) -> dict[str, object]:
+    """The server-thread reply. ``t3_ns`` is stamped immediately before it is queued."""
+    return message(
+        TYPE_TIME_SAMPLE,
+        0,
+        {
+            "probe_id": probe.probe_id,
+            "t1_us": probe.t1_us,
+            "t2_ns": str(t2_ns),
+            "t3_ns": str(t3_ns),
+        },
+    )
 
 
 def error_message(code: str) -> dict[str, object]:
@@ -535,7 +583,7 @@ def error_message(code: str) -> dict[str, object]:
 
 
 def classify_client_message(raw: str) -> ClientVerdict:
-    """A viewport is a display request. Every other client message is ignored."""
+    """A viewport or a clock probe is display traffic. Anything else is refused."""
     parsed = json_object(raw)
     kind = None if parsed is None else parsed.get("type")
     if not isinstance(kind, str) or not kind:
@@ -547,7 +595,31 @@ def classify_client_message(raw: str) -> ClientVerdict:
         if viewport is None:
             return ClientVerdict("invalid_message")
         return ClientVerdict("viewport", viewport)
+    if kind == TYPE_TIME_PROBE:
+        if parsed is None:
+            return ClientVerdict("ignore")
+        probe = parse_time_probe(parsed)
+        if probe is None:
+            return ClientVerdict("ignore")
+        return ClientVerdict("time_probe", probe=probe)
     return ClientVerdict("read_only")
+
+
+_PROBE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_PROBE_US = re.compile(r"[0-9]{1,18}")
+
+
+def parse_time_probe(document: Mapping[str, object]) -> TimeProbe | None:
+    """A clock request. A bad one is ignored so a single typo does not drop the HUD."""
+    if document.get("protocol_version") != BROADCAST_PROTOCOL_VERSION:
+        return None
+    probe_id = document.get("probe_id")
+    t1_us = document.get("t1_us")
+    if not isinstance(probe_id, str) or _PROBE_ID.fullmatch(probe_id) is None:
+        return None
+    if not isinstance(t1_us, str) or _PROBE_US.fullmatch(t1_us) is None:
+        return None
+    return TimeProbe(probe_id, t1_us)
 
 
 def plan_outbound(
@@ -813,8 +885,8 @@ def take_frames(
 
 
 def diagnostic_page() -> bytes:
-    """Static diagnostic page. It has no asset URL and does not run the start lights."""
-    return _DIAGNOSTIC_HTML.encode("utf-8")
+    """Static diagnostic page. It estimates the clock and does not start a race."""
+    return _DIAGNOSTIC_HTML.replace("__SYNC_SOURCE__", sync_source()).encode("utf-8")
 
 
 def _frame(opcode: int, payload: bytes) -> bytes:
@@ -885,10 +957,23 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     <dt>Protokollfehler</dt><dd id="errors">0</dd>
     <dt>Viewport</dt><dd id="viewport">—</dd>
     <dt>Startzeitplan</dt><dd id="plan">keiner</dd>
+    <dt>Synchronisation</dt><dd id="sync">warte auf Proben</dd>
+    <dt>Qualität</dt><dd id="quality">unbekannt</dd>
+    <dt>RTT (Schätzung)</dt><dd id="rtt">—</dd>
+    <dt>Beste RTT (Schätzung)</dt><dd id="best-rtt">—</dd>
+    <dt>Offset (Schätzung)</dt><dd id="offset">—</dd>
+    <dt>Unsicherheit (Schätzung)</dt><dd id="uncertainty">—</dd>
+    <dt>Alter der letzten Probe</dt><dd id="age">—</dd>
+    <dt>Proben</dt><dd id="samples">0</dd>
+    <dt>Sequenz</dt><dd id="sequence">—</dd>
+    <dt>Lampenmodus</dt><dd id="lamp-mode">servergesteuert</dd>
+    <dt>GO-Verzögerung (Schätzung)</dt><dd id="go-delay">nicht messbar</dd>
   </dl>
   <p>Die Verbindung im lokalen Netzwerk ist nicht verschlüsselt.</p>
   <p>Der geplante GO-Zeitpunkt ist eine Host-Zeit und keine Startfreigabe.</p>
-  <p>Rote Lampen bestätigen nur den Renn-PC. GO gilt erst mit start_committed.</p>
+  <p>Rote Lampen können lokal geschätzt werden. GO gilt erst mit start_committed.</p>
+  <p>RTT, Offset und Unsicherheit sind Schätzungen und keine Echtzeitgarantie.</p>
+  <p>Die Unsicherheit begrenzt asymmetrische Laufzeiten nicht hart.</p>
 </main>
 <script>
 (function () {
@@ -906,6 +991,20 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
   var retryTimer = 0;
   var retryDelay = 1000;
   var stopped = false;
+  var syncSamples = [];
+  var pendingProbes = {};
+  var probeSerial = 0;
+  var syncOffset = null;
+  var syncQuality = "poor";
+  var syncTimer = 0;
+  var sequenceId = "";
+  var counting = false;
+  var committed = false;
+  var planGo = null;
+  var planPhases = [];
+  var lastLocal = false;
+  var goDelay = null;
+  __SYNC_SOURCE__
   function text(node, value) { node.textContent = value; }
   function showViewport() {
     var width = window.innerWidth;
@@ -925,14 +1024,6 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
       text(connection, "verbunden");
       showViewport();
     };
-    opened.onerror = function () {
-      if (socket === opened) text(connection, "fehler");
-    };
-    opened.onclose = function () {
-      if (socket !== opened) return;
-      text(connection, "getrennt");
-      schedule();
-    };
     opened.onmessage = function (event) {
       if (socket !== opened) return;
       messages += 1;
@@ -943,33 +1034,213 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
       if (!msg || typeof msg.type !== "string") { noteError(); return; }
       var payload = msg.payload || {};
       if (msg.type === "error") noteError();
-      if (msg.type === "hello") {
-        text(document.getElementById("app"), payload.application || "Slot-Racing Platform");
-        text(race, payload.race_active ? "ja" : "nein");
-        text(hud, payload.receiving_hud ? "ja" : "nein");
-      } else if (msg.type === "scene") {
-        if (payload.present === false) {
-          text(hud, "nein");
-          text(race, "nein");
-        } else {
-          text(hud, "ja");
-          var active = payload.status === "running" || payload.status === "paused";
-          text(race, active ? "ja" : "nein");
-          var box = payload.viewport || {};
-          if (box.width && box.height) {
-            text(viewport, String(box.width) + " x " + String(box.height));
-          }
-        }
-      } else if (msg.type === "start_schedule" || msg.type === "start_schedule_revoked") {
-        text(plan, "Sequenz " + payload.sequence_id + ", Status " + payload.status
-          + ", geplantes GO " + payload.planned_go_ns
-          + " (Host-Zeit, keine Startfreigabe)");
-      } else if (msg.type === "start_phase") {
-        text(plan, "Rote Lampen " + payload.lit_lights + " (keine Startfreigabe)");
-      } else if (msg.type === "start_committed") {
-        text(plan, "Start freigegeben, Sequenz " + payload.sequence_id);
-      }
+      if (msg.type === "hello") onHello(msg, payload);
+      else if (msg.type === "scene") onScene(payload);
+      else if (msg.type === "start_schedule" || msg.type === "start_schedule_revoked") {
+        onPlan(msg.type, payload);
+      } else if (msg.type === "start_phase") onPhase(payload);
+      else if (msg.type === "start_committed") onCommit(payload);
+      else if (msg.type === "time_sample") onSample(payload);
     };
+    opened.onerror = function () {
+      if (socket === opened) text(connection, "fehler");
+    };
+    opened.onclose = function () {
+      if (socket !== opened) return;
+      text(connection, "getrennt");
+      dropSync();
+      paintSync();
+      schedule();
+    };
+  }
+  function onHello(msg, payload) {
+    text(document.getElementById("app"), payload.application || "Slot-Racing Platform");
+    text(race, payload.race_active ? "ja" : "nein");
+    text(hud, payload.receiving_hud ? "ja" : "nein");
+    if (msg.protocol_version === 3 && payload.start_authorization === "start_committed") {
+      dropSync();
+      burst(8, 40);
+      scheduleSync();
+    }
+  }
+  function onScene(payload) {
+    if (payload.present === false) {
+      text(hud, "nein");
+      text(race, "nein");
+      return;
+    }
+    text(hud, "ja");
+    var active = payload.status === "running" || payload.status === "paused";
+    text(race, active ? "ja" : "nein");
+    var box = payload.viewport || {};
+    if (box.width && box.height) {
+      text(viewport, String(box.width) + " x " + String(box.height));
+    }
+  }
+  function onPlan(kind, payload) {
+    var revoked = kind === "start_schedule_revoked" || payload.status === "revoked";
+    text(plan, "Sequenz " + payload.sequence_id + ", Status " + payload.status
+      + ", geplantes GO " + payload.planned_go_ns
+      + " (Host-Zeit, keine Startfreigabe)");
+    if (revoked) {
+      if (!sequenceId || sequenceId === payload.sequence_id) {
+        counting = false;
+        planGo = null;
+        planPhases = [];
+      }
+      paintSync();
+      return;
+    }
+    sequenceId = typeof payload.sequence_id === "string" ? payload.sequence_id : "";
+    text(document.getElementById("sequence"), sequenceId || "—");
+    committed = false;
+    counting = true;
+    goDelay = null;
+    planGo = hostNs(payload.planned_go_ns);
+    planPhases = [];
+    var rows = payload.phases || [];
+    var index;
+    for (index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      if (!row || row.phase !== "counting") continue;
+      var at = hostNs(row.at_ns);
+      var lit = row.lit_lights;
+      if (at === null || typeof lit !== "number" || lit < 1) continue;
+      planPhases.push({at: at, lit: lit, step: index});
+    }
+    if (planGo === null) counting = false;
+    paintSync();
+    burst(4, 40);
+  }
+  function onPhase(payload) {
+    if (payload.sequence_id !== sequenceId || payload.authorizes_go !== false) return;
+    text(plan, "Rote Lampen " + payload.lit_lights + " (keine Startfreigabe)");
+    paintSync();
+  }
+  function onCommit(payload) {
+    if (payload.sequence_id !== sequenceId || payload.authorizes_go !== true) return;
+    committed = true;
+    counting = false;
+    var actual = hostNs(payload.actual_start_ns);
+    var now = clientNowNs();
+    if (actual === null || now === null || syncOffset === null) goDelay = null;
+    else goDelay = (now + syncOffset) - actual;
+    text(plan, "Start freigegeben, Sequenz " + payload.sequence_id);
+    paintSync();
+  }
+  function sendProbe() {
+    if (!socket || socket.readyState !== 1) return;
+    var now = clientNowNs();
+    if (now === null) return;
+    probeSerial += 1;
+    var id = "d" + String(probeSerial);
+    var t1 = (now / 1000n).toString();
+    pendingProbes[id] = t1;
+    socket.send(JSON.stringify({
+      type: "time_probe", protocol_version: 3, probe_id: id, t1_us: t1
+    }));
+    setTimeout(function () { delete pendingProbes[id]; }, 2000);
+  }
+  function burst(count, gap) {
+    var left = count;
+    function step() {
+      if (left <= 0 || !socket || socket.readyState !== 1) return;
+      left -= 1;
+      sendProbe();
+      if (left > 0) setTimeout(step, gap);
+    }
+    step();
+  }
+  function scheduleSync() {
+    if (syncTimer) clearTimeout(syncTimer);
+    var jitter = Math.floor(Math.random() * 5000);
+    syncTimer = setTimeout(function () {
+      syncTimer = 0;
+      if (!socket || socket.readyState !== 1) return;
+      burst(syncQuality === "poor" ? 8 : 2, 40);
+      scheduleSync();
+    }, 30000 + jitter);
+  }
+  function dropSync() {
+    syncSamples = [];
+    pendingProbes = {};
+    syncOffset = null;
+    syncQuality = "poor";
+    lastLocal = false;
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = 0;
+    }
+  }
+  function onSample(payload) {
+    var id = payload.probe_id;
+    if (typeof id !== "string" || pendingProbes[id] === undefined) return;
+    var sent = pendingProbes[id];
+    delete pendingProbes[id];
+    if (payload.t1_us !== sent) return;
+    var t4 = clientNowNs();
+    var t1 = hostNs(sent);
+    var t2 = hostNs(payload.t2_ns);
+    var t3 = hostNs(payload.t3_ns);
+    if (t4 === null || t1 === null || t2 === null || t3 === null) return;
+    var sample = ntpSample(t1 * 1000n, t2, t3, t4);
+    if (!sample) return;
+    var pruned = pruneSamples(syncSamples, t4);
+    if (pruned.jumped) {
+      dropSync();
+      burst(8, 40);
+      scheduleSync();
+      paintSync();
+      return;
+    }
+    syncSamples = pruned.samples;
+    syncSamples.push({id: id, t4: t4, rtt: sample.rtt, offset: sample.offset});
+    if (syncSamples.length > 16) syncSamples = syncSamples.slice(-16);
+    applyEstimate();
+  }
+  function applyEstimate() {
+    var now = clientNowNs();
+    if (now === null) return;
+    var estimate = assessSync(syncSamples, now, syncQuality, syncOffset);
+    syncQuality = estimate.quality;
+    syncOffset = estimate.offset;
+    lastLocal = estimate.local && !document.hidden;
+    paintSync(estimate);
+  }
+  function paintSync(estimate) {
+    var now = clientNowNs();
+    var current = estimate;
+    if (!current && now !== null) {
+      current = assessSync(syncSamples, now, syncQuality, syncOffset);
+    }
+    if (!current) return;
+    var syncNode = document.getElementById("sync");
+    var qualityNode = document.getElementById("quality");
+    text(syncNode, current.count ? (current.local ? "gültig" : "ungenügend") : "warte auf Proben");
+    var label = "schlecht";
+    if (current.quality === "good") label = "gut";
+    if (current.quality === "usable") label = "brauchbar";
+    text(qualityNode, label);
+    text(document.getElementById("rtt"), nsText(current.rtt));
+    text(document.getElementById("best-rtt"), nsText(current.bestRtt));
+    text(document.getElementById("offset"), nsText(current.offset));
+    text(document.getElementById("uncertainty"), nsText(current.uncertainty));
+    text(document.getElementById("age"), ageText(current.age));
+    text(document.getElementById("samples"), String(current.count));
+    text(document.getElementById("sequence"), sequenceId || "—");
+    var predictable = counting && !committed && planGo !== null && !document.hidden;
+    var mode = lastLocal && predictable ? "lokal synchronisiert" : "servergesteuert";
+    text(document.getElementById("lamp-mode"), mode);
+    var delayNode = document.getElementById("go-delay");
+    text(delayNode, goDelay === null ? "nicht messbar" : goDelay.toString() + " ns");
+  }
+  function nsText(value) {
+    if (value === null || value === undefined) return "—";
+    return value.toString() + " ns";
+  }
+  function ageText(value) {
+    if (value === null || value === undefined) return "—";
+    return (value / 1000000n).toString() + " ms";
   }
   function schedule() {
     if (stopped || retryTimer) return;
@@ -1003,6 +1274,14 @@ _DIAGNOSTIC_HTML = """<!DOCTYPE html>
     retryDelay = Math.min(retryDelay * 2, 8000);
   }
   window.addEventListener("resize", showViewport);
+  document.addEventListener("visibilitychange", function () {
+    dropSync();
+    paintSync();
+    if (!document.hidden && socket && socket.readyState === 1) {
+      burst(8, 40);
+      scheduleSync();
+    }
+  });
   showViewport();
   connect();
 })();

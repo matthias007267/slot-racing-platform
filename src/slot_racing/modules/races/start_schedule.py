@@ -254,8 +254,8 @@ class StartSchedule:
         """JSON-ready description. It contains no widgets, clocks or callbacks.
 
         ``planned_go_ns`` and every ``at_ns`` are host monotonic nanoseconds.
-        A browser must not treat them as its own clock. Converting host time to
-        browser time is a later phase.
+        The broadcast writes those fields as decimal strings. A browser must
+        not treat them as permission to start.
         """
         phases: list[dict[str, object]] = [
             {
