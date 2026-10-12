@@ -35,6 +35,7 @@ from slot_racing.modules.races.hud import (
     FIELD_REMAINING_TIME,
     FIELD_START,
     FIELD_TOTAL,
+    FONT_FLOOR,
     LANE_CARD_MIN_HEIGHT,
     LANE_COLUMN_WIDTH,
     LANE_FIT_FLOOR,
@@ -259,6 +260,7 @@ class HudLaneCard:
     fields: tuple[HudField, ...]
     nominal_stack_px: int
     fit_floor: float
+    font_floor: int
     line_gap: int
     margin: int
 
@@ -835,6 +837,7 @@ def _cards(
                 fields=fields,
                 nominal_stack_px=_nominal_stack(fields),
                 fit_floor=LANE_FIT_FLOOR,
+                font_floor=FONT_FLOOR,
                 line_gap=LANE_LINE_GAP,
                 margin=LANE_CARD_MARGIN,
             )

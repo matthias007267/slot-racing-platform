@@ -51,7 +51,7 @@ _HUD_HTML = """<!DOCTYPE html>
     border: 1px solid var(--border); display: flex; flex-direction: column;
     justify-content: center;
   }
-  .field { min-height: 0; overflow: hidden; }
+  .field { flex: 0 0 auto; overflow: hidden; }
   .field .cap { color: var(--text_muted); line-height: 1.1; }
   .field .val {
     font-weight: 700; line-height: 1.05; overflow: hidden;
@@ -331,6 +331,18 @@ _HUD_HTML = """<!DOCTYPE html>
       guard += 1;
     }
   }
+  function reserveFullscreen(panel) {
+    var button = document.getElementById("fullscreen");
+    panel.style.paddingRight = "0px";
+    if (!button || panel.hidden) return;
+    var buttonBox = button.getBoundingClientRect();
+    var panelBox = panel.getBoundingClientRect();
+    var across = Math.min(buttonBox.right, panelBox.right) -
+      Math.max(buttonBox.left, panelBox.left);
+    var down = Math.min(buttonBox.bottom, panelBox.bottom) -
+      Math.max(buttonBox.top, panelBox.top);
+    if (across > 0 && down > 0) panel.style.paddingRight = px(Math.ceil(across) + 8);
+  }
   function renderReadout(panel, readout) {
     var host = ensure(panel, "readout", "div");
     host.className = "readout";
@@ -376,25 +388,29 @@ _HUD_HTML = """<!DOCTYPE html>
     dropMissing(card, "field-", keep);
     var floor = typeof spec.fit_floor === "number" ? spec.fit_floor : 0.45;
     if (floor < 0.45) floor = 0.45;
-    var factor = 1;
-    var guard = 0;
+    var fontFloor = typeof spec.font_floor === "number" ? spec.font_floor : 8;
     function apply(next) {
       var nodes = card.querySelectorAll("[data-px]");
       var cursor;
       for (cursor = 0; cursor < nodes.length; cursor += 1) {
-        nodes[cursor].style.fontSize = px(Number(nodes[cursor].getAttribute("data-px")) * next);
+        var size = Math.round(Number(nodes[cursor].getAttribute("data-px")) * next);
+        if (size < fontFloor) size = fontFloor;
+        nodes[cursor].style.fontSize = px(size);
       }
     }
-    apply(factor);
-    while (guard < 8 && factor > floor &&
-        (card.scrollHeight > card.clientHeight + 1 || card.scrollWidth > card.clientWidth + 1)) {
-      var used = Math.max(card.scrollHeight, 1);
-      var next = factor * (card.clientHeight / used);
-      if (!(next < factor)) next = factor * 0.9;
+    card.style.gap = px(spec.line_gap || 0);
+    apply(1);
+    var factor = 1;
+    var pass;
+    for (pass = 0; pass < 3; pass += 1) {
+      var needed = card.scrollHeight;
+      var available = card.clientHeight;
+      if (!(needed > available + 1) || available <= 0 || factor <= floor) break;
+      var next = factor * (available / needed);
       if (next < floor) next = floor;
+      if (!(next < factor)) break;
       factor = next;
       apply(factor);
-      guard += 1;
     }
   }
   function renderLanes(panel, scene) {
@@ -644,7 +660,7 @@ _HUD_HTML = """<!DOCTYPE html>
     }
     dropMissing(seats, "seat-", keep);
     var changes = ensure(panel, "changes", "div");
-    setText(changes, (briefing.changes || []).join("\n"));
+    setText(changes, (briefing.changes || []).join("\\n"));
     changes.style.fontSize = px(briefing.change_px || 20);
     changes.hidden = !(briefing.changes && briefing.changes.length);
     var hint = ensure(panel, "hint", "div");
@@ -654,7 +670,7 @@ _HUD_HTML = """<!DOCTYPE html>
     select.disabled = true;
     select.setAttribute("aria-disabled", "true");
     var names = briefing.drivers || [];
-    var signature = names.join("\n");
+    var signature = names.join("\\n");
     if (select.getAttribute("data-sig") !== signature) {
       while (select.firstChild) select.removeChild(select.firstChild);
       for (index = 0; index < names.length; index += 1) {
@@ -726,6 +742,8 @@ _HUD_HTML = """<!DOCTYPE html>
     }
     var clock = stage.querySelector("[data-key='panel-clock']");
     var status = stage.querySelector("[data-key='panel-status']");
+    if (clock) reserveFullscreen(clock);
+    if (status) reserveFullscreen(status);
     if (clock && !clock.hidden) renderReadout(clock, scene.clock);
     if (status && !status.hidden) {
       var tone = (scene.status_line && scene.status_line.panel_tone) || "";

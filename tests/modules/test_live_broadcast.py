@@ -645,6 +645,7 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "button.disabled = true" in page
     assert 'type: "viewport"' in page
     assert "fit_floor" in page
+    assert "font_floor" in page
     assert "visible !== false" in page
     assert "seq < lastSceneSeq" in page
     assert "Verbindung unterbrochen" in page
@@ -653,6 +654,21 @@ def test_the_browser_page_only_paints_and_never_starts_a_race() -> None:
     assert "requestFullscreen" in page
     assert page.count("socket.send(") == 1
     assert "token=" not in page
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    assert '.join("\\n")' in script
+    for line in script.splitlines():
+        quotes = 0
+        escaped = False
+        for char in line:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                quotes += 1
+        assert quotes % 2 == 0
 
 
 @pytest.mark.parametrize("count", [2, 5, 10])
