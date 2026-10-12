@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -26,8 +27,9 @@ from slot_racing.core.live_display import (
     LiveDisplayState,
     describe_live_display,
 )
-from slot_racing.modules.races.broadcast import DEFAULT_PORT, BroadcastDiagnostics
-from slot_racing.modules.races.ui.live_server import LiveBroadcast
+from slot_racing.modules.races.broadcast import DEFAULT_PORT, BroadcastDiagnostics, choose_bind_host
+from slot_racing.modules.races.live_display import BroadcastDisplay
+from slot_racing.modules.races.ui.live_server import LiveBroadcast, interface_candidates
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from tests.database import migrated_database
 from tests.modules.conftest import Env
@@ -166,15 +168,27 @@ def test_dashboard_shows_a_usable_address_and_updates_it(qtbot: QtBot, tmp_path:
         runtime.shutdown()
 
 
-def test_dashboard_shows_a_start_failure_without_a_link(qtbot: QtBot) -> None:
-    port = _free_port()
-    held = socket.socket()
-    try:
-        held.bind(("0.0.0.0", port))
-    except OSError:
-        held.close()
-        pytest.skip("the test port could not be reserved")
-    held.listen(1)
+def test_dashboard_shows_a_start_failure_without_a_link(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paint a failed start without opening a socket.
+
+    Holding ``0.0.0.0`` does not stop Qt from listening on the specific address
+    chosen for the broadcast. On Windows that listen succeeds, so the dashboard
+    correctly shows ready. This test injects the failure ``start`` already
+    reports to the dashboard.
+    """
+    port = 8765
+
+    def fail_start(
+        self: LiveBroadcast, host: str | None = None, port: int = DEFAULT_PORT
+    ) -> BroadcastDiagnostics:
+        del host
+        self._phase = "idle"
+        self._stats.failed(f"Der Port {port} ist bereits belegt.")
+        return self.diagnostics()
+
+    monkeypatch.setattr(LiveBroadcast, "start", fail_start)
     runtime = Runtime.create(
         AppConfig(live_broadcast_enabled=True, live_broadcast_port=port),
         database=migrated_database(),
@@ -187,15 +201,104 @@ def test_dashboard_shows_a_start_failure_without_a_link(qtbot: QtBot) -> None:
         assert isinstance(page, DashboardPage)
         assert _label(page, "dashboard-live-status").text() == "● Fehler"
         assert _label(page, "dashboard-live-url").text() == "Nicht verfügbar"
-        assert not _label(page, "dashboard-live-qr").isVisible()
+        assert _label(page, "dashboard-live-url").property("live-url") == ""
+        qr = _label(page, "dashboard-live-qr")
+        assert not qr.isVisible()
+        pixmap = qr.pixmap()
+        assert pixmap is None or pixmap.isNull()
+        assert qr.property("qr-url") in {None, ""}
+        assert not _label(page, "dashboard-live-clients").isVisible()
         assert not _button(page, "dashboard-live-open").isEnabled()
+        assert not _button(page, "dashboard-live-copy").isEnabled()
         detail = _label(page, "dashboard-live-detail").text()
         assert str(port) in detail
         assert "token" not in detail
-        assert runtime.services.get(LiveDisplay).status().url == ""
+        status = runtime.services.get(LiveDisplay).status()
+        assert status.state is LiveDisplayState.ERROR
+        assert status.url == ""
+        assert status.client_count == 0
+        opened: list[str] = []
+
+        def _remember(target: QUrl) -> bool:
+            opened.append(target.toString())
+            return True
+
+        page._open_url = _remember
+        page._open_live_url()
+        assert opened == []
+        stored = QApplication.clipboard()
+        assert stored is not None
+        before = stored.text()
+        page._copy_live_url()
+        assert stored.text() == before
+        assert _button(page, "dashboard-live-start").text() == "Erneut versuchen"
+        _button(page, "dashboard-live-start").click()
+        assert _label(page, "dashboard-live-status").text() == "● Fehler"
+        assert _label(page, "dashboard-live-url").property("live-url") == ""
+        assert not _label(page, "dashboard-live-qr").isVisible()
+        assert runtime.services.get(LiveDisplay).status().state is LiveDisplayState.ERROR
     finally:
         runtime.shutdown()
-        held.close()
+
+
+def test_an_occupied_bind_address_fails_and_restart_keeps_one_server(qapp) -> None:  # type: ignore[no-untyped-def]
+    """The address Qt will bind stays occupied until this socket is closed.
+
+    The holder uses that address, not ``0.0.0.0``. On Windows it also sets
+    ``SO_EXCLUSIVEADDRUSE`` so a later listen cannot share the port.
+    """
+    assert qapp is not None
+    host = choose_bind_host(interface_candidates())
+    listener = _exclusive_listener(host)
+    held: socket.socket | None = listener
+    port = int(listener.getsockname()[1])
+    service = LiveBroadcast()
+    display = BroadcastDisplay(
+        service,
+        AppConfig(live_broadcast_enabled=True, live_broadcast_port=port),
+        None,
+    )
+    try:
+        busy = service.start(host, port)
+        assert busy.running is False
+        assert busy.error == f"Der Port {port} ist bereits belegt."
+        assert service.access_url == ""
+        assert service.is_running() is False
+        assert service.phase == "idle"
+        failed = display.status()
+        assert failed.state is LiveDisplayState.ERROR
+        assert failed.url == ""
+        assert failed.client_count == 0
+        assert failed.detail == busy.error
+        assert "token" not in failed.detail
+        listener.close()
+        held = None
+        opened = service.start(host, port)
+        assert opened.running is True
+        assert opened.host == host
+        assert opened.port == port
+        assert service.phase == "ready"
+        ready = display.status()
+        assert ready.state is LiveDisplayState.READY
+        assert ready.usable
+        assert ready.url == service.access_url
+        assert ready.client_count == 0
+        address = service.access_url
+        thread = service._thread
+        token = service._token
+        assert thread is not None
+        assert token
+        again = service.start(host, port)
+        assert again.running is True
+        assert service.access_url == address
+        assert service._thread is thread
+        assert service._token == token
+        with socket.create_connection((host, port), timeout=2):
+            pass
+    finally:
+        if held is not None:
+            held.close()
+        service.stop()
 
 
 def test_the_schedule_is_published_before_the_first_lamp_without_restarting(
@@ -430,6 +533,28 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind((_HOST, 0))
         return int(sock.getsockname()[1])
+
+
+def _exclusive_listener(host: str) -> socket.socket:
+    """Bind ``host`` on an OS-assigned port and keep that socket open.
+
+    Closing the socket and binding the port again is a race. Binding every
+    interface does not reserve the specific address Qt listens on: Windows
+    allows that second bind unless the first socket set ``SO_EXCLUSIVEADDRUSE``.
+    """
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if sys.platform == "win32":
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if not isinstance(exclusive, int):
+                raise OSError("SO_EXCLUSIVEADDRUSE is required on Windows")
+            held.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        held.bind((host, 0))
+        held.listen(1)
+    except OSError:
+        held.close()
+        raise
+    return held
 
 
 def _label(page: object, name: str) -> QLabel:
