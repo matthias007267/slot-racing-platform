@@ -38,9 +38,9 @@ that row.
 The planner reads layout documents through the `track_layouts` table and does not import the
 tracks module.
 
-Later steps, not part of this decision's code: a shared path model for lines, arcs and cubic
-Bézier curves, the parametric and graphical editors, and the versioned `.slotpart` exchange
-file. Those stay on the same definition and the same connector kinds (`track`, `border`,
+The shared path model for lines, arcs and cubic Bézier curves is ADR 0017. The parametric
+and graphical editors, and the versioned `.slotpart` exchange file, are still later steps.
+Those stay on the same definition and the same connector kinds (`track`, `border`,
 `support`). Rail joints and border attachments remain different compatibility rules.
 
 ## Consequences

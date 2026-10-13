@@ -19,6 +19,7 @@ from slot_racing.modules.track_planner.parts import (
     AttachmentProfile,
     PartInstance,
     PartSpec,
+    SlotSpan,
     arc_outline,
     track_width,
 )
@@ -26,7 +27,8 @@ from slot_racing.modules.track_planner.parts import (
 HOST_STRAIGHT = "straight"
 HOST_CURVE_FLAT = "curve_flat"
 HOST_CURVE_BANKED = "curve_banked"
-HOST_SHAPES = frozenset({HOST_STRAIGHT, HOST_CURVE_FLAT, HOST_CURVE_BANKED})
+HOST_CUSTOM = "custom"
+HOST_SHAPES = frozenset({HOST_STRAIGHT, HOST_CURVE_FLAT, HOST_CURVE_BANKED, HOST_CUSTOM})
 
 SLOT_LEFT = "left"
 SLOT_RIGHT = "right"
@@ -60,15 +62,23 @@ def slots_for_host(spec: PartSpec) -> tuple[str, ...]:
         return STRAIGHT_SLOTS
     if shape in {HOST_CURVE_FLAT, HOST_CURVE_BANKED}:
         return CURVE_SLOTS
-    return ()
+    return tuple(edge.slot for edge in spec.border_edges)
 
 
 def attachment_fits(accessory: PartSpec, host: PartSpec, slot: str) -> bool:
-    """True when this definition may occupy ``slot`` on this exact host shape."""
+    """True when this definition may occupy ``slot`` on this exact host shape.
+
+    A custom strip matches the host's border edge, never a rail end. The match
+    is the edge geometry, not a database id.
+    """
     profile = accessory.attachment
-    if profile is None or slot not in profile.slots or slot not in slots_for_host(host):
+    if profile is None or slot not in profile.slots:
         return False
     if profile.host_lanes is not None and host.lane_count != profile.host_lanes:
+        return False
+    if profile.host_shape == HOST_CUSTOM:
+        return _edge_fits(profile.edge, host, slot)
+    if slot not in slots_for_host(host):
         return False
     if host_shape(host) != profile.host_shape:
         return False
@@ -77,6 +87,13 @@ def attachment_fits(accessory: PartSpec, host: PartSpec, slot: str) -> bool:
     return _close(host.radius_mm, profile.host_radius_mm) and _close(
         host.angle_deg, profile.host_angle_deg
     )
+
+
+def _edge_fits(edge: tuple[SlotSpan, ...], host: PartSpec, slot: str) -> bool:
+    if host.attachment is not None or not edge:
+        return False
+    offered = next((item.spans for item in host.border_edges if item.slot == slot), None)
+    return offered == edge
 
 
 def slot_taken(instances: Sequence[PartInstance], host_id: str, slot: str) -> bool:
@@ -89,6 +106,8 @@ def placed_outline(spec: PartSpec, slot: str | None) -> tuple[tuple[float, float
     """Local outline. A slotted strip sits beside the host; the library card stays centred."""
     profile = spec.attachment
     if profile is None or slot not in profile.slots:
+        return spec.outline
+    if profile.host_shape == HOST_CUSTOM:
         return spec.outline
     return _strip_outline(profile, slot)
 

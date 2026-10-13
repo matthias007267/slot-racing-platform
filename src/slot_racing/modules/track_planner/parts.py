@@ -18,9 +18,21 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import pairwise
+from typing import Literal
 
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
+from slot_racing.modules.track_planner.geometry import (
+    ArcSegment,
+    CubicBezier,
+    GeometryPath,
+    LineSegment,
+    Segment,
+    validate_path,
+)
+from slot_racing.modules.track_planner.geometry import (
+    rotate_xy as rotate_point,
+)
 
 SCALES = ("1:24", "1:32", "1:43")
 # The seeded Carrera rails are stored at 1:24. The scale is a property, not an identity.
@@ -104,13 +116,22 @@ class ConnectorSpec:
 # positive angles run toward +y, the same convention as the curve connectors.
 SPAN_LINE = "line"
 SPAN_ARC = "arc"
+SPAN_BEZIER = "bezier"
 PATH_SLOT = "slot"
 PATH_CENTER = "center"
+PATH_CONTOUR = "contour"
+PATH_BORDER = "border"
+BORDER_SLOTS = frozenset({"left", "right", "inner", "outer"})
 
 
 @dataclass(frozen=True, slots=True)
 class SlotSpan:
-    """One straight or circular piece of a groove, in local millimetres."""
+    """One piece of a groove, in local millimetres.
+
+    ``line`` uses the two endpoints. ``arc`` uses the centre ``(x0, y0)``,
+    ``radius_mm`` and the angles. ``bezier`` stores ``(x0, y0)`` as P0,
+    ``(c1x, c1y)`` as P1, ``(c2x, c2y)`` as P2 and ``(x1, y1)`` as P3.
+    """
 
     kind: str
     x0: float
@@ -120,6 +141,10 @@ class SlotSpan:
     radius_mm: float = 0.0
     start_deg: float = 0.0
     sweep_deg: float = 0.0
+    c1x: float = 0.0
+    c1y: float = 0.0
+    c2x: float = 0.0
+    c2y: float = 0.0
 
     @staticmethod
     def line(x0: float, y0: float, x1: float, y1: float) -> SlotSpan:
@@ -128,6 +153,20 @@ class SlotSpan:
     @staticmethod
     def arc(cx: float, cy: float, radius_mm: float, start_deg: float, sweep_deg: float) -> SlotSpan:
         return SlotSpan(SPAN_ARC, cx, cy, 0.0, 0.0, radius_mm, start_deg, sweep_deg)
+
+    @staticmethod
+    def bezier(
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        x3: float,
+        y3: float,
+    ) -> SlotSpan:
+        """P0, P1, P2, P3. The stored span keeps those four points."""
+        return SlotSpan(SPAN_BEZIER, x0, y0, x3, y3, 0.0, 0.0, 0.0, x1, y1, x2, y2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +180,10 @@ class SlotPath:
 
     spans: tuple[SlotSpan, ...]
     kind: str = PATH_SLOT
+    # Set when this groove is one numbered lane. Empty means "in list order".
+    lane: int | None = None
+    # Set on a border edge. A groove leaves this empty.
+    slot: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +200,16 @@ class AttachmentProfile:
     host_radius_mm: float | None = None
     host_angle_deg: float | None = None
     host_lanes: int | None = None
+    # Mating edge in the host's local frame. Empty for a catalogue strip.
+    edge: tuple[SlotSpan, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class BorderEdge:
+    """One side a border may occupy. The spans are not a rail joint."""
+
+    slot: str
+    spans: tuple[SlotSpan, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +232,10 @@ class PartSpec:
     slot_paths: tuple[SlotPath, ...] = ()
     # Set only when this part rides on another instance instead of joining the track.
     attachment: AttachmentProfile | None = None
+    # Exact outline curves. Empty keeps the polygon in ``outline``.
+    contours: tuple[SlotPath, ...] = ()
+    # Side edges a border may use. They are not rail joints.
+    border_edges: tuple[BorderEdge, ...] = ()
     manufacturer: str = ""
     description: str = ""
 
@@ -288,6 +345,8 @@ def same_geometry(left: PartSpec, right: PartSpec) -> bool:
         and left.outline == right.outline
         and left.slot_paths == right.slot_paths
         and left.attachment == right.attachment
+        and left.contours == right.contours
+        and left.border_edges == right.border_edges
     )
 
 
@@ -297,7 +356,7 @@ def merge_preserved_geometry(stored: PartSpec, incoming: PartSpec) -> PartSpec:
     The library dialog rebuilds a part from length and radius and drops stored slot
     paths. A rename or a scale change must not become a different body.
     """
-    if incoming.slot_paths or not stored.slot_paths:
+    if _has_explicit_geometry(incoming) or not _has_explicit_geometry(stored):
         return incoming
     if (
         stored.category,
@@ -321,7 +380,14 @@ def merge_preserved_geometry(stored: PartSpec, incoming: PartSpec) -> PartSpec:
         outline=stored.outline,
         slot_paths=stored.slot_paths,
         attachment=stored.attachment,
+        contours=stored.contours,
+        border_edges=stored.border_edges,
     )
+
+
+def _has_explicit_geometry(spec: PartSpec) -> bool:
+    edge = spec.attachment.edge if spec.attachment is not None else ()
+    return bool(spec.slot_paths or spec.contours or spec.border_edges or edge)
 
 
 def normalize_deg(angle: float) -> float:
@@ -332,10 +398,7 @@ def normalize_deg(angle: float) -> float:
 
 def rotate_xy(x_mm: float, y_mm: float, rotation_z_deg: float) -> tuple[float, float]:
     """Clockwise rotation in the plan's y-down coordinates."""
-    radians = math.radians(rotation_z_deg)
-    cosine = math.cos(radians)
-    sine = math.sin(radians)
-    return (x_mm * cosine - y_mm * sine, x_mm * sine + y_mm * cosine)
+    return rotate_point(x_mm, y_mm, rotation_z_deg)
 
 
 def world_xy(instance: PartInstance, x_mm: float, y_mm: float) -> tuple[float, float]:
@@ -423,6 +486,11 @@ def crossing_connectors(length_mm: float, lane_count: int) -> tuple[ConnectorSpe
 def connectors_compatible(left: ConnectorSpec, right: ConnectorSpec) -> bool:
     """Same joint kind and the same lane order. A reversed lane list does not fit."""
     return left.kind == right.kind and left.lanes == right.lanes and left.kind in CONNECTOR_KINDS
+
+
+def rails_can_join(left: ConnectorSpec, right: ConnectorSpec) -> bool:
+    """Two rail ends. A border edge or a support joint is never a rail target."""
+    return left.kind == TRACK and connectors_compatible(left, right)
 
 
 def join_pose(
@@ -847,13 +915,148 @@ def curve_lane_radius(center_mm: float, index: int, lane_count: int) -> float:
 
 def span_point(span: SlotSpan, t: float) -> tuple[float, float]:
     """Point at fraction ``t`` along one span. ``t`` is 0 at the start and 1 at the end."""
+    return as_segment(span).point_at(t)
+
+
+def as_segment(span: SlotSpan) -> Segment:
+    """The shared segment for a stored span. Line and arc keep their old parameters."""
     if span.kind == SPAN_ARC:
-        angle = math.radians(span.start_deg + span.sweep_deg * t)
-        return (
-            span.x0 + span.radius_mm * math.cos(angle),
-            span.y0 + span.radius_mm * math.sin(angle),
+        return ArcSegment(span.x0, span.y0, span.radius_mm, span.start_deg, span.sweep_deg)
+    if span.kind == SPAN_BEZIER:
+        return CubicBezier(
+            span.x0, span.y0, span.c1x, span.c1y, span.c2x, span.c2y, span.x1, span.y1
         )
-    return (span.x0 + (span.x1 - span.x0) * t, span.y0 + (span.y1 - span.y0) * t)
+    return LineSegment(span.x0, span.y0, span.x1, span.y1)
+
+
+def geometry_of(path: SlotPath) -> GeometryPath:
+    """One stored path as a :class:`GeometryPath`. The role follows ``path.kind``."""
+    role: Literal["slot", "center", "contour", "border"]
+    if path.kind == PATH_CENTER:
+        role = "center"
+    elif path.kind == PATH_CONTOUR:
+        role = "contour"
+    elif path.kind == PATH_BORDER:
+        role = "border"
+    else:
+        role = "slot"
+    return GeometryPath(
+        tuple(as_segment(span) for span in path.spans),
+        role,
+        path.lane,
+        path.slot,
+    )
+
+
+def driving_paths(spec: PartSpec) -> tuple[GeometryPath, ...]:
+    """Driving grooves. Stored paths win. Otherwise the measures stay compact and are derived."""
+    stored = [path for path in spec.slot_paths if path.kind == PATH_SLOT]
+    if stored:
+        paths: list[GeometryPath] = []
+        for index, path in enumerate(stored):
+            geometry = geometry_of(path)
+            lane = path.lane if path.lane is not None else index + 1
+            paths.append(GeometryPath(geometry.segments, "slot", lane, path.slot))
+        return tuple(paths)
+    if _parametric_curve(spec):
+        return _curve_paths(spec)
+    length = spec.length_mm
+    if spec.category == SWITCH and length:
+        return _numbered(lane_change_paths(length, "left"))
+    if spec.category == LANE_CHANGE and length:
+        return _numbered(lane_change_paths(length, "both"))
+    if length:
+        return _numbered(_through_lanes(length, spec.lane_count))
+    return ()
+
+
+def _numbered(paths: tuple[SlotPath, ...]) -> tuple[GeometryPath, ...]:
+    numbered: list[GeometryPath] = []
+    lane = 1
+    for path in paths:
+        if path.kind != PATH_SLOT:
+            continue
+        numbered.append(GeometryPath(tuple(as_segment(span) for span in path.spans), "slot", lane))
+        lane += 1
+    return tuple(numbered)
+
+
+def _parametric_curve(spec: PartSpec) -> bool:
+    return (
+        spec.category in {CURVE, SPECIAL}
+        and spec.radius_mm is not None
+        and spec.angle_deg not in (None, 0.0)
+        and spec.radius_mm > 0.0
+        and spec.length_mm is None
+    )
+
+
+def _curve_paths(spec: PartSpec) -> tuple[GeometryPath, ...]:
+    radius = float(spec.radius_mm or 0.0)
+    angle = float(spec.angle_deg or 0.0)
+    start = -angle / 2.0
+    return tuple(
+        GeometryPath(
+            (
+                ArcSegment(
+                    0.0,
+                    0.0,
+                    curve_lane_radius(radius, index, spec.lane_count),
+                    start,
+                    angle,
+                ),
+            ),
+            "slot",
+            index + 1,
+        )
+        for index in range(spec.lane_count)
+    )
+
+
+def validate_part_geometry(spec: PartSpec) -> None:
+    """Check one part's own curves, lanes and border edges. This is not a lap-closure test."""
+    for path in spec.slot_paths:
+        validate_path(geometry_of(path))
+    for path in spec.contours:
+        contour = geometry_of(path)
+        validate_path(GeometryPath(contour.segments, "contour", contour.lane, contour.slot))
+    for edge in spec.border_edges:
+        _validate_border_edge(edge.slot, edge.spans)
+    profile = spec.attachment
+    if profile is not None and profile.host_shape == "custom" and not profile.edge:
+        raise ValidationError("error.planner.geometry")
+    if profile is not None and profile.edge:
+        for slot in profile.slots:
+            _validate_border_edge(slot, profile.edge)
+    track_lanes: set[int] = set()
+    for connector in spec.connectors:
+        for value in (connector.x_mm, connector.y_mm, connector.z_mm, connector.direction_deg):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValidationError("error.planner.geometry")
+        if connector.kind not in CONNECTOR_KINDS:
+            raise ValidationError("error.planner.geometry")
+        for lane in connector.lanes:
+            if isinstance(lane, bool) or not isinstance(lane, int) or lane < 1:
+                raise ValidationError("error.planner.geometry")
+            if lane > MAX_LANE_COUNT:
+                raise ValidationError("error.planner.geometry")
+            if connector.kind == TRACK:
+                track_lanes.add(lane)
+    if not track_lanes:
+        return
+    for path in spec.slot_paths:
+        if path.kind == PATH_SLOT and path.lane is not None and path.lane not in track_lanes:
+            raise ValidationError("error.planner.geometry")
+
+
+def _validate_border_edge(slot: str, spans: tuple[SlotSpan, ...]) -> None:
+    if slot not in BORDER_SLOTS or not spans:
+        raise ValidationError("error.planner.geometry")
+    validate_path(GeometryPath(tuple(as_segment(span) for span in spans), "border", None, slot))
 
 
 def s_bend(x0: float, y0: float, x1: float, y1: float) -> tuple[SlotSpan, ...]:
@@ -972,57 +1175,118 @@ def chicane_paths(length: float) -> tuple[SlotPath, ...]:
 
 
 def encode_slot_paths(paths: tuple[SlotPath, ...]) -> list[dict[str, object]]:
-    encoded: list[dict[str, object]] = []
-    for path in paths:
-        spans: list[dict[str, object]] = []
-        for span in path.spans:
-            if span.kind == SPAN_ARC:
-                spans.append(
-                    {
-                        "kind": SPAN_ARC,
-                        "cx": span.x0,
-                        "cy": span.y0,
-                        "radius": span.radius_mm,
-                        "start_deg": span.start_deg,
-                        "sweep_deg": span.sweep_deg,
-                    }
-                )
-            else:
-                spans.append(
-                    {
-                        "kind": SPAN_LINE,
-                        "x0": span.x0,
-                        "y0": span.y0,
-                        "x1": span.x1,
-                        "y1": span.y1,
-                    }
-                )
-        encoded.append({"kind": path.kind, "spans": spans})
+    return [_encode_path(path) for path in paths]
+
+
+def encode_geometry(spec: PartSpec) -> list[dict[str, object]]:
+    """Grooves, contours and border edges in one JSON list. Catalogue rows omit the extras."""
+    encoded = encode_slot_paths(spec.slot_paths)
+    encoded.extend(_encode_path(SlotPath(path.spans, PATH_CONTOUR)) for path in spec.contours)
+    profile = spec.attachment
+    if profile is None:
+        for edge in spec.border_edges:
+            encoded.append(
+                {"kind": PATH_BORDER, "slot": edge.slot, "spans": _encode_spans(edge.spans)}
+            )
+    elif profile.edge:
+        for slot in profile.slots:
+            encoded.append(
+                {"kind": PATH_BORDER, "slot": slot, "spans": _encode_spans(profile.edge)}
+            )
     return encoded
 
 
 def decode_slot_paths(payload: object) -> tuple[SlotPath, ...]:
     """Read stored grooves. A missing or broken value means the ordinary lanes."""
+    slots, _contours, _edges = decode_geometry(payload)
+    return slots
+
+
+def decode_geometry(
+    payload: object,
+) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...], tuple[BorderEdge, ...]]:
+    """Split a stored list into grooves, contours and border edges.
+
+    A broken entry clears the whole value, which is how an older row asks for
+    the ordinary lanes. Line and arc objects from before Bézier curves still load.
+    """
     if not isinstance(payload, list):
-        return ()
-    paths: list[SlotPath] = []
+        return (), (), ()
+    slots: list[SlotPath] = []
+    contours: list[SlotPath] = []
+    edges: list[BorderEdge] = []
     for entry in payload:
         if not isinstance(entry, dict):
-            return ()
+            return (), (), ()
         raw_spans = entry.get("spans")
         if not isinstance(raw_spans, list):
-            return ()
+            return (), (), ()
         spans: list[SlotSpan] = []
         for raw in raw_spans:
             span = _decode_span(raw)
             if span is None:
-                return ()
+                return (), (), ()
             spans.append(span)
+        if not spans:
+            return (), (), ()
         kind = entry.get("kind", PATH_SLOT)
-        if kind not in {PATH_SLOT, PATH_CENTER} or not spans:
-            return ()
-        paths.append(SlotPath(tuple(spans), str(kind)))
-    return tuple(paths)
+        lane = entry.get("lane")
+        slot = entry.get("slot")
+        lane_no = lane if isinstance(lane, int) and not isinstance(lane, bool) else None
+        slot_name = slot if isinstance(slot, str) else None
+        if kind in {PATH_SLOT, PATH_CENTER}:
+            slots.append(SlotPath(tuple(spans), str(kind), lane_no, slot_name))
+        elif kind == PATH_CONTOUR:
+            contours.append(SlotPath(tuple(spans), PATH_CONTOUR))
+        elif kind == PATH_BORDER and slot_name in BORDER_SLOTS:
+            edges.append(BorderEdge(slot_name, tuple(spans)))
+        else:
+            return (), (), ()
+    return tuple(slots), tuple(contours), tuple(edges)
+
+
+def _encode_path(path: SlotPath) -> dict[str, object]:
+    encoded: dict[str, object] = {"kind": path.kind, "spans": _encode_spans(path.spans)}
+    if path.lane is not None:
+        encoded["lane"] = path.lane
+    if path.slot is not None:
+        encoded["slot"] = path.slot
+    return encoded
+
+
+def _encode_spans(spans: tuple[SlotSpan, ...]) -> list[dict[str, object]]:
+    return [_encode_span(span) for span in spans]
+
+
+def _encode_span(span: SlotSpan) -> dict[str, object]:
+    if span.kind == SPAN_ARC:
+        return {
+            "kind": SPAN_ARC,
+            "cx": span.x0,
+            "cy": span.y0,
+            "radius": span.radius_mm,
+            "start_deg": span.start_deg,
+            "sweep_deg": span.sweep_deg,
+        }
+    if span.kind == SPAN_BEZIER:
+        return {
+            "kind": SPAN_BEZIER,
+            "x0": span.x0,
+            "y0": span.y0,
+            "x1": span.c1x,
+            "y1": span.c1y,
+            "x2": span.c2x,
+            "y2": span.c2y,
+            "x3": span.x1,
+            "y3": span.y1,
+        }
+    return {
+        "kind": SPAN_LINE,
+        "x0": span.x0,
+        "y0": span.y0,
+        "x1": span.x1,
+        "y1": span.y1,
+    }
 
 
 def _decode_span(raw: object) -> SlotSpan | None:
@@ -1037,6 +1301,17 @@ def _decode_span(raw: object) -> SlotSpan | None:
                 float(raw["radius"]),
                 float(raw["start_deg"]),
                 float(raw["sweep_deg"]),
+            )
+        if kind == SPAN_BEZIER:
+            return SlotSpan.bezier(
+                float(raw["x0"]),
+                float(raw["y0"]),
+                float(raw["x1"]),
+                float(raw["y1"]),
+                float(raw["x2"]),
+                float(raw["y2"]),
+                float(raw["x3"]),
+                float(raw["y3"]),
             )
         if kind == SPAN_LINE:
             return SlotSpan.line(
