@@ -248,43 +248,55 @@ def _is_arc(spec: PartSpec) -> bool:
     )
 
 
+def _arc_slots_and_centers(
+    spec: PartSpec,
+) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...]]:
+    radius = float(spec.radius_mm or 0.0)
+    angle = float(spec.angle_deg or 0.0)
+    start = -angle / 2.0
+    stored = tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
+    if stored:
+        return stored, tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
+    slots = tuple(
+        SlotPath(
+            (
+                SlotSpan.arc(
+                    0.0, 0.0, curve_lane_radius(radius, index, spec.lane_count), start, angle
+                ),
+            )
+        )
+        for index in range(spec.lane_count)
+    )
+    centers: tuple[SlotPath, ...] = ()
+    if spec.lane_count >= 2:
+        radii = [
+            curve_lane_radius(radius, index, spec.lane_count) for index in range(spec.lane_count)
+        ]
+        centers = tuple(
+            SlotPath(
+                (SlotSpan.arc(0.0, 0.0, (left + right) / 2.0, start, angle),),
+                PATH_CENTER,
+            )
+            for left, right in pairwise(radii)
+        )
+    return slots, centers
+
+
+def derived_slot_paths(
+    spec: PartSpec,
+) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...]]:
+    """Undashed grooves and centre lines of ``spec``, stored or derived from its measures."""
+    if _is_arc(spec) and spec.attachment is None:
+        return _arc_slots_and_centers(spec)
+    return _slots_and_centers(spec)
+
+
 def _arc_figure(spec: PartSpec) -> TrackFigure:
     radius = float(spec.radius_mm or 0.0)
     angle = float(spec.angle_deg or 0.0)
     width = spec.width_mm or track_width(spec.lane_count)
     road = RoadArc(radius, angle, width)
-    stored = tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
-    if stored:
-        slots = stored
-        centers = tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
-    else:
-        slots = tuple(
-            SlotPath(
-                (
-                    SlotSpan.arc(
-                        0.0,
-                        0.0,
-                        curve_lane_radius(radius, index, spec.lane_count),
-                        road.start_deg,
-                        angle,
-                    ),
-                )
-            )
-            for index in range(spec.lane_count)
-        )
-        centers = ()
-        if spec.lane_count >= 2:
-            radii = [
-                curve_lane_radius(radius, index, spec.lane_count)
-                for index in range(spec.lane_count)
-            ]
-            centers = tuple(
-                SlotPath(
-                    (SlotSpan.arc(0.0, 0.0, (left + right) / 2.0, road.start_deg, angle),),
-                    PATH_CENTER,
-                )
-                for left, right in pairwise(radii)
-            )
+    slots, centers = _arc_slots_and_centers(spec)
     # A stored contour is the real outline. The right-hand annulus would hide a left bend.
     edges = spec.contours or (
         SlotPath((SlotSpan.arc(0.0, 0.0, road.outer_mm, road.start_deg, angle),)),

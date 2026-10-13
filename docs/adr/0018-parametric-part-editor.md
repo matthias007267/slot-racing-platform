@@ -47,3 +47,5 @@ and place the result without restarting. Complex bodies stay intact until the gr
 editor. A custom track width on a left-hand curve is part of that curve’s stored edge; a
 border fits it only when the edge matches. `.slotpart` import and export stay out of this
 phase.
+
+The graphical editor for the locked bodies is ADR 0019.
