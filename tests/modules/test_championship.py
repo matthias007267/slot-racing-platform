@@ -8,7 +8,7 @@ import pytest
 from alembic import command
 from PySide6.QtWidgets import QDialog
 from pytestqt.qtbot import QtBot
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 
 from slot_racing.core.catalog import DriverInfo
 from slot_racing.core.championship import DEFAULT_PLACE_POINTS, DriverStanding
@@ -276,10 +276,15 @@ def test_migration_adds_championship_tables_and_keeps_existing_races() -> None:
         track = Track(name="Ring", lane_count=2, is_active=True)
         session.add(track)
         session.flush()
-        session.add(Race(name="Historisch", track_id=track.id, target_laps=5))
-        session.flush()
+        session.execute(
+            text(
+                "INSERT INTO races (name, track_id, status, mode, target_laps, timing_provider) "
+                "VALUES ('Historisch', :track_id, 'created', 'laps', 5, 'simulation')"
+            ),
+            {"track_id": track.id},
+        )
     database.migrate()
-    assert database.schema_revision() == "0018"
+    assert database.schema_revision() == "0019"
     tables = set(inspect(database.engine).get_table_names())
     assert {
         "championships",
@@ -290,7 +295,10 @@ def test_migration_adds_championship_tables_and_keeps_existing_races() -> None:
         "championship_race_teams",
     } <= tables
     with database.session() as session:
-        assert session.scalar(select(Race.name)) == "Historisch"
+        stored = session.scalar(select(Race))
+        assert stored is not None
+        assert stored.name == "Historisch"
+        assert stored.active_lanes is None
         session.add(Driver(name="Anna", is_active=True))
     _downgrade(database, "0017")
     assert database.schema_revision() == "0017"
@@ -299,7 +307,7 @@ def test_migration_adds_championship_tables_and_keeps_existing_races() -> None:
         assert session.scalar(select(Race.name)) == "Historisch"
         assert session.scalar(select(Driver.name)) == "Anna"
     database.migrate()
-    assert database.schema_revision() == "0018"
+    assert database.schema_revision() == "0019"
     database.dispose()
 
 

@@ -37,7 +37,7 @@ from slot_racing.modules.races.hud import (
     light_pixels,
     records_shown,
 )
-from slot_racing.modules.races.hud_scene import HudCue, HudPresentation
+from slot_racing.modules.races.hud_scene import HudCue, HudPresentation, start_gantry_active
 from slot_racing.modules.races.runner import RaceController, RaceRunner, RaceSnapshot
 from slot_racing.modules.races.service import RaceService
 from slot_racing.modules.races.start_display import (
@@ -526,7 +526,7 @@ class LiveRaceView(QWidget):
         status_text, tone = self.stage.show_standings(
             snapshot,
             mode=runner.race.mode,
-            lane_count=runner.race.lane_count,
+            lane_count=self._shown_lanes(runner),
             duration_minutes=runner.race.duration_minutes,
         )
         if self.table.rowCount() and self.table.currentRow() < 0:
@@ -747,6 +747,10 @@ class LiveRaceView(QWidget):
                 self.translator.format("race.live.broadcast_failed_detail", detail=detail)
             )
 
+    def _shown_lanes(self, runner: RaceRunner) -> int:
+        """Lanes this race selected. The track can still have more."""
+        return runner.race.active_lanes
+
     def _may_publish(self) -> bool:
         broadcast = self._broadcast
         runner = self._runner
@@ -769,12 +773,12 @@ class LiveRaceView(QWidget):
             presentation = HudPresentation(
                 translator=self.translator,
                 mode=runner.race.mode,
-                lane_count=runner.race.lane_count,
+                lane_count=self._shown_lanes(runner),
                 duration_minutes=runner.race.duration_minutes,
                 message=self._message,
                 warning=warning,
                 cue=HudCue(
-                    active=self._cue is not None,
+                    active=start_gantry_active(self._cue is not None, runner.status),
                     lit_lights=self.start_lights.lit_lights,
                     go=self.start_lights.showing_go,
                 ),

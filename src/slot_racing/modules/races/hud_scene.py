@@ -177,6 +177,15 @@ class HudCue:
     go: bool = False
 
 
+def start_gantry_active(has_cue: bool, status: RaceStatus) -> bool:
+    """Show the start gantry only while that heat is still waiting for the engine.
+
+    A cue object can outlive the countdown. Once the race is running, aborted or finished,
+    the housing stays hidden. The next heat is created again, so the gantry can return.
+    """
+    return has_cue and status is RaceStatus.CREATED
+
+
 @dataclass(frozen=True, slots=True)
 class HudPresentation:
     """Everything the live view knows that a snapshot does not."""

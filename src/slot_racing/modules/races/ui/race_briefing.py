@@ -205,6 +205,7 @@ class OverviewBoard(QWidget):
         facts = (
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
+            fmt("race.overview.active_lanes", lanes=race.active_lanes),
             mode,
             fmt("race.overview.provider", provider=provider),
         )

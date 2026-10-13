@@ -1,9 +1,11 @@
 """Automatic lane rotation for lap races and time trials.
 
-Two-lane races pair drivers from a circular list. The index advances by two after every
+Two active lanes pair drivers from a circular list. The index advances by two after every
 heat, so an even field is consecutive pairs and an odd field keeps sharing the spare driver.
-Three and four lanes still give every driver one visit to every lane. The order of those
-heats may change when somebody cannot start or is disqualified; the lane obligation does not.
+An even field then repeats that period with the two lanes exchanged, so every driver visits
+both lanes once. An odd field already does that in one period. Three and four lanes still
+give every driver one visit to every lane. The order of those heats may change when somebody
+cannot start or is disqualified; the lane obligation does not.
 """
 
 from __future__ import annotations
@@ -85,8 +87,38 @@ def pairwise_heats(
 def pairwise_cycle(
     driver_ids: Sequence[int],
 ) -> tuple[tuple[tuple[int, int], ...], ...]:
-    """One full pass of :func:`pairwise_heats`. The next pass repeats this sequence."""
-    return pairwise_heats(driver_ids, pairwise_period(len(driver_ids)))
+    """One pairwise period, plus the same pairs with the lanes swapped when the field is even.
+
+    An odd field already visits both lanes in a single period. An even field would otherwise
+    leave every driver on one lane, so that period is repeated with lane 1 and lane 2
+    exchanged. A later untouched plan repeats this whole sequence.
+    """
+    drivers = list(driver_ids)
+    period = pairwise_period(len(drivers))
+    first = pairwise_heats(drivers, period)
+    if len(drivers) % 2 == 1 or not first:
+        return first
+    swapped = tuple(
+        tuple(sorted(((driver, 3 - lane) for driver, lane in heat), key=lambda seat: seat[1]))
+        for heat in first
+    )
+    return first + swapped
+
+
+def effective_lane_count(stored: int | None, physical: int) -> int:
+    """Lanes a race actually plans.
+
+    ``stored`` is the race's own choice. Empty means the track's lane count, which is also
+    what every race used before a race could choose. A one-or-two choice is only meaningful
+    on a two-lane track; every other track keeps its physical lanes.
+    """
+    if physical < 1:
+        return 0
+    if physical != 2:
+        return physical
+    if stored == 1:
+        return 1
+    return 2
 
 
 def pending_pairwise(

@@ -48,6 +48,7 @@ from slot_racing.modules.races.hud_scene import (
     HudViewport,
     build_hud_scene,
     scene_payload,
+    start_gantry_active,
 )
 from slot_racing.modules.races.models import Lap, Race
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
@@ -228,6 +229,15 @@ def test_start_lights_use_the_existing_gantry_and_do_not_invent_a_step() -> None
     idle = _scene(_snapshot(RaceStatus.RUNNING))
     assert idle.lights.visible is False
     assert idle.lights.width > 0
+    assert start_gantry_active(True, RaceStatus.CREATED) is True
+    assert start_gantry_active(True, RaceStatus.RUNNING) is False
+    assert start_gantry_active(True, RaceStatus.FINISHED) is False
+    assert start_gantry_active(False, RaceStatus.CREATED) is False
+    between = _scene(
+        _snapshot(RaceStatus.FINISHED),
+        cue=HudCue(active=False, lit_lights=0, go=False),
+    )
+    assert between.lights.visible is False
 
 
 def test_between_heats_uses_the_briefing_and_hides_the_stage() -> None:
