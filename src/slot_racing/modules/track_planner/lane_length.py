@@ -22,11 +22,11 @@ from dataclasses import dataclass
 
 from slot_racing.modules.track_planner.figure import track_figure
 from slot_racing.modules.track_planner.parts import (
-    SPAN_ARC,
     ConnectorSpec,
     PartInstance,
     PartSpec,
     SlotSpan,
+    as_segment,
     connectors_compatible,
     curve_lane_radius,
     lane_offset_mm,
@@ -61,10 +61,8 @@ class TrackRun:
 
 
 def span_length_mm(span: SlotSpan) -> float:
-    """Length of one line or circular arc. The sweep sign does not matter."""
-    if span.kind == SPAN_ARC:
-        return abs(span.radius_mm * math.radians(span.sweep_deg))
-    return math.hypot(span.x1 - span.x0, span.y1 - span.y0)
+    """Length of one line, circular arc or Bézier span. The sweep sign does not matter."""
+    return as_segment(span).length_mm()
 
 
 def path_length_mm(spans: Sequence[SlotSpan]) -> float:

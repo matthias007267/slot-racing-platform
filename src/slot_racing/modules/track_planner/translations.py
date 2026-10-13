@@ -48,6 +48,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.lane": "Die Bahn liegt außerhalb der Strecke.",
         "error.planner.piece": "Das Streckenelement ist ungültig.",
         "error.planner.part": "Das Bauteil ist ungültig.",
+        "error.planner.geometry": "Die Bauteilgeometrie ist ungültig.",
         "error.planner.extend": "An dieser Stelle kann nicht weitergebaut werden.",
         "error.planner.part_exists": (
             "Ein Bauteil mit der Bezeichnung „{name}“ und der Artikelnummer "

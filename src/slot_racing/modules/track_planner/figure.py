@@ -18,6 +18,7 @@ from functools import lru_cache
 from itertools import pairwise
 
 from slot_racing.modules.track_planner.attachment import (
+    HOST_CUSTOM,
     HOST_STRAIGHT,
     STRIP_WIDTH_MM,
     placed_outline,
@@ -32,6 +33,7 @@ from slot_racing.modules.track_planner.parts import (
     PATH_SLOT,
     PITLANE,
     SPAN_ARC,
+    SPAN_BEZIER,
     SPAN_LINE,
     SPECIAL,
     SUPPORT,
@@ -39,6 +41,7 @@ from slot_racing.modules.track_planner.parts import (
     PartSpec,
     SlotPath,
     SlotSpan,
+    as_segment,
     curve_lane_radius,
     lane_change_paths,
     lane_offset_mm,
@@ -114,7 +117,7 @@ def _build_figure(spec: PartSpec, slot: str | None) -> TrackFigure:
         road_arc=None,
         slots=slots,
         centerlines=_dashed(centers),
-        edges=_long_edges(length, width, _side_mouths(spec)),
+        edges=spec.contours or _long_edges(length, width, _side_mouths(spec)),
     )
 
 
@@ -124,6 +127,14 @@ def _accessory(spec: PartSpec, slot: str | None) -> TrackFigure:
     assert profile is not None
     active = slot if slot in profile.slots else None
     outline = placed_outline(spec, active)
+    if profile.host_shape == HOST_CUSTOM:
+        return TrackFigure(
+            roadway=outline,
+            road_arc=None,
+            slots=(),
+            centerlines=(),
+            edges=spec.contours or _outline_edges(outline),
+        )
     if profile.host_shape == HOST_STRAIGHT:
         length = profile.host_length_mm or 0.0
         return TrackFigure(
@@ -268,7 +279,7 @@ def _arc_figure(spec: PartSpec) -> TrackFigure:
             )
             for left, right in pairwise(radii)
         )
-    edges = (
+    edges = spec.contours or (
         SlotPath((SlotSpan.arc(0.0, 0.0, road.outer_mm, road.start_deg, angle),)),
         SlotPath((SlotSpan.arc(0.0, 0.0, road.inner_mm, road.start_deg, angle),)),
     )
@@ -298,7 +309,7 @@ def _crossing(spec: PartSpec) -> TrackFigure:
         road_arc=None,
         slots=tuple(slots),
         centerlines=_dashed(tuple(centers)),
-        edges=_outline_edges(spec.outline),
+        edges=spec.contours or _outline_edges(spec.outline),
     )
 
 
@@ -488,6 +499,16 @@ def _dashed(paths: tuple[SlotPath, ...]) -> tuple[SlotPath, ...]:
 
 
 def _dash_span(span: SlotSpan) -> tuple[SlotSpan, ...]:
+    if span.kind == SPAN_BEZIER:
+        segment = as_segment(span)
+        length = segment.length_mm()
+        return tuple(
+            SlotSpan.line(start[0], start[1], end[0], end[1])
+            for start, end in (
+                (segment.point_at(left), segment.point_at(right))
+                for left, right in _dash_fractions(length, CENTER_DASH_MM, CENTER_GAP_MM)
+            )
+        )
     if span.kind == SPAN_ARC:
         length = abs(math.radians(span.sweep_deg)) * span.radius_mm
         pieces = _dash_fractions(length, CENTER_DASH_MM, CENTER_GAP_MM)

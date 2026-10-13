@@ -47,13 +47,15 @@ from slot_racing.modules.track_planner.parts import (
     PartRecord,
     PartSpec,
     catalog_storage_key,
-    decode_slot_paths,
+    decode_geometry,
+    encode_geometry,
     encode_slot_paths,
     identity_key,
     merge_preserved_geometry,
     require_scale,
     same_geometry,
     standard_catalog,
+    validate_part_geometry,
 )
 from slot_racing.modules.track_planner.trace import trace
 
@@ -121,6 +123,7 @@ class PartLibrary:
             self._ensure_packages(session)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
+        validate_part_geometry(spec)
         try:
             with self._database.session() as session:
                 self._reject_duplicate(session, spec)
@@ -148,6 +151,7 @@ class PartLibrary:
                     definition = self._current_of(session, definition.lineage_id)
                 stored = self._record(session, definition).spec
                 spec = merge_preserved_geometry(stored, spec)
+                validate_part_geometry(spec)
                 if not spec.manufacturer.strip():
                     spec = replace(spec, manufacturer=definition.manufacturer or "")
                 self._reject_duplicate(session, spec, except_id=definition.id)
@@ -703,7 +707,7 @@ class PartLibrary:
             angle_deg=spec.angle_deg,
             lane_count=spec.lane_count,
             outline=[list(point) for point in spec.outline],
-            slot_paths=encode_slot_paths(spec.slot_paths),
+            slot_paths=encode_geometry(spec),
             lineage_id=lineage_id or uuid4().hex,
             revision=revision,
             is_current=True,
@@ -740,6 +744,12 @@ class PartLibrary:
             .where(TrackPartConnector.part_id == definition.id)
             .order_by(TrackPartConnector.sort_order, TrackPartConnector.id)
         )
+        slots, contours, edges = decode_geometry(definition.slot_paths)
+        profile = _attachment_profile(definition)
+        if profile is not None:
+            matched = next((edge.spans for edge in edges if edge.slot in profile.slots), ())
+            profile = replace(profile, edge=matched)
+            edges = ()
         spec = PartSpec(
             article_number=definition.article_number,
             scale=definition.scale,
@@ -764,8 +774,10 @@ class PartLibrary:
                 for connector in connectors
             ),
             outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
-            slot_paths=decode_slot_paths(definition.slot_paths),
-            attachment=_attachment_profile(definition),
+            slot_paths=slots,
+            attachment=profile,
+            contours=contours,
+            border_edges=edges,
             manufacturer=definition.manufacturer or "",
             description=definition.description or "",
         )
@@ -849,7 +861,7 @@ class PartLibrary:
         definition.angle_deg = spec.angle_deg
         definition.lane_count = spec.lane_count
         definition.outline = [list(point) for point in spec.outline]
-        definition.slot_paths = encode_slot_paths(spec.slot_paths)
+        definition.slot_paths = encode_geometry(spec)
         definition.origin = origin
         if spec.manufacturer.strip():
             definition.manufacturer = spec.manufacturer.strip()

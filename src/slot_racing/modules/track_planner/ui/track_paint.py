@@ -35,7 +35,13 @@ from slot_racing.modules.track_planner.appearance import (
     roadway_fill,
 )
 from slot_racing.modules.track_planner.figure import RoadArc, TrackFigure, track_figure
-from slot_racing.modules.track_planner.parts import SPAN_ARC, PartSpec, SlotPath, SlotSpan
+from slot_racing.modules.track_planner.parts import (
+    SPAN_ARC,
+    SPAN_BEZIER,
+    PartSpec,
+    SlotPath,
+    SlotSpan,
+)
 from slot_racing.uikit.theme import COLORS
 
 _MIN_PX = 1.2
@@ -253,6 +259,10 @@ def _grooves(paths: tuple[SlotPath, ...]) -> QPainterPath:
 def _add_span(path: QPainterPath, span: SlotSpan) -> None:
     if span.kind == SPAN_ARC:
         _add_arc(path, span.x0, span.y0, span.radius_mm, span.start_deg, span.sweep_deg, move=True)
+        return
+    if span.kind == SPAN_BEZIER:
+        path.moveTo(span.x0, span.y0)
+        path.cubicTo(span.c1x, span.c1y, span.c2x, span.c2y, span.x1, span.y1)
         return
     path.moveTo(span.x0, span.y0)
     path.lineTo(span.x1, span.y1)
