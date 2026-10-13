@@ -1,41 +1,18 @@
-"""Graphical part editor, model side: geometry edits, lanes, joints, contours, borders, tools."""
+"""Geometry edits the part model can express: lanes, joints, contours and borders.
+
+The former drawing tools are gone. These tests call the Qt-free operations directly.
+"""
 
 from __future__ import annotations
 
 import math
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
 from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner import editing as ed
 from slot_racing.modules.track_planner.attachment import attachment_fits
-from slot_racing.modules.track_planner.edit_session import (
-    KIND_CONNECTOR,
-    KIND_POINT,
-    KIND_SEGMENT,
-    EditSession,
-    Snapping,
-    Target,
-    hit_targets,
-    lane_rows,
-    next_target,
-    snap_point,
-)
-from slot_racing.modules.track_planner.edit_tools import (
-    TOOL_ADD_POINT,
-    TOOL_ARC,
-    TOOL_BEZIER,
-    TOOL_CONNECTOR,
-    TOOL_DELETE,
-    TOOL_LINE,
-    TOOL_MOVE,
-    TOOL_REMOVE_POINT,
-    TOOL_SELECT,
-    TOOL_SPLIT,
-    EditController,
-)
 from slot_racing.modules.track_planner.geometry import (
     CubicBezier,
     LineSegment,
@@ -52,7 +29,6 @@ from slot_racing.modules.track_planner.parametric import (
 )
 from slot_racing.modules.track_planner.parts import (
     BORDER,
-    CURVE,
     PATH_SLOT,
     SPAN_BEZIER,
     SPECIAL,
@@ -67,8 +43,6 @@ from slot_racing.modules.track_planner.parts import (
     same_geometry,
     standard_catalog,
 )
-
-TOL = 8.0
 
 
 def _draft(length: float = 400.0, *, category: str = STRAIGHT, body: str = "straight") -> PartDraft:
@@ -101,48 +75,8 @@ def _straight(length: float = 400.0, name: str = "Eigen") -> PartSpec:
     )
 
 
-def _border() -> PartSpec:
-    return spec_from_draft(
-        _draft(220.0, category=BORDER, body="border"),
-        article_number="EB-R",
-        scale="1:24",
-        name="Rand",
-        manufacturer="",
-        description="",
-        height_mm=None,
-        validate_identity=False,
-    )
-
-
 def _catalog(name: str) -> PartSpec:
     return next(spec for spec in standard_catalog() if spec.name == name)
-
-
-def _controller(spec: PartSpec) -> EditController:
-    return EditController(EditSession(spec))
-
-
-def _keys(session: EditSession) -> set[str]:
-    return {issue.key for issue in session.issues()}
-
-
-def _drag(controller: EditController, start: tuple[float, float], end: tuple[float, float]) -> None:
-    controller.press(start[0], start[1], TOL)
-    controller.move(end[0], end[1], TOL, pressed=True)
-    controller.release(end[0], end[1], TOL)
-
-
-def _engstelle(controller: EditController) -> None:
-    """Two lanes that run straight in and out and squeeze to the middle."""
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_ADD_POINT)
-    for x in (-150, -70, 70, 150):
-        controller.press(x, -50, TOL)
-        controller.press(x, 50, TOL)
-    controller.set_tool(TOOL_MOVE)
-    for x in (-70, 70):
-        _drag(controller, (x, -50), (x, -20))
-        _drag(controller, (x, 50), (x, 20))
 
 
 # --------------------------------------------------------------------------------------------
@@ -272,18 +206,15 @@ def test_tangent_modes_smooth_and_symmetric_remove_the_kink() -> None:
 
 
 def test_a_gap_is_found_blocks_saving_and_can_be_closed() -> None:
-    session = EditSession(_straight())
-    controller = EditController(session)
-    controller.run(ed.explicit)
-    ref = ed.groove_refs(session.spec)[0]
-    controller.run(lambda spec: ed.split_span(spec, ref, 0, 0.3))
-    controller.run(lambda spec: ed.split_span(spec, ref, 1, 0.5))
-    controller.run(lambda spec: ed.delete_span(spec, ref, 1))
-    assert "error.planner.editor.gap" in _keys(session)
-    assert lane_rows(session.spec)[0].length_mm is None
-    controller.run(lambda spec: ed.close_gap(spec, ref, 0))
-    assert "error.planner.editor.gap" not in _keys(session)
-    assert lane_rows(session.spec)[0].length_mm == pytest.approx(400.0)
+    spec = ed.explicit(_straight())
+    ref = ed.groove_refs(spec)[0]
+    spec = ed.split_span(spec, ref, 0, 0.3)
+    spec = ed.split_span(spec, ref, 1, 0.5)
+    spec = ed.delete_span(spec, ref, 1)
+    assert "error.planner.editor.gap" in {issue.key for issue in ed.validate_editing(spec)}
+    closed = ed.close_gap(spec, ref, 0)
+    assert "error.planner.editor.gap" not in {issue.key for issue in ed.validate_editing(closed)}
+    assert ed.geometry_path(closed, ref).length_mm() == pytest.approx(400.0)
 
 
 def test_kinks_are_allowed_and_only_reported_as_a_joint() -> None:
@@ -331,9 +262,9 @@ def test_lanes_can_be_added_removed_swapped_and_measured() -> None:
     assert all(item.lanes == (1, 2) for item in narrower.connectors if item.kind == TRACK)
     with pytest.raises(ValidationError):
         ed.remove_lane(ed.remove_lane(narrower, 2), 1)
-    rows = lane_rows(ed.finalize(wider, spec))
-    assert [row.lane for row in rows] == [1, 2, 3]
-    assert all(row.length_mm == pytest.approx(400.0) for row in rows)
+    paths = driving_paths(ed.finalize(wider, spec))
+    assert [path.lane for path in paths] == [1, 2, 3]
+    assert all(path.length_mm() == pytest.approx(400.0) for path in paths)
 
 
 def test_five_lanes_are_refused() -> None:
@@ -344,25 +275,51 @@ def test_five_lanes_are_refused() -> None:
         ed.add_lane(spec)
 
 
+def _squeeze(spec: PartSpec) -> PartSpec:
+    """Both lanes run straight in and out and meet nearer the middle."""
+    grooves = []
+    middles = (-20.0, 20.0)
+    index = 0
+    for path in spec.slot_paths:
+        if path.kind != PATH_SLOT:
+            continue
+        y0 = path.spans[0].y0
+        y_mid = middles[index]
+        index += 1
+        grooves.append(
+            replace(
+                path,
+                spans=(
+                    SlotSpan.line(-200.0, y0, -150.0, y0),
+                    SlotSpan.line(-150.0, y0, -70.0, y_mid),
+                    SlotSpan.line(-70.0, y_mid, 70.0, y_mid),
+                    SlotSpan.line(70.0, y_mid, 150.0, y0),
+                    SlotSpan.line(150.0, y0, 200.0, y0),
+                ),
+            )
+        )
+    centers = tuple(path for path in spec.slot_paths if path.kind != PATH_SLOT)
+    return replace(spec, slot_paths=(*grooves, *centers))
+
+
 def test_a_part_with_a_narrowing_and_variable_pitch_is_valid_and_measured() -> None:
-    controller = _controller(_straight())
-    _engstelle(controller)
-    session = controller.session
-    assert _keys(session) == set()
-    rows = lane_rows(session.result())
-    assert rows[0].length_mm is not None
-    assert rows[0].length_mm == pytest.approx(rows[1].length_mm or 0.0)
-    assert rows[0].length_mm > 400.0
-    assert session.result().category == SPECIAL
+    spec = ed.explicit(_straight())
+    result = ed.finalize(_squeeze(spec), spec)
+    assert ed.validate_editing(result) == ()
+    lengths = [path.length_mm() for path in driving_paths(result)]
+    assert len(lengths) == 2
+    assert lengths[0] == pytest.approx(lengths[1])
+    assert lengths[0] > 400.0
+    assert result.category == SPECIAL
 
 
 def test_a_groove_that_leaves_its_joint_at_an_angle_is_reported() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    ref = ed.groove_refs(controller.spec)[0]
-    controller.run(lambda spec: ed.split_span(spec, ref, 0, 0.5))
-    controller.run(lambda spec: ed.move_point(spec, ed.PointRef(ref, 0, "end"), 0.0, -20.0))
-    assert "error.planner.editor.direction" in _keys(controller.session)
+    spec = ed.explicit(_straight())
+    ref = ed.groove_refs(spec)[0]
+    spec = ed.split_span(spec, ref, 0, 0.5)
+    spec = ed.move_point(spec, ed.PointRef(ref, 0, "end"), 0.0, -20.0)
+    keys = {issue.key for issue in ed.validate_editing(spec)}
+    assert "error.planner.editor.direction" in keys
 
 
 def test_rail_joints_report_missing_lanes_wrong_lanes_and_too_few_joints() -> None:
@@ -472,259 +429,12 @@ def test_a_border_with_rails_or_grooves_is_not_valid() -> None:
     assert "error.planner.editor.attach_edge" in {i.key for i in ed.validate_editing(with_rail)}
 
 
-# --------------------------------------------------------------------------------------------
-# Picking and snapping
-
-
-def test_hits_are_ordered_handles_first_and_follow_the_zoom_tolerance() -> None:
+def test_a_narrowing_keeps_its_rails_and_is_not_silently_a_curve() -> None:
     spec = ed.explicit(_straight())
-    near = hit_targets(spec, -198.0, -49.0, 5.0)
-    assert near[0].kind == KIND_POINT
-    assert near[0].handle == "start"
-    assert hit_targets(spec, -198.0, -49.0, 0.5) == []
-    on_line = hit_targets(spec, 0.0, -48.0, 5.0)
-    assert on_line[0].kind == KIND_SEGMENT
-    joint = hit_targets(spec, -199.0, 1.0, 5.0, layers={ed.LAYER_GROOVE})
-    assert joint[0].kind == KIND_CONNECTOR
-    tip = hit_targets(spec, -240.0, 0.0, 5.0, arrow_mm=40.0)
-    assert tip[0].handle == "tip"
-
-
-def test_a_repeated_click_cycles_through_overlapping_items() -> None:
-    spec = ed.explicit(_straight())
-    found = hit_targets(spec, -200.0, 0.0, 8.0)
-    assert len(found) >= 2
-    first = next_target(found, None, cycle=False)
-    second = next_target(found, first, cycle=True)
-    assert second is not None
-    assert not second.same_item(first)
-    assert next_target(found, Target(KIND_POINT), cycle=True) == found[0]
-    assert next_target([], None, cycle=True) is None
-
-
-def test_the_four_editor_snaps_are_independent_and_switchable() -> None:
-    spec = ed.explicit(_straight())
-    off = Snapping(points=False)
-    assert snap_point(spec, 13.0, 27.0, off, 5.0) == snap_point(spec, 13.0, 27.0, off, 5.0)
-    plain = snap_point(spec, 13.2, 27.7, off, 5.0)
-    assert (plain.x, plain.y, plain.kind) == (13.2, 27.7, "")
-    grid = snap_point(spec, 13.2, 27.7, Snapping(grid=True, grid_mm=5.0, points=False), 5.0)
-    assert (grid.x, grid.y, grid.kind) == (15.0, 30.0, "grid")
-    fine = snap_point(spec, 13.2, 27.7, Snapping(grid=True, grid_mm=1.0, points=False), 5.0)
-    assert (fine.x, fine.y) == (13.0, 28.0)
-    node = snap_point(spec, -198.0, -48.0, Snapping(grid=True, grid_mm=50.0), 5.0)
-    assert (node.x, node.y, node.kind) == (-200.0, -50.0, "point")
-    skipped = snap_point(spec, -198.0, -48.0, Snapping(points=True), 5.0, skip=[(-200.0, -50.0)])
-    assert skipped.kind == ""
-    angled = snap_point(
-        spec,
-        100.0,
-        12.0,
-        Snapping(points=False, angle=True, angle_step_deg=45.0),
-        5.0,
-        anchor=(0.0, 0.0),
-    )
-    assert math.degrees(math.atan2(angled.y, angled.x)) == pytest.approx(0.0)
-    tangent = snap_point(
-        spec,
-        100.0,
-        3.0,
-        Snapping(points=False, tangent=True),
-        5.0,
-        anchor=(0.0, 0.0),
-        heading_deg=0.0,
-    )
-    assert (tangent.x, tangent.y, tangent.kind) == (100.0, 0.0, "tangent")
-    with pytest.raises(ValidationError):
-        snap_point(spec, float("nan"), 0.0, Snapping(), 5.0)
-
-
-def test_planner_snaps_are_not_part_of_the_editor_snap_module() -> None:
-    import ast
-
-    import slot_racing.modules.track_planner.edit_session as session_module
-    import slot_racing.modules.track_planner.edit_tools as tools_module
-
-    for module in (session_module, tools_module):
-        tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
-        used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        used |= {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-            for alias in node.names
-        }
-        assert not used & {"snap_pose", "attach_accessory", "attachment_fits", "join_pose"}
-
-
-# --------------------------------------------------------------------------------------------
-# Tools and history
-
-
-def test_drawing_a_line_chain_adds_segments_one_undo_step_each() -> None:
-    controller = _controller(replace(_straight(), slot_paths=()))
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_LINE)
-    controller.set_layer(ed.LAYER_CENTER)
-    controller.press(0, 100, TOL)
-    controller.press(50, 100, TOL)
-    controller.press(50, 150, TOL)
-    path = controller.chain
-    assert path is not None
-    assert len(ed.spans_of(controller.spec, path)) == 2
-    assert controller.session.undo()
-    assert len(ed.spans_of(controller.spec, path)) == 1
-    assert controller.session.redo()
-    assert len(ed.spans_of(controller.spec, path)) == 2
-    controller.cancel()
-    assert not controller.drawing
-
-
-def test_drawing_an_arc_needs_three_points_and_refuses_a_straight_row() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_ARC)
-    controller.set_layer(ed.LAYER_CENTER)
-    before = controller.spec
-    controller.press(0, 100, TOL)
-    controller.press(50, 100, TOL)
-    controller.press(100, 100, TOL)
-    assert controller.message == "error.planner.editor.arc_points"
-    assert controller.spec == before
-    controller.cancel()
-    controller.press(0, 100, TOL)
-    controller.press(50, 150, TOL)
-    controller.press(100, 100, TOL)
-    assert controller.message == ""
-    arcs = [
-        span for path in controller.spec.slot_paths for span in path.spans if span.kind == "arc"
-    ]
-    assert len(arcs) == 1
-
-
-def test_a_bezier_chain_continues_the_tangent_of_its_predecessor() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_LINE)
-    controller.set_layer(ed.LAYER_CENTER)
-    controller.press(0, 100, TOL)
-    controller.press(50, 100, TOL)
-    controller.set_tool(TOOL_BEZIER)
-    controller.press(50, 100, TOL)
-    controller.press(150, 160, TOL)
-    path = next(
-        ed.PathRef(ed.LAYER_CENTER, index)
-        for index, item in enumerate(controller.spec.slot_paths)
-        if len(item.spans) == 2
-    )
-    assert ed.joint_report(controller.spec, path)[0][1] < 1.0
-
-
-def test_dragging_moves_a_point_live_and_writes_exactly_one_undo_step() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_MOVE)
-    ref = ed.groove_refs(controller.spec)[0]
-    start = controller.spec
-    controller.press(-200, -50, TOL)
-    controller.move(-190, -40, TOL, pressed=True)
-    assert controller.session.can_undo
-    controller.move(-180, -30, TOL, pressed=True)
-    controller.release(-180, -30, TOL)
-    spans = ed.spans_of(controller.spec, ref)
-    assert (spans[0].x0, spans[0].y0) == pytest.approx((-180.0, -30.0))
-    assert controller.session.undo()
-    assert controller.spec == start
-
-
-def test_a_click_without_movement_selects_and_changes_nothing() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_SELECT)
-    before = controller.spec
-    controller.press(-200, -50, TOL)
-    controller.release(-200, -50, TOL)
-    assert controller.selection is not None
-    assert controller.selection.kind == KIND_POINT
-    assert controller.spec == before
-
-
-def test_escape_during_a_drag_restores_the_part() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    controller.set_tool(TOOL_MOVE)
-    before = controller.spec
-    controller.press(-200, -50, TOL)
-    controller.move(-100, 0, TOL, pressed=True)
-    assert controller.spec != before
-    controller.cancel()
-    assert controller.spec == before
-
-
-def test_every_edit_tool_changes_what_it_names() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    ref = ed.groove_refs(controller.spec)[0]
-
-    def count() -> int:
-        return len(ed.spans_of(controller.spec, ref))
-
-    controller.set_tool(TOOL_ADD_POINT)
-    controller.press(-100, -50, TOL)
-    assert count() == 2
-    controller.set_tool(TOOL_SPLIT)
-    controller.press(100, -50, TOL)
-    assert count() == 3
-    controller.press(-100, -50, TOL)
-    assert len(controller.spec.slot_paths) == 4
-    controller.session.undo()
-    controller.set_tool(TOOL_REMOVE_POINT)
-    controller.press(-100, -50, TOL)
-    assert count() == 2
-    controller.set_tool(TOOL_DELETE)
-    controller.press(150, -50, TOL)
-    assert count() == 1
-    controller.set_tool(TOOL_CONNECTOR)
-    controller.press(-200, 0, TOL)
-    assert controller.selection is not None
-    assert controller.selection.kind == KIND_CONNECTOR
-
-
-def test_undo_redo_follow_any_change_and_a_new_change_clears_redo() -> None:
-    session = EditSession(_straight())
-    controller = EditController(session)
-    assert not session.can_undo
-    controller.run(ed.explicit)
-    controller.run(lambda spec: ed.set_connector(spec, 0, direction_deg=180.0, x_mm=-210.0))
-    assert session.can_undo
-    assert session.undo()
-    assert session.can_redo
-    controller.run(lambda spec: ed.set_connector(spec, 0, x_mm=-190.0))
-    assert not session.can_redo
-    while session.undo():
-        pass
-    assert session.spec == session.shown
-    assert not session.changed
-
-
-def test_an_invalid_change_leaves_the_part_and_the_history_alone() -> None:
-    controller = _controller(_straight())
-    controller.run(ed.explicit)
-    before = controller.spec
-    assert not controller.run(lambda spec: ed.split_span(spec, ed.PathRef(ed.LAYER_GROOVE, 9), 0))
-    assert controller.spec == before
-    assert controller.message == "error.planner.geometry"
-
-
-def test_the_saved_part_matches_the_drawn_lines_and_keeps_its_flags() -> None:
-    controller = _controller(_straight())
-    _engstelle(controller)
-    result = controller.session.result()
+    result = ed.finalize(_squeeze(spec), spec)
     assert result.category == SPECIAL
     assert not same_geometry(result, _straight())
     assert len(ed.rail_connectors(result)) == 2
     assert result.lane_count == 2
-    assert result.category != CURVE
     assert ed.validate_editing(result) == ()
     assert isinstance(as_segment(ed.spans_of(result, ed.groove_refs(result)[0])[0]), LineSegment)
