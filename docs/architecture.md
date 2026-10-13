@@ -385,6 +385,23 @@ layout)`.
 
 Standing start: with sector positions, lap 1 begins at `RaceStarted`. A layout that only times start/finish starts that lane's lap clock on the first crossing after GO and completes lap 1 on the next crossing (`t2 - t1`). The race clock still starts at GO.
 
+## Active lanes and heats
+
+`Track.lane_count` is the physical track. `Race.active_lanes` is the choice for that race. Empty means “use the physical count”, which is how races stored before the choice still load. The choice is only stored as 1 or 2 on a two-lane track. A one-lane track cannot be asked for two lanes. Three- and four-lane tracks keep their existing rotation and do not offer the one-or-two selector. Hardware, sensors and the timing layout stay on the physical lanes.
+
+The race assistant shows **Aktive Spuren** on the mode step when the track has two lanes. The default is both. Changing it before the first heat rebuilds the open plan and keeps the drivers. It is rejected once a heat has been driven or the race is no longer editable.
+
+Planning uses the active count:
+
+- One active lane: drivers take lane 1 one after another. There is no lane change. The plan is complete when every driver has that one visit.
+- Two active lanes, two or more drivers, and no heat driven yet: `pairwise_cycle`. The index steps by two. An odd field already visits both lanes in one period. An even field repeats that period with lane 1 and lane 2 swapped, so 2, 4, 6 and 8 drivers need 2, 4, 6 and 8 heats. One driver on two lanes still drives the two lanes in sequence.
+- After a completed heat, a postponed driver, a disqualification or a roster change once something has been driven: `plan_remaining` schedules the open `(driver, lane)` obligations. Postponing one driver leaves the partner free to be paired with somebody else. The postponed driver keeps every lane they have not driven. Completed heats, laps and times stay. A driver may sit alone when nobody else still needs the other lane.
+- A roster change before any heat rebuilds the pairwise cycle for the new list. That plan is still a full visit of every selected lane.
+
+There is no button that postpones a whole heat. Postpone each driver who cannot start. The second postponement holds the other driver out of the next heat in the same way.
+
+A normal finish still follows the stored plan. If that plan is missing a required visit, `finish_heat` adds the remaining obligations and leaves the race open. Abort does not. Disqualification removes only that driver's open seats. An open time trial (no duration and no heat plan) is not given a plan. A time trial that has a duration uses the same heats; each heat lasts that many minutes. Lap scoring and time-trial scoring are unchanged: the best lap is the fastest single lap, a slower lane does not replace it, and the two lanes are not averaged.
+
 ## Database
 
 SQLAlchemy 2 typed models on SQLite, migrated with Alembic. `Database` enables SQLite foreign
@@ -486,6 +503,12 @@ Startup order for a race, when the display is enabled:
 3. Build the start schedule and publish it before the first red lamp.
 4. Show the lamps and run the countdown. No browser has to be connected.
 5. The engine starts at lights-out and `start_committed` is published afterwards.
+   The browser gantry is part of the scene only while the heat is still `created`.
+   After a valid `start_committed` the housing is hidden, including when an older
+   scene arrives later. The next heat's countdown shows it again. Abort, the
+   finish and the pause between heats leave it hidden. `planned_go_ns` and a
+   dropped connection still do not authorize GO. The PC gantry can stay up for
+   one lamp interval after GO; that widget is not the browser scene.
 
 `RaceController` holds at most one runner. A second start is refused while that
 runner is still going. After finish or abort the runner is no longer active; the

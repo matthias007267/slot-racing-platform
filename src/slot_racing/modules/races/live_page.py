@@ -144,6 +144,7 @@ _HUD_HTML = """<!DOCTYPE html>
   var mismatchSeq = null;
   var lastSceneSeq = -1;
   var lastLights = null;
+  var lightsClosed = false;
   var startGate = false;
   var queuedScene = null;
   var startDisplay = freshStart("idle");
@@ -666,11 +667,23 @@ _HUD_HTML = """<!DOCTYPE html>
     if (startDisplay.authorizes_go || startDisplay.state !== "counting") return false;
     return index < currentLit();
   }
+  /*__GANTRY_START__*/
+  function gantryVisible(lights, display) {
+    if (!lights || !lights.visible) return false;
+    if (!display) return true;
+    if (display.lights_closed) return false;
+    if (display.state === "committed") return false;
+    return true;
+  }
+  /*__GANTRY_END__*/
   function paintLights(lights) {
     lastLights = lights || null;
     var host = ensure(stage, "lights", "div");
     host.id = "lights";
-    var visible = !!(lights && lights.visible);
+    var visible = gantryVisible(lights, {
+      lights_closed: lightsClosed,
+      state: startDisplay.state
+    });
     host.hidden = !visible;
     if (visible) {
       host.style.left = px(lights.x);
@@ -1299,6 +1312,8 @@ _HUD_HTML = """<!DOCTYPE html>
     }
     var entered = startDisplay.state === "counting" &&
       (startDisplay.sequence_id !== previous || previousState !== "counting");
+    if (startDisplay.state === "committed") lightsClosed = true;
+    if (entered) lightsClosed = false;
     if (entered || startDisplay.state === "revoked") {
       lampPeak = 0;
       hudLit = -1;

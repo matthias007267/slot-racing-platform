@@ -8,17 +8,18 @@ from pytestqt.qtbot import QtBot
 
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.errors import ValidationError
+from slot_racing.modules.races.models import Race
 from slot_racing.modules.races.planning import (
     build_rotation,
+    effective_lane_count,
     pairwise_cycle,
     pairwise_heats,
     pairwise_period,
-    pending_pairwise,
     plan_remaining,
     rotation_is_complete,
 )
 from slot_racing.modules.races.runner import LiveRow
-from slot_racing.modules.races.service import parse_duration_minutes
+from slot_racing.modules.races.service import RaceService, parse_duration_minutes
 from slot_racing.modules.races.types import HeatBriefing, HeatSeat, LaneChange, RaceInfo
 from slot_racing.modules.races.ui.formatting import lane_gaps
 from slot_racing.modules.races.ui.heat_gate import HeatGate
@@ -31,7 +32,23 @@ from tests.support.start_sequence import release_start_lights
 
 
 def test_rotation_gives_every_driver_every_lane_once() -> None:
-    for drivers, lanes in ((2, 3), (2, 4), (5, 2), (3, 3), (1, 4), (4, 4)):
+    cases = (
+        (2, 3),
+        (2, 4),
+        (5, 2),
+        (3, 3),
+        (1, 4),
+        (4, 4),
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (2, 2),
+        (4, 1),
+        (4, 2),
+        (6, 2),
+        (8, 2),
+    )
+    for drivers, lanes in cases:
         heats = build_rotation(list(range(drivers)), lanes)
         assert rotation_is_complete(heats, list(range(drivers)), lanes)
         for heat in heats:
@@ -41,7 +58,10 @@ def test_rotation_gives_every_driver_every_lane_once() -> None:
 
 def test_two_lanes_pair_drivers_and_then_repeat() -> None:
     expected = {
-        2: (((1, 1), (2, 2)),),
+        2: (
+            ((1, 1), (2, 2)),
+            ((2, 1), (1, 2)),
+        ),
         3: (
             ((1, 1), (2, 2)),
             ((3, 1), (1, 2)),
@@ -50,6 +70,8 @@ def test_two_lanes_pair_drivers_and_then_repeat() -> None:
         4: (
             ((1, 1), (2, 2)),
             ((3, 1), (4, 2)),
+            ((2, 1), (1, 2)),
+            ((4, 1), (3, 2)),
         ),
         5: (
             ((1, 1), (2, 2)),
@@ -62,6 +84,9 @@ def test_two_lanes_pair_drivers_and_then_repeat() -> None:
             ((1, 1), (2, 2)),
             ((3, 1), (4, 2)),
             ((5, 1), (6, 2)),
+            ((2, 1), (1, 2)),
+            ((4, 1), (3, 2)),
+            ((6, 1), (5, 2)),
         ),
         7: (
             ((1, 1), (2, 2)),
@@ -75,20 +100,21 @@ def test_two_lanes_pair_drivers_and_then_repeat() -> None:
     }
     for count, cycle in expected.items():
         drivers = list(range(1, count + 1))
-        assert pairwise_period(count) == len(cycle)
+        period = count if count % 2 else count // 2
+        assert pairwise_period(count) == period
+        assert len(cycle) == (period if count % 2 else period * 2)
         assert pairwise_cycle(drivers) == cycle
         assert build_rotation(drivers, 2) == cycle
-        repeated = pairwise_heats(drivers, len(cycle) * 2)
-        assert repeated[: len(cycle)] == cycle
-        assert repeated[len(cycle) :] == cycle
+        assert rotation_is_complete(cycle, drivers, 2)
+        first = pairwise_heats(drivers, period)
+        assert cycle[:period] == first
+        repeated = pairwise_heats(drivers, period * 2)
+        assert repeated[:period] == first
+        assert repeated[period:] == first
         for heat in cycle:
             assert [lane for _driver, lane in heat] == [1, 2]
-        if count % 2 == 0:
-            seated: list[int] = []
-            for heat in cycle:
-                for driver, _lane in heat:
-                    assert driver not in seated
-                    seated.append(driver)
+        for lane in (1, 2):
+            seated = sorted(driver for heat in cycle for driver, used in heat if used == lane)
             assert seated == drivers
 
 
@@ -152,10 +178,9 @@ def test_enrolling_drivers_plans_a_heat_for_every_lane(env: Env, lanes: int) -> 
     race = _enrolled(env, lanes=lanes, drivers=lanes)
     plan = env.races.heat_plan(race.id)
     ids = [participant.id for participant in race.participants]
+    assert rotation_is_complete([heat.seats for heat in plan], ids, lanes)
     if lanes == 2:
-        assert [heat.seats for heat in plan] == [((ids[0], 1), (ids[1], 2))]
-    else:
-        assert rotation_is_complete([heat.seats for heat in plan], ids, lanes)
+        assert len(plan) == 2
     assert env.races.require_race(race.id).participants[0].lane is None
 
 
@@ -173,9 +198,14 @@ def test_the_next_heat_continues_the_pairwise_cycle(env: Env) -> None:
     ids = [participant.id for participant in race.participants]
     _finish_heat(env, race.id)
     assert env.races.require_race(race.id).status is RaceStatus.READY
-    planned = [heat for heat in env.races.heat_plan(race.id) if heat.status == "planned"]
+    stored = env.races.heat_plan(race.id)
+    planned = [heat for heat in stored if heat.status == "planned"]
+    completed = [heat for heat in stored if heat.status == "completed"]
     assert planned[0].seats == ((ids[2], 1), (ids[3], 2))
     assert [heat.seats for heat in planned] == list(pairwise_cycle(ids)[1:])
+    assert rotation_is_complete(
+        [heat.seats for heat in completed] + [heat.seats for heat in planned], ids, 2
+    )
 
 
 def test_adding_and_removing_drivers_rebuilds_the_pairs(env: Env) -> None:
@@ -192,7 +222,7 @@ def test_adding_and_removing_drivers_rebuilds_the_pairs(env: Env) -> None:
     assert [participant.driver_id for participant in current.participants][-1] == added
     restored = [participant.id for participant in current.participants]
     assert [heat.seats for heat in env.races.heat_plan(race.id)] == list(pairwise_cycle(restored))
-    assert pending_pairwise(restored, {(restored[0], 1)})[0] == ((restored[1], 2),)
+    assert rotation_is_complete([heat.seats for heat in env.races.heat_plan(race.id)], restored, 2)
 
 
 def test_two_heats_combine_laps_and_rank_the_race(env: Env) -> None:
@@ -278,6 +308,10 @@ def test_each_time_trial_heat_lasts_the_configured_minutes(env: Env) -> None:
         driver, vehicle = env.pair(index)
         env.races.enroll_driver(race.id, driver, vehicle)
     env.races.plan_heats(race.id)
+    ids = [participant.id for participant in env.races.require_race(race.id).participants]
+    plan = env.races.heat_plan(race.id)
+    assert len(plan) == 4
+    assert rotation_is_complete([heat.seats for heat in plan], ids, 2)
     runner = env.controller.start_race(race.id)
     env.clock.advance(60_000_000_000)
     runner.tick()
@@ -298,6 +332,7 @@ def test_a_time_trial_without_a_duration_stays_open(env: Env) -> None:
     env.clock.advance(120_000_000_000)
     runner.tick()
     assert runner.is_active
+    assert env.races.heat_plan(race.id) == []
 
 
 def test_the_wizard_uses_a_free_text_duration_and_no_lane_picker(qtbot: QtBot, env: Env) -> None:
@@ -525,9 +560,248 @@ def test_postponing_and_disqualifying_from_the_waiting_window(qtbot: QtBot, env:
     assert any(line.endswith("frei") for line in seated) or len(seated) == 2
 
 
-def _enrolled(env: Env, *, lanes: int, drivers: int, laps: int = 2) -> RaceInfo:
+def test_active_lanes_follow_the_track_until_a_race_chooses(env: Env) -> None:
+    two = env.track("Zwei", lanes=2)
+    race = env.races.create_race("Alt", two.id, 4)
+    assert race.lane_count == 2
+    assert race.active_lanes == 2
+    chosen = env.races.update_race(
+        race.id, race.name, two.id, 4, set_active_lanes=True, active_lanes=1
+    )
+    assert chosen.active_lanes == 1
+    assert chosen.lane_count == 2
+    reloaded = env.races.require_race(race.id)
+    assert reloaded.active_lanes == 1
+    four = env.track("Vier", lanes=4)
+    moved = env.races.update_race(race.id, race.name, four.id, 4)
+    assert moved.lane_count == 4
+    assert moved.active_lanes == 4
+    kept = env.races.update_race(
+        race.id, race.name, two.id, 4, set_active_lanes=True, active_lanes=1
+    )
+    assert kept.active_lanes == 1
+    assert kept.lane_count == 2
+    stored = Race(name="Schmal", target_laps=1)
+    with pytest.raises(ValidationError, match=r"error\.race\.active_lanes"):
+        RaceService._store_active_lanes(stored, 1, 2)
+    RaceService._store_active_lanes(stored, 1, None)
+    assert stored.active_lanes is None
+    assert effective_lane_count(None, 1) == 1
+
+
+@pytest.mark.parametrize(
+    ("drivers", "active", "heats"),
+    [
+        (1, 1, 1),
+        (1, 2, 2),
+        (2, 1, 2),
+        (2, 2, 2),
+        (3, 2, 3),
+        (4, 2, 4),
+        (5, 2, 5),
+        (6, 2, 6),
+        (8, 2, 8),
+    ],
+)
+def test_every_driver_covers_the_lanes_the_race_selected(
+    env: Env, drivers: int, active: int, heats: int
+) -> None:
+    race = _enrolled(env, lanes=2, drivers=drivers, active_lanes=active)
+    plan = env.races.heat_plan(race.id)
+    ids = [participant.id for participant in race.participants]
+    assert len(plan) == heats
+    assert rotation_is_complete([heat.seats for heat in plan], ids, active)
+    if active == 1:
+        assert {lane for heat in plan for _driver, lane in heat.seats} == {1}
+
+
+def test_postponing_one_driver_keeps_the_partner_in_the_next_heat(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=4)
+    ids = [participant.id for participant in race.participants]
+    held, partner = ids[0], ids[1]
+    briefing = env.races.postpone_driver(race.id, held)
+    assert briefing is not None
+    seated = {seat.participant_id for seat in briefing.seats if seat.participant_id is not None}
+    assert held not in seated
+    assert partner in seated
+    assert len(seated) == 2
+    assert rotation_is_complete([heat.seats for heat in env.races.heat_plan(race.id)], ids, 2)
+    env.races.postpone_driver(race.id, held)
+    assert rotation_is_complete([heat.seats for heat in env.races.heat_plan(race.id)], ids, 2)
+
+
+def test_a_finished_heat_stays_when_another_driver_is_postponed(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=4, laps=1)
+    ids = [participant.id for participant in race.participants]
+    _finish_heat(env, race.id)
+    before = [heat for heat in env.races.heat_plan(race.id) if heat.status == "completed"]
+    held = ids[2]
+    env.races.postpone_driver(race.id, held)
+    after = [heat for heat in env.races.heat_plan(race.id) if heat.status == "completed"]
+    assert [heat.seats for heat in after] == [heat.seats for heat in before]
+    assert rotation_is_complete([heat.seats for heat in env.races.heat_plan(race.id)], ids, 2)
+    assert env.races.get_laps(race.id)
+
+
+def test_disqualification_drops_only_the_open_lanes_of_that_driver(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=4, laps=1)
+    ids = [participant.id for participant in race.participants]
+    _finish_heat(env, race.id)
+    removed = ids[0]
+    assert not env.races.disqualify_driver(race.id, removed)
+    plan = env.races.heat_plan(race.id)
+    completed = [heat.seats for heat in plan if heat.status == "completed"]
+    assert any(driver == removed for heat in completed for driver, _lane in heat)
+    open_seats = [heat.seats for heat in plan if heat.status == "planned"]
+    assert all(driver != removed for heat in open_seats for driver, _lane in heat)
+    remaining = [driver for driver in ids if driver != removed]
+    covered = [tuple(seat for seat in heat.seats if seat[0] in set(remaining)) for heat in plan]
+    assert rotation_is_complete([heat for heat in covered if heat], remaining, 2)
+    assert env.races.get_laps(race.id)
+
+
+def test_a_shortened_plan_does_not_count_as_a_finished_race(env: Env) -> None:
+    from sqlalchemy import select
+
+    from slot_racing.modules.races.models import RaceHeat
+
+    race = _enrolled(env, lanes=2, drivers=4, laps=1)
+    ids = [participant.id for participant in race.participants]
+    runner = env.controller.start_race(race.id)
+    with env.runtime.database.session() as session:
+        planned = list(
+            session.scalars(
+                select(RaceHeat).where(
+                    RaceHeat.race_id == int(race.id), RaceHeat.status == "planned"
+                )
+            )
+        )
+        for heat in planned:
+            session.delete(heat)
+    for _ in range(30):
+        if not runner.is_active:
+            break
+        env.clock.advance(1_000_000_000)
+        runner.tick()
+    assert not runner.is_active
+    stored = env.races.require_race(race.id)
+    assert stored.status is RaceStatus.READY
+    plan = env.races.heat_plan(race.id)
+    assert rotation_is_complete([heat.seats for heat in plan], ids, 2)
+
+
+def test_a_slower_second_lane_does_not_replace_the_best_lap(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=1, laps=1, active_lanes=2)
+    _finish_heat(env, race.id)
+    _finish_heat(env, race.id)
+    stored = env.races.require_race(race.id)
+    assert stored.status is RaceStatus.FINISHED
+    laps = env.races.get_laps(race.id)
+    assert {lap.lane for lap in laps} == {1, 2}
+    best = min(lap.lap_time_ns for lap in laps)
+    assert env.races.get_results(race.id)[0].best_lap_ns == best
+
+
+def test_changing_active_lanes_before_the_start_rebuilds_the_plan(env: Env) -> None:
+    race = _enrolled(env, lanes=2, drivers=4)
+    ids = [participant.id for participant in race.participants]
+    track_id = race.track_id
+    assert track_id is not None
+    assert len(env.races.heat_plan(race.id)) == 4
+    updated = env.races.update_race(
+        race.id, race.name, track_id, race.laps, set_active_lanes=True, active_lanes=1
+    )
+    assert updated.active_lanes == 1
+    assert [participant.id for participant in updated.participants] == ids
+    plan = env.races.heat_plan(race.id)
+    assert rotation_is_complete([heat.seats for heat in plan], ids, 1)
+    runner = env.controller.start_race(race.id)
+    with pytest.raises(ValidationError, match=r"error\.race\.not_editable"):
+        env.races.update_race(
+            race.id,
+            race.name,
+            track_id,
+            race.laps,
+            set_active_lanes=True,
+            active_lanes=2,
+        )
+    runner.stop()
+
+
+def test_the_wizard_offers_one_or_two_lanes_only_on_a_two_lane_track(
+    qtbot: QtBot, env: Env
+) -> None:
+    wide = env.track("Zwei", lanes=2)
+    four = env.track("Vier", lanes=4)
+    anna = env.driver("Anna")
+    env.vehicle("Porsche", driver_id=anna.id)
+    window, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    window.show()
+    page.new_race()
+    wizard = page.wizard
+    wizard.name_edit.setText("Spurwahl")
+    assert wizard.go_next()
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(four.id))
+    assert wizard.go_next()
+    assert wizard.step == MODE
+    assert not wizard.active_lanes_combo.isVisible()
+    wizard.go_back()
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(wide.id))
+    assert wizard.go_next()
+    assert wizard.active_lanes_combo.isVisible()
+    assert wizard.active_lanes_combo.isEnabled()
+    assert wizard.active_lanes_combo.currentData() == 2
+    wizard.active_lanes_combo.setCurrentIndex(wizard.active_lanes_combo.findData(1))
+    assert wizard.go_next()
+    stored = env.races.require_race(wizard.race.id) if wizard.race is not None else None
+    assert stored is not None
+    assert stored.lane_count == 2
+    assert stored.active_lanes == 1
+    wizard.driver_combo.setCurrentIndex(wizard.driver_combo.findData(anna.id))
+    assert wizard.add_participant()
+    assert wizard.go_next()
+    assert "Aktive Spuren: 1" in wizard.overview_label.text()
+    assert "2 Spuren" in wizard.overview_label.text()
+
+
+def test_a_one_lane_race_does_not_show_the_second_lane(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heimbahn", lanes=2)
+    race = env.races.create_race("Finale", track.id, 3)
+    env.races.update_race(race.id, race.name, track.id, 3, set_active_lanes=True, active_lanes=1)
+    for index in (1, 2):
+        driver, vehicle = env.pair(index)
+        env.races.enroll_driver(race.id, driver, vehicle)
+    env.races.plan_heats(race.id)
+    _, page = open_page(qtbot, env, "races")
+    assert isinstance(page, RacesPage)
+    page.refresh()
+    page.table.selectRow(0)
+    page.buttons["start"].click()
+    live = page.live
+    assert isinstance(live, LiveRaceView)
+    release_start_lights(live)
+    assert live.findChild(QFrame, "live-lane-1") is not None
+    assert live.findChild(QFrame, "live-lane-2") is None
+    briefing = env.races.heat_briefing(race.id)
+    assert briefing is not None
+    assert [seat.lane for seat in briefing.seats] == [1]
+
+
+def _enrolled(
+    env: Env, *, lanes: int, drivers: int, laps: int = 2, active_lanes: int | None = None
+) -> RaceInfo:
     track = env.track(lanes=lanes)
     race = env.races.create_race("Finale", track.id, laps)
+    if active_lanes is not None:
+        race = env.races.update_race(
+            race.id,
+            race.name,
+            track.id,
+            laps,
+            set_active_lanes=True,
+            active_lanes=active_lanes,
+        )
     for index in range(1, drivers + 1):
         driver, vehicle = env.pair(index)
         env.races.enroll_driver(race.id, driver, vehicle)

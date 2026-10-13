@@ -35,6 +35,16 @@ Ein Gastnetz, das Geräte voneinander trennt, reicht nicht.
 
 Null verbundene Browser sind ein normaler Zustand. Das Rennen startet trotzdem.
 
+## Startampel
+
+Während der Startvorbereitung und des Countdowns ist die Ampel sichtbar.
+Nach dem bestätigten Start (`start_committed`) verschwindet sie vollständig,
+auch das Gehäuse. Die Live-Ansicht darunter bleibt stehen. Ein Browser, der
+erst während des laufenden Rennens verbindet, sieht kein Ampelgehäuse.
+Der nächste Durchlauf zeigt die Ampel für seine eigene Startsequenz wieder.
+Nach Abbruch, Rennende und zwischen zwei Durchläufen bleibt sie aus.
+Ein geplanter Zeitpunkt oder ein Verbindungsverlust startet das Rennen nicht.
+
 ## Wenn etwas nicht erreichbar ist
 
 Der QR-Code verschwindet und der Link steht auf „Nicht verfügbar“, sobald der

@@ -35,6 +35,7 @@ from slot_racing.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProv
 from slot_racing.modules.races import heats
 from slot_racing.modules.races.history import load_completed, load_layouts, load_one
 from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector, TimeMeasurement
+from slot_racing.modules.races.planning import effective_lane_count
 from slot_racing.modules.races.types import (
     HeatBriefing,
     HeatInfo,
@@ -211,10 +212,13 @@ class RaceService(RaceHistoryCatalog):
         *,
         duration_minutes: int | None = None,
         set_duration: bool = False,
+        active_lanes: int | None = None,
+        set_active_lanes: bool = False,
     ) -> RaceInfo:
         """Change the configuration. ``timing_provider=None`` keeps the stored provider.
 
         ``mode=None`` keeps the stored mode. A time trial does not store a lap target.
+        ``set_active_lanes`` stores how many of a two-lane track this race uses.
         """
         clean_name = self._validate_name(name)
         provider = None if timing_provider is None else self._validate_provider(timing_provider)
@@ -249,11 +253,20 @@ class RaceService(RaceHistoryCatalog):
                 race.duration_minutes = duration_minutes
             if provider is not None:
                 race.timing_provider = provider
+            physical = self._physical_lanes(race)
+            if set_active_lanes:
+                self._store_active_lanes(race, physical, active_lanes)
+            else:
+                self._keep_active_lanes(race, physical)
             session.flush()
-            if heats.uses_heats(session, race.id) and not heats.has_completed(session, race.id):
-                current = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
-                if current is not None:
-                    heats.replace_open_plan(session, race, current.lane_count)
+            if (
+                physical > 0
+                and heats.uses_heats(session, race.id)
+                and not heats.has_completed(session, race.id)
+            ):
+                heats.replace_open_plan(
+                    session, race, effective_lane_count(race.active_lanes, physical)
+                )
             return self._race_info(session, race)
 
     def add_participant(
@@ -364,23 +377,21 @@ class RaceService(RaceHistoryCatalog):
             return self._participant_info(participant)
 
     def plan_heats(self, race_id: RaceId) -> list[HeatInfo]:
-        """Build or rebuild the open heats from the current drivers and the track's lane count."""
+        """Build or rebuild the open heats from the drivers and the lanes this race uses."""
         with self._database.session() as session:
             race = self._load_editable(session, race_id)
-            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
-            if track is None:
+            if self._physical_lanes(race) < 1:
                 raise ValidationError("error.race.no_track")
-            heats.replace_open_plan(session, race, track.lane_count)
+            heats.replace_open_plan(session, race, self._planning_lanes(race))
             return heats.list_heats(session, race.id)
 
     def _replan_open_heats(self, session: Session, race: Race) -> None:
         """Keep a roster change on the same rotation. Races without heats are left alone."""
         if not heats.uses_heats(session, race.id) or race.track_id is None:
             return
-        track = self._tracks.get_track(TrackId(race.track_id))
-        if track is None:
+        if self._physical_lanes(race) < 1:
             return
-        heats.replace_open_plan(session, race, track.lane_count)
+        heats.replace_open_plan(session, race, self._planning_lanes(race))
 
     def heat_plan(self, race_id: RaceId) -> list[HeatInfo]:
         with self._database.session() as session:
@@ -390,8 +401,7 @@ class RaceService(RaceHistoryCatalog):
     def heat_briefing(self, race_id: RaceId) -> HeatBriefing | None:
         with self._database.session() as session:
             race = self._load(session, race_id)
-            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
-            lane_count = track.lane_count if track else 0
+            lane_count = self._planning_lanes(race)
             names = {
                 participant.id: self._participant_info(participant).driver_label
                 for participant in session.scalars(
@@ -409,9 +419,10 @@ class RaceService(RaceHistoryCatalog):
             race = self._load(session, race_id)
             if RaceStatus(race.status) not in _EDITABLE:
                 raise ValidationError("error.race.not_editable")
-            track = self._require_race_track(session, race)
-            heats.postpone(session, race, participant_id, track.lane_count)
-            return self._briefing_in_session(session, race, track.lane_count)
+            self._require_race_track(session, race)
+            lane_count = self._planning_lanes(race)
+            heats.postpone(session, race, participant_id, lane_count)
+            return self._briefing_in_session(session, race, lane_count)
 
     def disqualify_driver(self, race_id: RaceId, participant_id: int) -> bool:
         """Drop the driver from heats that have not started.
@@ -422,8 +433,8 @@ class RaceService(RaceHistoryCatalog):
             race = self._load(session, race_id)
             if RaceStatus(race.status) not in _EDITABLE:
                 raise ValidationError("error.race.not_editable")
-            track = self._require_race_track(session, race)
-            finished = heats.disqualify(session, race, participant_id, track.lane_count)
+            self._require_race_track(session, race)
+            finished = heats.disqualify(session, race, participant_id, self._planning_lanes(race))
             if finished:
                 race.status = RaceStatus.FINISHED.value
                 race.finished_at = race.finished_at or utc_now()
@@ -820,7 +831,9 @@ class RaceService(RaceHistoryCatalog):
             if heats.uses_heats(session, race.id):
                 for result in results:
                     heats.accumulate_heat_time(session, race.id, result.lane, result.total_time_ns)
-                if heats.finish_heat(session, race, aborted=aborted):
+                if heats.finish_heat(
+                    session, race, aborted=aborted, lane_count=self._planning_lanes(race)
+                ):
                     race.status = RaceStatus.READY.value
                     return
                 race.status = (RaceStatus.ABORTED if aborted else RaceStatus.FINISHED).value
@@ -854,7 +867,7 @@ class RaceService(RaceHistoryCatalog):
                 raise ValidationError("error.race.not_restartable")
             if source.track_id is None:
                 raise ValidationError("error.race.no_track")
-            track = self._require_active_track(TrackId(source.track_id))
+            self._require_active_track(TrackId(source.track_id))
             race = Race(
                 name=source.name,
                 track_id=source.track_id,
@@ -863,6 +876,7 @@ class RaceService(RaceHistoryCatalog):
                 mode=source.mode,
                 timing_provider=source.timing_provider,
                 duration_minutes=source.duration_minutes,
+                active_lanes=source.active_lanes,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
@@ -886,7 +900,7 @@ class RaceService(RaceHistoryCatalog):
                 )
             session.flush()
             if planned:
-                heats.replace_open_plan(session, race, track.lane_count)
+                heats.replace_open_plan(session, race, self._planning_lanes(race))
             self._update_readiness(session, race)
             info = self._race_info(session, race)
         record(
@@ -1009,6 +1023,36 @@ class RaceService(RaceHistoryCatalog):
     def has_heat_plan(self, race_id: RaceId) -> bool:
         with self._database.session() as session:
             return heats.uses_heats(session, race_id)
+
+    def _physical_lanes(self, race: Race) -> int:
+        track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+        return 0 if track is None else track.lane_count
+
+    def _planning_lanes(self, race: Race) -> int:
+        return effective_lane_count(race.active_lanes, self._physical_lanes(race))
+
+    @staticmethod
+    def _store_active_lanes(race: Race, physical: int, requested: int | None) -> None:
+        """Store a one-or-two choice. Any other track keeps planning on its physical lanes."""
+        if physical != 2:
+            if requested not in (None, physical):
+                raise ValidationError("error.race.active_lanes")
+            race.active_lanes = None
+            return
+        if requested == 1:
+            race.active_lanes = 1
+            return
+        if requested in (None, 2):
+            race.active_lanes = 2
+            return
+        raise ValidationError("error.race.active_lanes")
+
+    @staticmethod
+    def _keep_active_lanes(race: Race, physical: int) -> None:
+        """Drop a stored choice that the current track cannot express. Empty stays empty."""
+        if physical == 2 and race.active_lanes in (1, 2):
+            return
+        race.active_lanes = None
 
     def _provider_lane_count(self, race: RaceInfo, competing: int) -> int:
         briefing = self.heat_briefing(race.id)
@@ -1178,4 +1222,5 @@ class RaceService(RaceHistoryCatalog):
             started_at=race.started_at,
             finished_at=race.finished_at,
             duration_minutes=race.duration_minutes,
+            active_lanes=effective_lane_count(race.active_lanes, track.lane_count if track else 0),
         )

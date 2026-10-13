@@ -208,6 +208,52 @@ def test_commit_before_the_schedule_is_not_a_start_and_a_commit_is_not_replayed(
     assert phase_first.authorizes_go is True
 
 
+def test_a_committed_start_hides_the_gantry_until_the_next_countdown() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    page = hud_page().decode()
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    start = script.index("/*__GANTRY_START__*/")
+    end = script.index("/*__GANTRY_END__*/")
+    completed = subprocess.run(
+        [node, "-e", script[start:end] + "\n" + _GANTRY_NODE],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result == {
+        "countdown": True,
+        "committed": False,
+        "latched": False,
+        "disconnect": False,
+        "stale_scene": False,
+        "next_heat": True,
+        "dark": False,
+    }
+    assert 'if (startDisplay.state === "committed") lightsClosed = true;' in script
+    assert "if (entered) lightsClosed = false;" in script
+    checked = subprocess.run([node, "--check", "-"], input=script, text=True, check=False)
+    assert checked.returncode == 0, checked.stderr
+
+
+_GANTRY_NODE = """
+const lights = {visible: true};
+const cases = {
+  countdown: gantryVisible(lights, {lights_closed: false, state: "counting"}),
+  committed: gantryVisible(lights, {lights_closed: false, state: "committed"}),
+  latched: gantryVisible(lights, {lights_closed: true, state: "idle"}),
+  disconnect: gantryVisible(lights, {lights_closed: true, state: "disconnected"}),
+  stale_scene: gantryVisible(lights, {lights_closed: true, state: "counting"}),
+  next_heat: gantryVisible(lights, {lights_closed: false, state: "counting"}),
+  dark: gantryVisible({visible: false}, {lights_closed: false, state: "counting"})
+};
+console.log(JSON.stringify(cases));
+"""
+
+
 def test_the_page_reducer_matches_the_python_rules() -> None:
     node = shutil.which("node")
     if node is None:

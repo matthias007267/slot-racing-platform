@@ -12,7 +12,7 @@ from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.domain.scoring import time_trial_stored_key
 from slot_racing.core.errors import ValidationError
 from slot_racing.modules.races.models import Lap, Race, RaceHeat, RaceHeatEntry, RaceParticipant
-from slot_racing.modules.races.planning import build_rotation, pending_pairwise, plan_remaining
+from slot_racing.modules.races.planning import build_rotation, pairwise_cycle, plan_remaining
 from slot_racing.modules.races.types import HeatBriefing, HeatInfo, HeatSeat, LaneChange
 
 PLANNED = "planned"
@@ -134,10 +134,12 @@ def revert_running_heat(session: Session, race: Race) -> None:
         heat.status = PLANNED
 
 
-def finish_heat(session: Session, race: Race, *, aborted: bool) -> bool:
+def finish_heat(session: Session, race: Race, *, aborted: bool, lane_count: int = 0) -> bool:
     """Close the heat that is on track.
 
     Returns True when the race stays open for another heat. The caller's ranking then waits.
+    A normal finish with no planned heat left still stays open when a required lane visit was
+    never stored. Abort does not rebuild that plan.
     """
     heat = _running(session, race.id)
     if heat is None:
@@ -150,6 +152,14 @@ def finish_heat(session: Session, race: Race, *, aborted: bool) -> bool:
         participant.laps_completed = len(laps)
         participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
     pending = has_pending(session, race.id)
+    if not aborted and not pending and lane_count > 0:
+        obligations = _obligations(
+            _participants(session, race.id), lane_count, _completed_pairs(session, race.id)
+        )
+        extra = plan_remaining(obligations, lane_count) if obligations else ()
+        if extra:
+            _insert_heats(session, race.id, extra)
+            pending = True
     if aborted or not pending:
         _rank(session, race)
         for participant in _participants(session, race.id):
@@ -314,12 +324,13 @@ def _open_heats(
 ) -> tuple[tuple[tuple[int, int], ...], ...]:
     """Open heats for the current roster.
 
-    Two or more drivers on two lanes stay on the pairwise cycle. Every other track still
-    owes each driver one visit to each lane.
+    An untouched two-lane field keeps the pairwise cycle, including the lane swap for an even
+    field. Once a heat has been driven, a driver sits out, or the roster changes, the remaining
+    heats follow the open lane obligations instead of moving a whole pair.
     """
     active = [participant.id for participant in participants if not participant.disqualified]
-    if lane_count == 2 and len(active) >= 2:
-        return pending_pairwise(active, completed, deferred=deferred)
+    if lane_count == 2 and len(active) >= 2 and not completed and not deferred:
+        return pairwise_cycle(active)
     if completed or deferred:
         return plan_remaining(
             _obligations(participants, lane_count, completed), lane_count, deferred=deferred

@@ -128,6 +128,14 @@ class RaceWizard(QWidget):
         self.duration_edit.setObjectName("race-duration")
         self.duration_unit = QLabel(tr("race.wizard.minutes"))
         self.duration_unit.setObjectName("race-duration-unit")
+        self.active_lanes_caption = QLabel(tr("race.wizard.active_lanes"))
+        self.active_lanes_caption.setObjectName("race-active-lanes-label")
+        self.active_lanes_caption.setWordWrap(True)
+        self.active_lanes_combo = QComboBox()
+        self.active_lanes_combo.setObjectName("race-active-lanes")
+        self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.one"), 1)
+        self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.two"), 2)
+        self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("race-driver")
         self.vehicle_combo = QComboBox()
@@ -231,6 +239,7 @@ class RaceWizard(QWidget):
             self.mode_combo.setCurrentIndex(self.mode_combo.findData(RaceMode.LAPS.value))
             self.laps_spin.setValue(5)
             self.duration_edit.setText("5")
+            self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
         else:
             self.name_edit.setText(self._race.name)
             self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._race.mode.value)))
@@ -241,7 +250,10 @@ class RaceWizard(QWidget):
             else:
                 self.duration_edit.setText("5")
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
+            chosen = 1 if self._race.active_lanes == 1 else 2
+            self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(chosen))
         self._sync_lap_target()
+        self._sync_active_lanes()
         self._cancel_participant_edit()
         self._refresh_participants()
         self._show_step(NAME)
@@ -304,6 +316,8 @@ class RaceWizard(QWidget):
                 duration_row.addWidget(self.duration_edit, 1)
                 duration_row.addWidget(self.duration_unit)
                 layout.addLayout(duration_row)
+                layout.addWidget(self.active_lanes_caption)
+                layout.addWidget(self.active_lanes_combo)
             elif index == PARTICIPANTS:
                 row = QHBoxLayout()
                 for label, combo in (
@@ -425,6 +439,8 @@ class RaceWizard(QWidget):
         self.next_button.setEnabled(step < START)
         if step == TRACK:
             self._reload_providers()
+        if step == MODE:
+            self._sync_active_lanes()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
             self._apply_board_style(VIEW_PRESTART)
@@ -487,6 +503,29 @@ class RaceWizard(QWidget):
         self.duration_edit.setVisible(not show_laps)
         self.duration_unit.setVisible(not show_laps)
 
+    def _physical_lanes(self) -> int:
+        track_id = self.track_combo.currentData()
+        track = None if track_id is None else self._tracks.get_track(TrackId(track_id))
+        return 0 if track is None else track.lane_count
+
+    def _sync_active_lanes(self) -> None:
+        """Offer one or two lanes only when the chosen track has exactly two."""
+        offered = self._physical_lanes() == 2
+        locked = False
+        if self._race is not None:
+            started = any(
+                heat.status != "planned" for heat in self._service.heat_plan(self._race.id)
+            )
+            locked = not self._race.is_editable or started
+        self.active_lanes_caption.setVisible(offered)
+        self.active_lanes_combo.setVisible(offered)
+        self.active_lanes_combo.setEnabled(offered and not locked)
+
+    def _selected_active_lanes(self) -> int | None:
+        if self._physical_lanes() != 2:
+            return None
+        return 1 if self.active_lanes_combo.currentData() == 1 else 2
+
     def _save_basics(self) -> None:
         name = self.name_edit.text()
         track_id = TrackId(self.track_combo.currentData())
@@ -496,23 +535,25 @@ class RaceWizard(QWidget):
         duration = (
             None if mode is RaceMode.LAPS else parse_duration_minutes(self.duration_edit.text())
         )
+        chosen_lanes = self._selected_active_lanes()
         if self._race is None:
             self._race = (
                 self._service.create_time_trial(name, track_id, provider, duration)
                 if mode is RaceMode.TIME_TRIAL
                 else self._service.create_race(name, track_id, laps, provider)
             )
-        else:
-            self._race = self._service.update_race(
-                self._race.id,
-                name,
-                track_id,
-                laps,
-                provider,
-                mode,
-                duration_minutes=duration,
-                set_duration=True,
-            )
+        self._race = self._service.update_race(
+            self._race.id,
+            name,
+            track_id,
+            laps,
+            provider,
+            mode,
+            duration_minutes=duration,
+            set_duration=True,
+            active_lanes=chosen_lanes,
+            set_active_lanes=True,
+        )
         self._refresh_participants()
 
     def _add_participant(self) -> None:
@@ -604,6 +645,7 @@ class RaceWizard(QWidget):
         lines = [
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
+            fmt("race.overview.active_lanes", lanes=race.active_lanes),
             (
                 fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
                 if race.mode is RaceMode.TIME_TRIAL
@@ -653,6 +695,7 @@ class RaceWizard(QWidget):
         apply_text_size(self.laps_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
         apply_text_size(self.duration_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
         apply_text_size(self.duration_unit, FONT_CAPTION, max(self.width(), 640), bold=False)
+        apply_text_size(self.active_lanes_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
         apply_text_size(self.provider_status, FONT_CAPTION, max(self.width(), 640), bold=False)
 
     def resizeEvent(self, event: object) -> None:  # noqa: N802

@@ -37,6 +37,8 @@ class Race(Base):
     """Id of the timing provider that times this race. Resolved to a factory at the start."""
     duration_minutes: Mapped[int | None]
     """Length of one time-trial heat. Empty means the session ends only when it is stopped."""
+    active_lanes: Mapped[int | None]
+    """Lanes this race uses on a two-lane track. Empty keeps the track's own lane count."""
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)

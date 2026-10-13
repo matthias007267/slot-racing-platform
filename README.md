@@ -22,9 +22,10 @@ shell with a sidebar and dynamic navigation. Usable in the application:
 
 - **Fahrer, Fahrzeuge, Strecken:** list, create, edit, deactivate and delete with validation
   (unique driver start numbers, lane count, driver assignment for vehicles).
-- **Rennen:** six step setup (name, track, mode with laps, participants with driver, vehicle and
-  lane, overview, start), a live view of the engine standings (position, laps, lap times, the
-  selected driver) with pause, resume and abort, and stored results that can be reopened later.
+- **Rennen:** six step setup (name, track, mode with laps and, on a two-lane track,
+  **Aktive Spuren**, participants with driver and vehicle, overview, start), a live view of the
+  engine standings (position, laps, lap times, the selected driver) with pause, resume and abort,
+  and stored results that can be reopened later.
   The live view can return to the race list without stopping the race. Timing comes from a
   selectable timing provider. The simulation is built in.
   Camera timing is an optional module, off by default, and a camera race uses the saved camera

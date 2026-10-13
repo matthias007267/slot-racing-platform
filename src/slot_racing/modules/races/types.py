@@ -36,6 +36,8 @@ class RaceInfo:
     started_at: datetime | None
     finished_at: datetime | None
     duration_minutes: int | None = None
+    active_lanes: int = 0
+    """Lanes this race plans. The track's ``lane_count`` stays the physical count."""
 
     @property
     def is_editable(self) -> bool:
