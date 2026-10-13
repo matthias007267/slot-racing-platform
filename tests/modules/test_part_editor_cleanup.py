@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtWidgets import QTabWidget
+from PySide6.QtWidgets import QPushButton
 from pytestqt.qtbot import QtBot
 from sqlalchemy import select
 
@@ -53,16 +53,21 @@ def test_removed_editor_modules_are_not_imported() -> None:
 
 
 def test_the_part_dialog_is_parametric_and_has_no_drawing_tab(qtbot: QtBot, env: Env) -> None:
-    """Test B: the dialog opens without the former drawing tab."""
+    """Test B: parametric editing stays, and the old drawing tab does not return."""
     dialog = PartDialog(env.runtime.translator, _planner(env))
     qtbot.addWidget(dialog)
     dialog.show()
-    assert dialog.findChild(QTabWidget) is None
-    assert "Zeichnen" not in dialog.windowTitle()
+    assert dialog.tabs.count() == 2
+    assert dialog.tabs.tabText(0) == "Parameter"
+    assert dialog.tabs.tabText(1) == "Grafisch"
+    assert "Zeichnen" not in dialog.tabs.tabText(1)
     assert dialog.article.objectName() == "part-article"
     assert dialog.length.isEnabled()
     assert dialog.category.isEnabled()
-    assert dialog.findChild(QTabWidget, "part-editor-tabs") is None
+    assert dialog.findChild(QPushButton, "plate-floor") is not None
+    assert dialog.findChild(QPushButton, "plate-lane") is not None
+    lane = dialog.findChild(QPushButton, "plate-lane")
+    assert lane is not None and not lane.isEnabled()
     dialog._dismissed = True
     dialog.close()
 
@@ -122,7 +127,9 @@ def test_a_complex_part_cannot_be_simplified_by_the_form(qtbot: QtBot, env: Env)
         dialog.show()
         assert not dialog.length.isEnabled()
         assert dialog.notice.isVisible()
-        assert "nicht verfügbar" in dialog.notice.text()
+        assert "nicht verändert" in dialog.notice.text()
+        dialog.tabs.setCurrentIndex(1)
+        assert "nicht punktweise" in dialog.plate.issue.text()
         dialog.length.setValue(120.0)
         dialog.description.setPlainText("Nur Text")
         dialog.accept()
