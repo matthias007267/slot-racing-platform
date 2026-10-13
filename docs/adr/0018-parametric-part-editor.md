@@ -5,9 +5,9 @@
 The library already stores Carrera pieces, revisions (ADR 0016) and shared path geometry
 (ADR 0017). Users need to create a straight, a curve or a simple border, edit a bundled
 part, and duplicate one, then use the result in the planner. Freehand Bézier curves and
-hand-drawn outlines are not edited here. A graphical editor for them is not implemented
-(ADR 0019). This phase must not replace geometry it cannot edit, and it must not give a
-saved plan a new shape unless that plan adopts it.
+hand-drawn outlines are not edited here. A separate tab draws one floor plate and leaves
+every other body untouched (ADR 0019). This phase must not replace geometry it cannot
+edit, and it must not give a saved plan a new shape unless that plan adopts it.
 
 ## Decision
 
@@ -48,4 +48,4 @@ and place the result without restarting. Complex bodies stay intact. A custom tr
 a left-hand curve is part of that curve’s stored edge; a border fits it only when the edge
 matches. `.slotpart` import and export stay out of this phase.
 
-ADR 0019 records that the graphical editor was removed. A replacement is not implemented.
+ADR 0019 adds a floor-plate tab beside this form. It does not rebuild a locked body.

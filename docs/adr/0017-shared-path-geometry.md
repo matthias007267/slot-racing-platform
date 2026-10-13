@@ -73,9 +73,9 @@ disconnected path, a lane that no `track` joint lists, and a custom border witho
 
 - Catalogue plans and lane lengths of ordinary straights and curves stay on the old measures.
   A switch, a crossing or a lane change still has no single lane length.
-- The parametric editor is ADR 0018 and calls this model. ADR 0019 records that the graphical
-  editor was removed; a replacement is not implemented. The path types stay for stored parts
-  and for that later editor. `.slotpart` import and export are not built here.
+- The parametric editor is ADR 0018 and calls this model. ADR 0019 draws one closed line
+  plate with the same spans and does not draw lanes, arcs or Bézier curves. `.slotpart`
+  import and export are not built here.
 - Hole-shaped outlines are stored as extra contours and are not cut out of the fill.
 - Downgrade is unchanged: the JSON column already existed. A database that has stored Bézier
   spans will load those spans as ordinary derived lanes if this code is removed, because an
