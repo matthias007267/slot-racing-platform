@@ -6,6 +6,8 @@ track itself, so the stored lane count stays whatever the track already has.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy import delete, insert, select, update
@@ -26,10 +28,14 @@ from slot_racing.modules.track_planner.document import (
     validate_lanes,
     with_instances,
 )
-from slot_racing.modules.track_planner.inventory import PhysicalStock
+from slot_racing.modules.track_planner.inventory import (
+    InventoryReport,
+    PhysicalStock,
+    analyze_inventory,
+)
 from slot_racing.modules.track_planner.library import PartLibrary
 from slot_racing.modules.track_planner.packages import PackageSpec, PackageView
-from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
+from slot_racing.modules.track_planner.parts import PartInstance, PartRecord, PartSpec
 
 PLAN_NAME = "plan"
 
@@ -64,6 +70,35 @@ class TrackPlannerService:
 
     def list_parts(self) -> tuple[PartRecord, ...]:
         return self.library.list_parts()
+
+    def records_for(self, part_ids: Sequence[int]) -> tuple[PartRecord, ...]:
+        return self.library.records_for(part_ids)
+
+    def current_part_ids(self) -> dict[int, int]:
+        return self.library.current_part_ids()
+
+    def inventory_for(self, instances: Sequence[PartInstance]) -> InventoryReport:
+        """Count placed parts against the current revision, including older snapshots."""
+        aliases = self.current_part_ids()
+        counting = tuple(
+            replace(instance, part_id=aliases.get(instance.part_id, instance.part_id))
+            for instance in instances
+        )
+        return analyze_inventory(counting, self.stock_quantities())
+
+    def tracks_on_previous_geometry(self, part_id: int) -> tuple[tuple[TrackId, str], ...]:
+        rows: list[tuple[TrackId, str]] = []
+        for track_id in self.library.track_ids_on_previous_geometry(part_id):
+            info = self._tracks.get_track(TrackId(track_id))
+            name = str(track_id) if info is None else info.name
+            rows.append((TrackId(track_id), name))
+        return tuple(rows)
+
+    def adopt_revision(self, part_id: int, track_ids: Sequence[TrackId]) -> int:
+        return self.library.adopt_revision(part_id, [int(track_id) for track_id in track_ids])
+
+    def restore_catalog(self, part_id: int) -> PartRecord:
+        return self.library.restore_catalog(part_id)
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         return self.library.add_part(spec)

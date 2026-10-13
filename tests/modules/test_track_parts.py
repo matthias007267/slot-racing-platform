@@ -201,9 +201,9 @@ def test_name_and_article_identify_a_part_and_scale_stays_a_property(env: Env) -
         )
     assert invalid.value.key == "error.planner.scale"
     assert "system" not in TrackPartDefinition.__table__.columns
-    assert "manufacturer" not in TrackPartDefinition.__table__.columns
+    assert "manufacturer" in TrackPartDefinition.__table__.columns
     assert "system" not in PartSpec.__dataclass_fields__
-    assert "manufacturer" not in PartSpec.__dataclass_fields__
+    assert "manufacturer" in PartSpec.__dataclass_fields__
 
 
 def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:

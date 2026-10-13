@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, select
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import Any
+
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
+from slot_racing.core.storage.base import Base
 from slot_racing.modules.track_planner.inventory import (
     PackageContribution,
     PhysicalStock,
@@ -33,15 +38,21 @@ from slot_racing.modules.track_planner.packages import (
     standard_packages,
 )
 from slot_racing.modules.track_planner.parts import (
+    ORIGIN_CATALOG,
+    ORIGIN_CUSTOM,
+    ORIGIN_MODIFIED,
     AttachmentProfile,
     ConnectorSpec,
     PartInstance,
     PartRecord,
     PartSpec,
+    catalog_storage_key,
     decode_slot_paths,
     encode_slot_paths,
     identity_key,
+    merge_preserved_geometry,
     require_scale,
+    same_geometry,
     standard_catalog,
 )
 from slot_racing.modules.track_planner.trace import trace
@@ -56,7 +67,10 @@ class PartLibrary:
         with self._database.session() as session:
             rows = session.scalars(
                 select(TrackPartDefinition)
-                .where(TrackPartDefinition.suppressed.is_(False))
+                .where(
+                    TrackPartDefinition.suppressed.is_(False),
+                    TrackPartDefinition.is_current.is_(True),
+                )
                 .order_by(TrackPartDefinition.id)
             )
             return tuple(self._record(session, row) for row in rows)
@@ -74,13 +88,19 @@ class PartLibrary:
         with self._database.session() as session:
             rows = list(session.scalars(select(TrackPartDefinition)))
             stored = {identity_key(row.name, row.article_number) for row in rows}
+            stored.update(_stored_catalog_keys(rows))
             for spec in standard_catalog():
                 key = identity_key(spec.name, spec.article_number)
                 if key not in stored:
-                    self._insert(session, spec)
+                    self._insert(session, spec, origin=ORIGIN_CATALOG)
                     stored.add(key)
             for row in rows:
+                if not row.is_current or row.origin != ORIGIN_CATALOG:
+                    continue
                 known = catalog.get(identity_key(row.name, row.article_number))
+                if known is None and row.catalog_key and "\t" in row.catalog_key:
+                    stored_name, stored_article = row.catalog_key.split("\t", 1)
+                    known = catalog.get((stored_name, stored_article))
                 if known is None:
                     continue
                 if known.slot_paths and not row.slot_paths:
@@ -112,36 +132,184 @@ class PartLibrary:
         trace("PART_CREATE", result="created", part_id=created.id)
         return created
 
-    def update_part(self, part_id: int, spec: PartSpec) -> PartRecord:
+    def update_part(self, part_id: int, spec: PartSpec, *, origin: str | None = None) -> PartRecord:
+        """Save a definition.
+
+        A geometry change of a revision that a plan already uses inserts the next
+        revision and leaves the used row untouched. A rename of an unused revision
+        stays on the same row. ``origin`` forces catalog, modified or custom.
+        """
         try:
             with self._database.session() as session:
                 definition = session.get(TrackPartDefinition, part_id)
                 if definition is None:
                     raise ValidationError("error.planner.part")
-                self._reject_duplicate(session, spec, except_id=part_id)
-                definition.article_number = spec.article_number.strip()
-                definition.scale = require_scale(spec.scale)
-                definition.name = spec.name.strip()
-                definition.category = spec.category
-                definition.length_mm = spec.length_mm
-                definition.width_mm = spec.width_mm
-                definition.height_mm = spec.height_mm
-                definition.radius_mm = spec.radius_mm
-                definition.angle_deg = spec.angle_deg
-                definition.lane_count = spec.lane_count
-                definition.outline = [list(point) for point in spec.outline]
-                definition.slot_paths = encode_slot_paths(spec.slot_paths)
-                self._assign_attachment(definition, spec)
-                session.execute(
-                    delete(TrackPartConnector).where(TrackPartConnector.part_id == part_id)
-                )
-                self._add_connectors(session, part_id, spec)
-                session.flush()
-                updated = self._record(session, definition)
+                if not definition.is_current:
+                    definition = self._current_of(session, definition.lineage_id)
+                stored = self._record(session, definition).spec
+                spec = merge_preserved_geometry(stored, spec)
+                if not spec.manufacturer.strip():
+                    spec = replace(spec, manufacturer=definition.manufacturer or "")
+                self._reject_duplicate(session, spec, except_id=definition.id)
+                geometry_changed = not same_geometry(stored, spec)
+                chosen = origin
+                if chosen is None:
+                    chosen = (
+                        ORIGIN_MODIFIED
+                        if geometry_changed and definition.catalog_key
+                        else definition.origin
+                    )
+                if geometry_changed and definition.id in _referenced_part_ids(session):
+                    updated = self._fork(session, definition, spec, chosen)
+                else:
+                    self._apply(session, definition, spec, chosen)
+                    session.flush()
+                    updated = self._record(session, definition)
         except IntegrityError as error:
             raise self._duplicate(spec) from error
-        trace("PART_UPDATE", result="updated", part_id=part_id)
+        trace("PART_UPDATE", result="updated", part_id=updated.id)
         return updated
+
+    def restore_catalog(self, part_id: int) -> PartRecord:
+        """Put the bundled geometry back. Plans that still use the edited row stay on it."""
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None or not definition.catalog_key:
+                raise ValidationError("error.planner.part")
+            key = definition.catalog_key
+            description = definition.description or ""
+        spec = _catalog_by_key().get(key)
+        if spec is None:
+            raise ValidationError("error.planner.part")
+        restored = replace(spec, manufacturer="Carrera", description=description)
+        return self.update_part(part_id, restored, origin=ORIGIN_CATALOG)
+
+    def records_for(self, part_ids: Sequence[int]) -> tuple[PartRecord, ...]:
+        """Definitions for these ids, including revisions the library no longer offers."""
+        self.ensure_seed()
+        wanted = {part_id for part_id in part_ids if isinstance(part_id, int)}
+        if not wanted:
+            return ()
+        with self._database.session() as session:
+            rows = session.scalars(
+                select(TrackPartDefinition).where(TrackPartDefinition.id.in_(wanted))
+            )
+            return tuple(self._record(session, row) for row in rows)
+
+    def current_part_ids(self) -> dict[int, int]:
+        """Map every stored id to the current revision of its lineage."""
+        self.ensure_seed()
+        with self._database.session() as session:
+            rows = session.execute(
+                select(
+                    TrackPartDefinition.id,
+                    TrackPartDefinition.lineage_id,
+                    TrackPartDefinition.is_current,
+                )
+            ).all()
+        current = {lineage: part_id for part_id, lineage, is_current in rows if is_current}
+        return {part_id: current.get(lineage, part_id) for part_id, lineage, _current in rows}
+
+    def track_ids_on_previous_geometry(self, part_id: int) -> tuple[int, ...]:
+        """Tracks whose saved plan still points at an older revision of this part."""
+        self.ensure_seed()
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
+                raise ValidationError("error.planner.part")
+            current = self._current_of(session, definition.lineage_id)
+            previous = set(
+                session.scalars(
+                    select(TrackPartDefinition.id).where(
+                        TrackPartDefinition.lineage_id == definition.lineage_id,
+                        TrackPartDefinition.id != current.id,
+                    )
+                )
+            )
+            if not previous:
+                return ()
+            found = set(
+                session.scalars(
+                    select(TrackPlanInstance.track_id)
+                    .where(TrackPlanInstance.part_id.in_(previous))
+                    .distinct()
+                )
+            )
+            layouts = _layouts()
+            for track_id, data in session.execute(
+                select(layouts.c.track_id, layouts.c.data).where(layouts.c.name == "plan")
+            ):
+                if _part_ids_in_document(data) & previous:
+                    found.add(int(track_id))
+        return tuple(sorted(int(track_id) for track_id in found))
+
+    def adopt_revision(self, part_id: int, track_ids: Sequence[int]) -> int:
+        """Point the chosen tracks at the current geometry. Position and rotation stay.
+
+        Archived layout rows are not rewritten. An empty track list changes nothing.
+        The result is how many of the chosen tracks changed.
+        """
+        chosen = {int(track_id) for track_id in track_ids}
+        if not chosen:
+            return 0
+        with self._database.session() as session:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
+                raise ValidationError("error.planner.part")
+            current = self._current_of(session, definition.lineage_id)
+            previous = set(
+                session.scalars(
+                    select(TrackPartDefinition.id).where(
+                        TrackPartDefinition.lineage_id == current.lineage_id,
+                        TrackPartDefinition.id != current.id,
+                    )
+                )
+            )
+            if not previous:
+                return 0
+            affected = set(
+                session.scalars(
+                    select(TrackPlanInstance.track_id)
+                    .where(
+                        TrackPlanInstance.track_id.in_(chosen),
+                        TrackPlanInstance.part_id.in_(previous),
+                    )
+                    .distinct()
+                )
+            )
+            session.execute(
+                update(TrackPlanInstance)
+                .where(
+                    TrackPlanInstance.track_id.in_(chosen),
+                    TrackPlanInstance.part_id.in_(previous),
+                )
+                .values(part_id=current.id)
+            )
+            layouts = _layouts()
+            for layout_id, track_id, data in session.execute(
+                select(layouts.c.id, layouts.c.track_id, layouts.c.data).where(
+                    layouts.c.name == "plan",
+                    layouts.c.track_id.in_(chosen),
+                )
+            ):
+                rewritten = _retarget_document(data, previous, current.id)
+                if rewritten is not data:
+                    session.execute(
+                        update(layouts).where(layouts.c.id == layout_id).values(data=rewritten)
+                    )
+                    affected.add(int(track_id))
+        return len(affected)
+
+    def current_with_article(self, article_number: str) -> tuple[PartRecord, ...]:
+        """Current parts that share this article number. Several matches are left as they are."""
+        from slot_racing.modules.track_planner.parts import normalize_article
+
+        wanted = normalize_article(article_number)
+        return tuple(
+            record
+            for record in self.list_parts()
+            if normalize_article(record.spec.article_number) == wanted
+        )
 
     def delete_part(self, part_id: int) -> None:
         """Remove a part from the placeable library.
@@ -157,21 +325,36 @@ class PartLibrary:
             definition = session.get(TrackPartDefinition, part_id)
             if definition is None:
                 raise ValidationError("error.planner.part")
+            lineage_ids = set(
+                session.scalars(
+                    select(TrackPartDefinition.id).where(
+                        TrackPartDefinition.lineage_id == definition.lineage_id
+                    )
+                )
+            )
             used = session.scalar(
                 select(func.count())
                 .select_from(TrackPlanInstance)
-                .where(TrackPlanInstance.part_id == part_id)
+                .where(TrackPlanInstance.part_id.in_(lineage_ids))
             )
+            if not used and lineage_ids & _referenced_part_ids(session):
+                used = 1
             if used:
                 trace("PART_DELETE_BLOCKED", result="in_use", part_id=part_id)
                 raise ValidationError("error.planner.part_in_use", count=int(used))
             referenced = session.scalar(
                 select(func.count())
                 .select_from(TrackPartPackageContent)
-                .where(TrackPartPackageContent.part_id == part_id)
+                .where(TrackPartPackageContent.part_id.in_(lineage_ids))
+            )
+            session.execute(
+                delete(TrackPartDefinition).where(
+                    TrackPartDefinition.lineage_id == definition.lineage_id,
+                    TrackPartDefinition.is_current.is_(False),
+                )
             )
             key = identity_key(definition.name, definition.article_number)
-            if key in catalog:
+            if key in catalog or definition.catalog_key:
                 definition.suppressed = True
             elif referenced:
                 trace("PART_DELETE_BLOCKED", result="in_package", part_id=part_id)
@@ -331,8 +514,12 @@ class PartLibrary:
     def _store_adjustment(self, part_id: int, amount: int, *, trace_change: bool) -> None:
         self.ensure_seed()
         with self._database.session() as session:
-            if session.get(TrackPartDefinition, part_id) is None:
+            definition = session.get(TrackPartDefinition, part_id)
+            if definition is None:
                 raise ValidationError("error.planner.part")
+            if not definition.is_current:
+                definition = self._current_of(session, definition.lineage_id)
+            part_id = definition.id
             if trace_change:
                 produced = self._derived_map(session).get(part_id, 0)
                 if produced + amount < 0:
@@ -367,7 +554,12 @@ class PartLibrary:
 
     def _ensure_packages(self, session: Session) -> None:
         definitions = list(session.scalars(select(TrackPartDefinition)))
-        by_key = {identity_key(row.name, row.article_number): row for row in definitions}
+        by_key: dict[tuple[str, str], TrackPartDefinition] = {}
+        for row in definitions:
+            key = identity_key(row.name, row.article_number)
+            previous = by_key.get(key)
+            if previous is None or (row.is_current and not previous.is_current):
+                by_key[key] = row
         stored = {_package_identity(row) for row in session.scalars(select(TrackPartPackage))}
         for spec in standard_packages():
             if _package_identity(spec) in stored:
@@ -422,9 +614,15 @@ class PartLibrary:
         self, session: Session, content: PackageContentSpec
     ) -> TrackPartDefinition:
         key = identity_key(content.part_name, content.article_number)
+        found: TrackPartDefinition | None = None
         for row in session.scalars(select(TrackPartDefinition)):
-            if identity_key(row.name, row.article_number) == key:
+            if identity_key(row.name, row.article_number) != key:
+                continue
+            if row.is_current:
                 return row
+            found = row
+        if found is not None:
+            return found
         raise ValidationError("error.planner.part")
 
     def _reject_package_duplicate(self, session: Session, spec: PackageSpec) -> None:
@@ -476,7 +674,23 @@ class PartLibrary:
                 return view
         raise ValidationError("error.planner.package")
 
-    def _insert(self, session: Session, spec: PartSpec) -> TrackPartDefinition:
+    def _insert(
+        self,
+        session: Session,
+        spec: PartSpec,
+        *,
+        origin: str = ORIGIN_CUSTOM,
+        lineage_id: str | None = None,
+        revision: int = 1,
+        catalog_key: str | None = None,
+    ) -> TrackPartDefinition:
+        from uuid import uuid4
+
+        if origin == ORIGIN_CATALOG and catalog_key is None:
+            catalog_key = catalog_storage_key(spec.name, spec.article_number)
+        manufacturer = spec.manufacturer.strip()
+        if not manufacturer and origin == ORIGIN_CATALOG:
+            manufacturer = "Carrera"
         definition = TrackPartDefinition(
             article_number=spec.article_number.strip(),
             scale=require_scale(spec.scale),
@@ -490,6 +704,13 @@ class PartLibrary:
             lane_count=spec.lane_count,
             outline=[list(point) for point in spec.outline],
             slot_paths=encode_slot_paths(spec.slot_paths),
+            lineage_id=lineage_id or uuid4().hex,
+            revision=revision,
+            is_current=True,
+            origin=origin,
+            catalog_key=catalog_key,
+            manufacturer=manufacturer,
+            description=spec.description.strip() or None,
         )
         self._assign_attachment(definition, spec)
         session.add(definition)
@@ -545,8 +766,17 @@ class PartLibrary:
             outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
             slot_paths=decode_slot_paths(definition.slot_paths),
             attachment=_attachment_profile(definition),
+            manufacturer=definition.manufacturer or "",
+            description=definition.description or "",
         )
-        return PartRecord(definition.id, spec)
+        return PartRecord(
+            definition.id,
+            spec,
+            lineage_id=definition.lineage_id,
+            revision=definition.revision,
+            origin=definition.origin,
+            is_current=definition.is_current,
+        )
 
     def _needs_attachment_refresh(
         self, session: Session, row: TrackPartDefinition, spec: PartSpec
@@ -587,10 +817,76 @@ class PartLibrary:
     ) -> None:
         key = identity_key(spec.name, spec.article_number)
         for row in session.scalars(select(TrackPartDefinition)):
+            if not row.is_current:
+                continue
             if except_id is not None and row.id == except_id:
                 continue
             if identity_key(row.name, row.article_number) == key:
                 raise self._duplicate(spec)
+
+    def _current_of(self, session: Session, lineage_id: str) -> TrackPartDefinition:
+        current = session.scalar(
+            select(TrackPartDefinition).where(
+                TrackPartDefinition.lineage_id == lineage_id,
+                TrackPartDefinition.is_current.is_(True),
+            )
+        )
+        if current is None:
+            raise ValidationError("error.planner.part")
+        return current
+
+    def _apply(
+        self, session: Session, definition: TrackPartDefinition, spec: PartSpec, origin: str
+    ) -> None:
+        definition.article_number = spec.article_number.strip()
+        definition.scale = require_scale(spec.scale)
+        definition.name = spec.name.strip()
+        definition.category = spec.category
+        definition.length_mm = spec.length_mm
+        definition.width_mm = spec.width_mm
+        definition.height_mm = spec.height_mm
+        definition.radius_mm = spec.radius_mm
+        definition.angle_deg = spec.angle_deg
+        definition.lane_count = spec.lane_count
+        definition.outline = [list(point) for point in spec.outline]
+        definition.slot_paths = encode_slot_paths(spec.slot_paths)
+        definition.origin = origin
+        if spec.manufacturer.strip():
+            definition.manufacturer = spec.manufacturer.strip()
+        definition.description = spec.description.strip() or None
+        self._assign_attachment(definition, spec)
+        session.execute(
+            delete(TrackPartConnector).where(TrackPartConnector.part_id == definition.id)
+        )
+        self._add_connectors(session, definition.id, spec)
+
+    def _fork(
+        self,
+        session: Session,
+        definition: TrackPartDefinition,
+        spec: PartSpec,
+        origin: str,
+    ) -> PartRecord:
+        """Insert the next revision and move stock onto it. The used row stays frozen."""
+        highest = session.scalar(
+            select(func.max(TrackPartDefinition.revision)).where(
+                TrackPartDefinition.lineage_id == definition.lineage_id
+            )
+        )
+        definition.is_current = False
+        session.flush()
+        created = self._insert(
+            session,
+            spec,
+            origin=origin,
+            lineage_id=definition.lineage_id,
+            revision=int(highest or definition.revision) + 1,
+            catalog_key=definition.catalog_key,
+        )
+        _move_stock(session, definition.id, created.id)
+        _move_package_contents(session, definition.id, created.id)
+        session.flush()
+        return self._record(session, created)
 
     @staticmethod
     def _duplicate(spec: PartSpec) -> ValidationError:
@@ -599,6 +895,92 @@ class PartLibrary:
             name=spec.name.strip(),
             article=spec.article_number.strip(),
         )
+
+
+def _stored_catalog_keys(rows: Sequence[TrackPartDefinition]) -> set[tuple[str, str]]:
+    stored: set[tuple[str, str]] = set()
+    for row in rows:
+        if not row.catalog_key or "\t" not in row.catalog_key:
+            continue
+        name, article = row.catalog_key.split("\t", 1)
+        stored.add((name, article))
+    return stored
+
+
+def _catalog_by_key() -> dict[str, PartSpec]:
+    return {
+        catalog_storage_key(spec.name, spec.article_number): spec for spec in standard_catalog()
+    }
+
+
+def _layouts() -> Any:
+    try:
+        return Base.metadata.tables["track_layouts"]
+    except KeyError as error:
+        raise ValidationError("error.planner.invalid") from error
+
+
+def _referenced_part_ids(session: Session) -> set[int]:
+    found = {int(part_id) for part_id in session.scalars(select(TrackPlanInstance.part_id))}
+    for data in session.scalars(select(_layouts().c.data)):
+        found.update(_part_ids_in_document(data))
+    return found
+
+
+def _part_ids_in_document(data: object) -> set[int]:
+    if not isinstance(data, dict):
+        return set()
+    raw = data.get("instances")
+    if not isinstance(raw, list):
+        return set()
+    found: set[int] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        part_id = item.get("part_id")
+        if isinstance(part_id, bool) or not isinstance(part_id, int):
+            continue
+        found.add(part_id)
+    return found
+
+
+def _retarget_document(data: object, previous: set[int], current_id: int) -> object:
+    if not isinstance(data, dict):
+        return data
+    raw = data.get("instances")
+    if not isinstance(raw, list):
+        return data
+    changed = False
+    instances: list[object] = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("part_id") in previous:
+            instances.append({**item, "part_id": current_id})
+            changed = True
+        else:
+            instances.append(item)
+    if not changed:
+        return data
+    updated = dict(data)
+    updated["instances"] = instances
+    return updated
+
+
+def _move_stock(session: Session, old_id: int, new_id: int) -> None:
+    row = session.get(TrackPartStock, old_id)
+    if row is None:
+        return
+    amount = row.quantity
+    session.delete(row)
+    session.flush()
+    session.add(TrackPartStock(part_id=new_id, quantity=amount))
+
+
+def _move_package_contents(session: Session, old_id: int, new_id: int) -> None:
+    session.execute(
+        update(TrackPartPackageContent)
+        .where(TrackPartPackageContent.part_id == old_id)
+        .values(part_id=new_id)
+    )
 
 
 def _package_identity(item: PackageSpec | TrackPartPackage) -> tuple[str, str]:
