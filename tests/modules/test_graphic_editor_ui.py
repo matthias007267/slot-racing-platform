@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import replace
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
@@ -16,7 +15,6 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QLabel,
@@ -40,8 +38,6 @@ from slot_racing.modules.track_planner.parametric import (
 from slot_racing.modules.track_planner.parts import (
     PartRecord,
     PartSpec,
-    SlotSpan,
-    driving_paths,
     same_geometry,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
@@ -211,6 +207,10 @@ def _squeeze(editor: GraphicEditor) -> None:
     for x in (-70.0, 70.0):
         _drag(canvas, (x, -50.0), (x, -20.0))
         _drag(canvas, (x, 50.0), (x, 20.0))
+
+
+def _shifted(point: ed.PointRef, x_mm: float) -> Callable[[PartSpec], PartSpec]:
+    return lambda spec: ed.move_point(spec, point, x_mm, 12.0)
 
 
 def _fill_identity(dialog: PartDialog, article: str, name: str) -> None:
@@ -389,8 +389,9 @@ def test_dragging_a_control_point_with_the_mouse_undo_and_redo(qtbot: QtBot, env
         assert moved[1] == pytest.approx(target[1], abs=2.0)
         assert moved[0] == pytest.approx(target[0], abs=2.0)
         for name in ("p0", "p3"):
-            assert ed.handle_points(ed.spans_of(controller.spec, ref)[0])[name] == (
-                ed.handle_points(ed.spans_of(base, ref)[0])[name]
+            assert (
+                ed.handle_points(ed.spans_of(controller.spec, ref)[0])[name]
+                == (ed.handle_points(ed.spans_of(base, ref)[0])[name])
             )
         undo = _button(editor, "gfx-undo")
         redo = _button(editor, "gfx-redo")
@@ -431,7 +432,6 @@ def test_a_drag_writes_one_history_step_and_no_database_row(
         steps += 1
         assert saved["count"] == 0
         assert editor.session.undo()
-        assert editor.session.undo()
         assert not editor.session.undo()
     assert saved["count"] == 0
     assert len(planner.list_parts()) == before_rows
@@ -467,7 +467,9 @@ def test_cancel_asks_before_dropping_drawn_changes_and_stores_nothing(
 
     def question(*_args: object, **_kwargs: object) -> QMessageBox.StandardButton:
         answers.append("asked")
-        return QMessageBox.StandardButton.No if len(answers) == 1 else QMessageBox.StandardButton.Yes
+        return (
+            QMessageBox.StandardButton.No if len(answers) == 1 else QMessageBox.StandardButton.Yes
+        )
 
     monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
     with _open(qtbot, env, planner) as dialog:
@@ -507,7 +509,11 @@ def test_unchanged_drawing_tab_does_not_make_the_dialog_dirty(qtbot: QtBot, env:
         dialog.tabs.setCurrentIndex(PARAM_TAB)
         assert not dialog._dirty()
         editor = _draw(dialog)
-        editor.controller.run(lambda spec: ed.explicit(spec))
+        assert not editor.session.changed
+        assert not dialog._dirty()
+        ref = ed.groove_refs(editor.session.spec)[0]
+        node = ed.PointRef(ref, 0, "start")
+        editor.controller.run(lambda spec: ed.move_point(spec, node, -172.5, -45.0))
         assert dialog._dirty()
         editor.session.undo()
         assert not dialog._dirty()
@@ -583,8 +589,13 @@ def test_reparametrizing_needs_a_confirmation_and_is_exact(
     planner = _planner(env)
     with _open(qtbot, env, planner) as dialog:
         _fill_identity(dialog, "EB-RP", "Zurück")
+        dialog.lanes.setValue(1)
         editor = _draw(dialog)
-        editor.controller.run(ed.explicit)
+        ref = ed.groove_refs(editor.session.spec)[0]
+        for handle in ("start", "end"):
+            moved = ed.PointRef(ref, 0, handle)
+            x_mm = ed.handle_points(ed.spans_of(editor.session.spec, ref)[0])[handle][0]
+            editor.controller.run(_shifted(moved, x_mm))
         spec = editor.session.result()
         assert ed.validate_editing(spec) == ()
         reparam = _button(dialog, "part-reparametrize")

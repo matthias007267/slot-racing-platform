@@ -301,12 +301,27 @@ def route_is_simple(spec: PartSpec) -> bool:
 # Session
 
 
+def _written_out(base: PartSpec) -> PartSpec:
+    """What the canvas shows first: a derived straight or curve with its grooves written out.
+
+    The session only counts as changed once the shown part differs from this. A part the editor
+    cannot draw, or that is damaged, is shown as stored.
+    """
+    if ed.support_reason(base) != "":
+        return base
+    try:
+        return ed.explicit(base)
+    except ValidationError:
+        return base
+
+
 @dataclass(slots=True)
 class EditSession:
     """The part being drawn, its starting state and the undo history."""
 
     base: PartSpec
     spec: PartSpec = field(init=False)
+    shown: PartSpec = field(init=False)
     _undo: list[PartSpec] = field(default_factory=list, init=False, repr=False)
     _redo: list[PartSpec] = field(default_factory=list, init=False, repr=False)
     _live_from: PartSpec | None = field(default=None, init=False, repr=False)
@@ -316,11 +331,12 @@ class EditSession:
     listeners: list[Callable[[], None]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.spec = self.base
+        self.shown = _written_out(self.base)
+        self.spec = self.shown
 
     @property
     def changed(self) -> bool:
-        return self.spec != self.base
+        return self.spec != self.shown
 
     @property
     def is_live(self) -> bool:
@@ -337,7 +353,7 @@ class EditSession:
 
     def result(self) -> PartSpec:
         """The part as it would be saved: measures, category and outline brought in line."""
-        return ed.finalize(self.spec, self.base) if self.changed else self.spec
+        return ed.finalize(self.spec, self.base) if self.changed else self.base
 
     def issues(self) -> tuple[ed.EditIssue, ...]:
         """Problems that block saving. Cached for the current spec."""
@@ -353,7 +369,8 @@ class EditSession:
 
     def reset(self, base: PartSpec) -> None:
         self.base = base
-        self.spec = base
+        self.shown = _written_out(base)
+        self.spec = self.shown
         self._undo.clear()
         self._redo.clear()
         self._live_from = None

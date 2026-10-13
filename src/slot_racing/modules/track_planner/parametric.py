@@ -250,9 +250,7 @@ def _straight(draft: PartDraft) -> PartSpec:
         lane_count=draft.lane_count,
         connectors=straight_connectors(length, draft.lane_count),
         outline=rectangle(length, width),
-        slot_paths=()
-        if standard
-        else _straight_paths(length, offsets, draft.centerlines),
+        slot_paths=() if standard else _straight_paths(length, offsets, draft.centerlines),
         border_edges=() if standard else edges,
     )
 
@@ -462,8 +460,8 @@ def _stored_curve(spec: PartSpec, angle: float) -> tuple[str, tuple[float, ...]]
     offsets = _radii_as_offsets(spec, left)
     if offsets is None:
         return None
-    expected = _curve_paths(radius, angle, offsets, left, True)[len(grooves) :]
-    if not _centers_match(spec, expected):
+    centers = _curve_paths(radius, angle, offsets, left, True)[len(grooves) :]
+    if not _centers_match(spec, centers):
         return None
     return (DIRECTION_LEFT if left else DIRECTION_RIGHT), offsets
 

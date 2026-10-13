@@ -1193,7 +1193,7 @@ class GraphicEditor(QWidget):
         t = self.translator.translate
         if not ask(self, t("planner.gfx.border_convert"), t("planner.gfx.border_convert_confirm")):
             return
-        if self._run(ed.to_custom_border):
+        if self.controller.run(ed.to_custom_border):
             self._reason = ""
             self.canvas.read_only = False
             self._set_layer_choices()

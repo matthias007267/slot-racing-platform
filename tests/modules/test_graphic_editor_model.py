@@ -704,7 +704,7 @@ def test_undo_redo_follow_any_change_and_a_new_change_clears_redo() -> None:
     assert not session.can_redo
     while session.undo():
         pass
-    assert session.spec == session.base
+    assert session.spec == session.shown
     assert not session.changed
 
 
