@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import Literal
 
 from slot_racing.core.errors import ValidationError
@@ -23,7 +24,9 @@ from slot_racing.modules.track_planner.parts import (
     BORDER,
     CURVE,
     LANE_PITCH_MM,
+    PATH_CENTER,
     PATH_CONTOUR,
+    PATH_SLOT,
     SPECIAL,
     STRAIGHT,
     AttachmentProfile,
@@ -71,6 +74,8 @@ class PartDraft:
     host_lanes: int
     # True when the stored part already has grooves, so a save writes them again.
     explicit_grooves: bool = False
+    # True when the stored grooves come with dashed centre lines between neighbouring lanes.
+    centerlines: bool = False
     host_shape: str = ""
 
 
@@ -99,6 +104,7 @@ def draft_from_spec(spec: PartSpec) -> PartDraft | None:
             border_side=SIDE_BOTH,
             host_lanes=spec.lane_count,
             explicit_grooves=bool(spec.slot_paths),
+            centerlines=_has_centers(spec),
         )
     curve = _simple_curve(spec)
     if curve is None:
@@ -118,6 +124,7 @@ def draft_from_spec(spec: PartSpec) -> PartDraft | None:
         border_side="outer",
         host_lanes=spec.lane_count,
         explicit_grooves=bool(spec.slot_paths),
+        centerlines=_has_centers(spec),
     )
 
 
@@ -243,7 +250,9 @@ def _straight(draft: PartDraft) -> PartSpec:
         lane_count=draft.lane_count,
         connectors=straight_connectors(length, draft.lane_count),
         outline=rectangle(length, width),
-        slot_paths=() if standard else _straight_paths(length, offsets),
+        slot_paths=()
+        if standard
+        else _straight_paths(length, offsets, draft.centerlines),
         border_edges=() if standard else edges,
     )
 
@@ -273,7 +282,7 @@ def _curve(draft: PartDraft) -> PartSpec:
     contours: tuple[SlotPath, ...] = ()
     edges: tuple[BorderEdge, ...] = ()
     if not standard:
-        paths = _curve_paths(radius, angle, offsets, left)
+        paths = _curve_paths(radius, angle, offsets, left, draft.centerlines)
         contours = _curve_contours(radius, angle, width, left)
         edges = _curve_edges(radius, angle, width, left)
     return _shell(
@@ -406,9 +415,14 @@ def _simple_straight(spec: PartSpec) -> bool:
         return False
     if spec.connectors != straight_connectors(length, spec.lane_count):
         return False
-    if not _only_lines(spec.slot_paths) or not _edges_are_straight(spec):
+    if not _only_lines(_grooves(spec)) or not _edges_are_straight(spec):
         return False
-    return _parallel(spec, length)
+    if not _parallel(spec, length):
+        return False
+    if not spec.slot_paths:
+        return True
+    expected = _straight_paths(length, _stored_offsets(spec), True)[len(_grooves(spec)) :]
+    return _centers_match(spec, expected)
 
 
 def _simple_curve(spec: PartSpec) -> tuple[str, tuple[float, ...]] | None:
@@ -429,10 +443,11 @@ def _simple_curve(spec: PartSpec) -> tuple[str, tuple[float, ...]] | None:
 
 
 def _stored_curve(spec: PartSpec, angle: float) -> tuple[str, tuple[float, ...]] | None:
-    sweeps = [span.sweep_deg for path in spec.slot_paths for span in path.spans]
-    if not sweeps or any(path.kind != "slot" or len(path.spans) != 1 for path in spec.slot_paths):
+    grooves = _grooves(spec)
+    sweeps = [span.sweep_deg for path in grooves for span in path.spans]
+    if not sweeps or any(len(path.spans) != 1 for path in grooves):
         return None
-    if any(span.kind != "arc" for path in spec.slot_paths for span in path.spans):
+    if any(span.kind != "arc" for path in grooves for span in path.spans):
         return None
     left = sweeps[0] < 0.0
     if any((item < 0.0) != left or abs(abs(item) - angle) > 1e-6 for item in sweeps):
@@ -446,6 +461,9 @@ def _stored_curve(spec: PartSpec, angle: float) -> tuple[str, tuple[float, ...]]
         return None
     offsets = _radii_as_offsets(spec, left)
     if offsets is None:
+        return None
+    expected = _curve_paths(radius, angle, offsets, left, True)[len(grooves) :]
+    if not _centers_match(spec, expected):
         return None
     return (DIRECTION_LEFT if left else DIRECTION_RIGHT), offsets
 
@@ -516,12 +534,24 @@ def _border_draft(
     )
 
 
-def _straight_paths(length: float, offsets: tuple[float, ...]) -> tuple[SlotPath, ...]:
+def _straight_paths(
+    length: float, offsets: tuple[float, ...], centerlines: bool = False
+) -> tuple[SlotPath, ...]:
     half = length / 2.0
-    return tuple(
+    grooves = tuple(
         SlotPath((SlotSpan.line(-half, y_mm, half, y_mm),), lane=index + 1)
         for index, y_mm in enumerate(offsets)
     )
+    if not centerlines:
+        return grooves
+    middles = tuple(
+        SlotPath(
+            (SlotSpan.line(-half, (left + right) / 2.0, half, (left + right) / 2.0),),
+            PATH_CENTER,
+        )
+        for left, right in pairwise(offsets)
+    )
+    return grooves + middles
 
 
 def _straight_edges(length: float, width: float) -> tuple[BorderEdge, ...]:
@@ -534,9 +564,13 @@ def _straight_edges(length: float, width: float) -> tuple[BorderEdge, ...]:
 
 
 def _curve_paths(
-    radius: float, angle: float, offsets: tuple[float, ...], left: bool
+    radius: float,
+    angle: float,
+    offsets: tuple[float, ...],
+    left: bool,
+    centerlines: bool = False,
 ) -> tuple[SlotPath, ...]:
-    return tuple(
+    grooves = tuple(
         SlotPath(
             (
                 SlotSpan.arc(
@@ -547,6 +581,17 @@ def _curve_paths(
         )
         for index, offset in enumerate(offsets)
     )
+    if not centerlines:
+        return grooves
+    radii = [_groove_radius(radius, offset, left) for offset in offsets]
+    middles = tuple(
+        SlotPath(
+            (SlotSpan.arc(0.0, 0.0, (inner + outer) / 2.0, *_arc_angles(angle, left)),),
+            PATH_CENTER,
+        )
+        for inner, outer in pairwise(radii)
+    )
+    return grooves + middles
 
 
 def _curve_contours(radius: float, angle: float, width: float, left: bool) -> tuple[SlotPath, ...]:
@@ -661,13 +706,13 @@ def _finite_offsets(offsets: tuple[float, ...]) -> None:
 def _stored_offsets(spec: PartSpec) -> tuple[float, ...]:
     if not spec.slot_paths:
         return _centered(spec.lane_count, LANE_PITCH_MM)
-    ordered = sorted((path.lane or 0, path.spans[0].y0) for path in spec.slot_paths if path.spans)
+    ordered = sorted((path.lane or 0, path.spans[0].y0) for path in _grooves(spec) if path.spans)
     return tuple(y_mm for _lane, y_mm in ordered)
 
 
 def _radii_as_offsets(spec: PartSpec, left: bool) -> tuple[float, ...] | None:
     center = float(spec.radius_mm or 0.0)
-    ordered = sorted(spec.slot_paths, key=lambda path: path.lane or 0)
+    ordered = sorted(_grooves(spec), key=lambda path: path.lane or 0)
     if len(ordered) != spec.lane_count:
         return None
     offsets: list[float] = []
@@ -679,6 +724,44 @@ def _radii_as_offsets(spec: PartSpec, left: bool) -> tuple[float, ...] | None:
     return tuple(offsets)
 
 
+def _grooves(spec: PartSpec) -> tuple[SlotPath, ...]:
+    return tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
+
+
+def _has_centers(spec: PartSpec) -> bool:
+    return any(path.kind == PATH_CENTER for path in spec.slot_paths)
+
+
+def _centers_match(spec: PartSpec, expected: tuple[SlotPath, ...]) -> bool:
+    """No centre lines, or exactly the ones the editor would write for these grooves."""
+    stored = tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
+    if not stored:
+        return True
+    if len(stored) != len(expected):
+        return False
+    return all(_same_path(left, right) for left, right in zip(stored, expected, strict=True))
+
+
+def _same_path(left: SlotPath, right: SlotPath) -> bool:
+    if len(left.spans) != len(right.spans) or left.kind != right.kind:
+        return False
+    for one, other in zip(left.spans, right.spans, strict=True):
+        if one.kind != other.kind:
+            return False
+        pairs = (
+            (one.x0, other.x0),
+            (one.y0, other.y0),
+            (one.x1, other.x1),
+            (one.y1, other.y1),
+            (one.radius_mm, other.radius_mm),
+            (one.start_deg, other.start_deg),
+            (one.sweep_deg, other.sweep_deg),
+        )
+        if any(abs(a - b) > 1e-6 for a, b in pairs):
+            return False
+    return True
+
+
 def _only_lines(paths: tuple[SlotPath, ...]) -> bool:
     return all(len(path.spans) == 1 and path.spans[0].kind == "line" for path in paths)
 
@@ -687,10 +770,11 @@ def _parallel(spec: PartSpec, length: float) -> bool:
     if not spec.slot_paths:
         return True
     half = length / 2.0
-    lanes = [path.lane for path in spec.slot_paths]
+    grooves = _grooves(spec)
+    lanes = [path.lane for path in grooves]
     if sorted(lane for lane in lanes if lane is not None) != list(range(1, spec.lane_count + 1)):
         return False
-    for path in spec.slot_paths:
+    for path in grooves:
         span = path.spans[0]
         if abs(span.y0 - span.y1) > 1e-6:
             return False

@@ -86,6 +86,7 @@ class PartCanvas(QWidget):
         self.show_grid = True
         self._fitted = False
         self._panning: QPointF | None = None
+        self._left_down = False
 
     # ------------------------------------------------------------------ view
 
@@ -179,6 +180,7 @@ class PartCanvas(QWidget):
             return
         if button != Qt.MouseButton.LeftButton or self.read_only:
             return
+        self._left_down = True
         x, y = self.to_world(event.position())
         self.controller.press(x, y, self.tolerance_mm(), self.arrow_mm())
         self.update()
@@ -192,7 +194,7 @@ class PartCanvas(QWidget):
         if self.read_only:
             return
         x, y = self.to_world(event.position())
-        pressed = bool(event.buttons() & Qt.MouseButton.LeftButton)
+        pressed = self._left_down or bool(event.buttons() & Qt.MouseButton.LeftButton)
         self.controller.move(x, y, self.tolerance_mm(), pressed=pressed)
         self.update()
 
@@ -203,7 +205,10 @@ class PartCanvas(QWidget):
         }:
             self._panning = None
             return
-        if event.button() != Qt.MouseButton.LeftButton or self.read_only:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._left_down = False
+        if self.read_only:
             return
         x, y = self.to_world(event.position())
         self.controller.release(x, y, self.tolerance_mm())

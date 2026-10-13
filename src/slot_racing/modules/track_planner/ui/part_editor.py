@@ -98,6 +98,7 @@ class PartDialog(FormDialog):
         self._source = None if record is None else record.spec
         self._duplicate = duplicate
         self._explicit = False
+        self._centerlines = False
         self._host_shape = ""
         self._locked = False
         self._corrupt = False
@@ -265,6 +266,7 @@ class PartDialog(FormDialog):
             border_side=str(self.border_side.currentData()),
             host_lanes=int(self.lanes.value()),
             explicit_grooves=self._explicit,
+            centerlines=self._centerlines,
             host_shape=self._host_shape,
         )
 
@@ -312,6 +314,7 @@ class PartDialog(FormDialog):
             self.angle.setValue(0.0 if spec.angle_deg is None else spec.angle_deg)
         else:
             self._explicit = draft.explicit_grooves
+            self._centerlines = draft.centerlines
             self._host_shape = draft.host_shape
             self._apply_draft(draft)
         if corrupt:
@@ -617,6 +620,7 @@ class PartDialog(FormDialog):
         spec = graphic.result()
         self._locked = False
         self._explicit = draft.explicit_grooves
+        self._centerlines = draft.centerlines
         self._host_shape = draft.host_shape
         self._select(self.category, spec.category)
         self._apply_draft(draft)
