@@ -88,6 +88,7 @@ from slot_racing.modules.track_planner.parts import (
     PartRecord,
     PartSpec,
     can_dock,
+    is_plate_draft,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
@@ -1410,7 +1411,7 @@ class PlannerPage(QWidget):
         self._apply_filters()
 
     def _apply_filters(self) -> None:
-        records = list(self._records)
+        records = [record for record in self._records if not is_plate_draft(record.spec)]
         scale = self.scale_filter.currentData()
         if isinstance(scale, str):
             records = [record for record in records if record.spec.scale == scale]

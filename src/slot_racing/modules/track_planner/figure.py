@@ -27,6 +27,7 @@ from slot_racing.modules.track_planner.parts import (
     BORDER,
     CROSSING,
     CURVE,
+    DRAFT,
     LANE_CHANGE,
     LANE_PITCH_MM,
     PATH_CENTER,
@@ -341,6 +342,8 @@ def _slots_and_centers(spec: PartSpec) -> tuple[tuple[SlotPath, ...], tuple[Slot
 
 
 def _derived_slots(spec: PartSpec) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...]]:
+    if spec.category == DRAFT:
+        return (), ()
     length = spec.length_mm or 0.0
     if spec.category == SWITCH:
         return _split(lane_change_paths(length, "left"))

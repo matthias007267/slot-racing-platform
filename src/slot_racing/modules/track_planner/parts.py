@@ -47,6 +47,8 @@ PITLANE = "pitlane"
 SPECIAL = "special"
 BORDER = "border"
 SUPPORT = "support"
+# A floor-plate sketch. It is stored geometry, not a rail the planner may place.
+DRAFT = "draft"
 CATEGORIES = (
     STRAIGHT,
     CURVE,
@@ -245,6 +247,11 @@ ORIGIN_CATALOG = "catalog"
 ORIGIN_MODIFIED = "modified"
 ORIGIN_CUSTOM = "custom"
 PART_ORIGINS = frozenset({ORIGIN_CATALOG, ORIGIN_MODIFIED, ORIGIN_CUSTOM})
+
+
+def is_plate_draft(spec: PartSpec) -> bool:
+    """True when this row is a floor-plate sketch and must not be placed on a plan."""
+    return spec.category == DRAFT
 
 
 @dataclass(frozen=True, slots=True)
@@ -969,6 +976,8 @@ def driving_paths(spec: PartSpec) -> tuple[GeometryPath, ...]:
             lane = path.lane if path.lane is not None else index + 1
             paths.append(GeometryPath(geometry.segments, "slot", lane, path.slot))
         return tuple(paths)
+    if spec.category == DRAFT:
+        return ()
     if _parametric_curve(spec):
         return _curve_paths(spec)
     length = spec.length_mm
