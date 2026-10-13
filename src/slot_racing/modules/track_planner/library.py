@@ -50,6 +50,7 @@ from slot_racing.modules.track_planner.parts import (
     decode_geometry,
     encode_geometry,
     encode_slot_paths,
+    geometry_payload_corrupt,
     identity_key,
     merge_preserved_geometry,
     require_scale,
@@ -149,11 +150,14 @@ class PartLibrary:
                     raise ValidationError("error.planner.part")
                 if not definition.is_current:
                     definition = self._current_of(session, definition.lineage_id)
-                stored = self._record(session, definition).spec
+                stored_record = self._record(session, definition)
+                stored = stored_record.spec
+                raw_paths = definition.slot_paths
+                corrupt = stored_record.geometry_corrupt
                 spec = merge_preserved_geometry(stored, spec)
+                if corrupt and not same_geometry(stored, spec):
+                    raise ValidationError("error.planner.geometry")
                 validate_part_geometry(spec)
-                if not spec.manufacturer.strip():
-                    spec = replace(spec, manufacturer=definition.manufacturer or "")
                 self._reject_duplicate(session, spec, except_id=definition.id)
                 geometry_changed = not same_geometry(stored, spec)
                 chosen = origin
@@ -167,6 +171,8 @@ class PartLibrary:
                     updated = self._fork(session, definition, spec, chosen)
                 else:
                     self._apply(session, definition, spec, chosen)
+                    if corrupt:
+                        definition.slot_paths = raw_paths
                     session.flush()
                     updated = self._record(session, definition)
         except IntegrityError as error:
@@ -744,6 +750,7 @@ class PartLibrary:
             .where(TrackPartConnector.part_id == definition.id)
             .order_by(TrackPartConnector.sort_order, TrackPartConnector.id)
         )
+        corrupt = geometry_payload_corrupt(definition.slot_paths)
         slots, contours, edges = decode_geometry(definition.slot_paths)
         profile = _attachment_profile(definition)
         if profile is not None:
@@ -788,6 +795,7 @@ class PartLibrary:
             revision=definition.revision,
             origin=definition.origin,
             is_current=definition.is_current,
+            geometry_corrupt=corrupt,
         )
 
     def _needs_attachment_refresh(
@@ -863,8 +871,7 @@ class PartLibrary:
         definition.outline = [list(point) for point in spec.outline]
         definition.slot_paths = encode_geometry(spec)
         definition.origin = origin
-        if spec.manufacturer.strip():
-            definition.manufacturer = spec.manufacturer.strip()
+        definition.manufacturer = spec.manufacturer.strip()
         definition.description = spec.description.strip() or None
         self._assign_attachment(definition, spec)
         session.execute(

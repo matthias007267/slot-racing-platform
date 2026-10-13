@@ -261,6 +261,8 @@ class PartRecord:
     revision: int = 1
     origin: str = ORIGIN_CUSTOM
     is_current: bool = True
+    # The JSON could not be read. Saving must not replace it with derived lanes.
+    geometry_corrupt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,10 +353,10 @@ def same_geometry(left: PartSpec, right: PartSpec) -> bool:
 
 
 def merge_preserved_geometry(stored: PartSpec, incoming: PartSpec) -> PartSpec:
-    """Keep stored grooves and joints when a parametric edit did not change the measures.
+    """Keep stored grooves and joints when the incoming spec has no explicit geometry.
 
-    The library dialog rebuilds a part from length and radius and drops stored slot
-    paths. A rename or a scale change must not become a different body.
+    A form that only repeats the measures must not wipe a switch or a Bézier groove.
+    An edit that sends slot paths, contours or border edges is stored as given.
     """
     if _has_explicit_geometry(incoming) or not _has_explicit_geometry(stored):
         return incoming
@@ -903,6 +905,15 @@ def lane_offset_mm(index: int, lane_count: int) -> float:
     return (index - (lane_count - 1) / 2.0) * LANE_PITCH_MM
 
 
+def curve_bends_left(spec: PartSpec) -> bool:
+    """True when a stored arc sweeps toward negative y. Catalogue curves do not."""
+    return any(
+        span.kind == SPAN_ARC and span.sweep_deg < 0.0
+        for path in spec.slot_paths
+        for span in path.spans
+    )
+
+
 def curve_lane_radius(center_mm: float, index: int, lane_count: int) -> float:
     """Groove radius on a catalogue curve.
 
@@ -1194,6 +1205,20 @@ def encode_geometry(spec: PartSpec) -> list[dict[str, object]]:
                 {"kind": PATH_BORDER, "slot": slot, "spans": _encode_spans(profile.edge)}
             )
     return encoded
+
+
+def geometry_payload_corrupt(payload: object) -> bool:
+    """True when stored JSON is present but cannot be read as grooves, contours or edges.
+
+    ``None`` and an empty list still mean the ordinary lanes. A broken custom
+    entry must not be treated as that empty list.
+    """
+    if payload is None or payload == []:
+        return False
+    if not isinstance(payload, list):
+        return True
+    slots, contours, edges = decode_geometry(payload)
+    return not slots and not contours and not edges
 
 
 def decode_slot_paths(payload: object) -> tuple[SlotPath, ...]:

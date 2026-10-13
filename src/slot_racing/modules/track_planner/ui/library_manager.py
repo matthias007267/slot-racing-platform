@@ -24,6 +24,7 @@ from slot_racing.modules.track_planner.trace import trace
 from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog, destroy_widget
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_view import PartPreview
+from slot_racing.modules.track_planner.ui.part_editor import offer_adoption
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import set_role
 from slot_racing.uikit.widgets import StatusLabel
@@ -66,18 +67,32 @@ class LibraryManager(QDialog):
         scroll.setObjectName("library-manager-scroll")
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._list)
+        self.add_button = QPushButton(translate("planner.library.add"))
+        self.add_button.setObjectName("library-manager-add")
+        self.add_button.clicked.connect(self.add_part)
         self.edit_button = QPushButton(translate("planner.library.edit"))
         self.edit_button.setObjectName("library-manager-edit")
         self.edit_button.clicked.connect(self.edit_selected)
+        self.duplicate_button = QPushButton(translate("planner.library.duplicate"))
+        self.duplicate_button.setObjectName("library-manager-duplicate")
+        self.duplicate_button.clicked.connect(self.duplicate_selected)
+        self.adopt_button = QPushButton(translate("planner.library.adopt"))
+        self.adopt_button.setObjectName("library-manager-adopt")
+        self.adopt_button.clicked.connect(self.adopt_selected)
         self.delete_button = QPushButton(translate("planner.library.delete"))
         self.delete_button.setObjectName("library-manager-delete")
         set_role(self.delete_button, "ghost")
         self.delete_button.clicked.connect(self.delete_selected)
         self.edit_button.setEnabled(False)
+        self.duplicate_button.setEnabled(False)
+        self.adopt_button.setEnabled(False)
         self.delete_button.setEnabled(False)
         self.status = StatusLabel("library-manager-message")
         actions = QHBoxLayout()
+        actions.addWidget(self.add_button)
         actions.addWidget(self.edit_button)
+        actions.addWidget(self.duplicate_button)
+        actions.addWidget(self.adopt_button)
         actions.addWidget(self.delete_button)
         actions.addStretch(1)
         layout = QVBoxLayout(self)
@@ -107,29 +122,63 @@ class LibraryManager(QDialog):
             self._rows.append(row)
             self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
             row.set_current(row.part_id == self._selected)
-        self.edit_button.setEnabled(self._selected is not None)
-        self.delete_button.setEnabled(self._selected is not None)
+        self._sync_actions()
         self._apply_search()
 
     def select_part(self, part_id: int) -> None:
         self._selected = part_id
         for row in self._rows:
             row.set_current(row.part_id == part_id)
-        self.edit_button.setEnabled(True)
-        self.delete_button.setEnabled(True)
+        self._sync_actions()
+
+    def add_part(self) -> None:
+        self._open_editor(None)
 
     def edit_selected(self) -> None:
         record = self._current()
         if record is None:
             return
-        dialog = PartDialog(self._translator, self._planner, record, parent=self)
+        self._open_editor(record)
+
+    def duplicate_selected(self) -> None:
+        record = self._current()
+        if record is None:
+            return
+        self._open_editor(record, duplicate=True)
+
+    def adopt_selected(self) -> None:
+        record = self._current()
+        if record is None:
+            return
+        if not self._planner.tracks_on_previous_geometry(record.id):
+            self.status.show_info(self._translator.translate("planner.library.adopt_none"))
+            return
+        changed = offer_adoption(self, self._translator, self._planner, record)
+        if changed:
+            self.status.show_info(self._translator.translate("planner.library.updated"))
+
+    def _open_editor(self, record: PartRecord | None, *, duplicate: bool = False) -> None:
+        dialog = PartDialog(
+            self._translator, self._planner, record, parent=self, duplicate=duplicate
+        )
+        saved = None
         try:
             accepted = bool(dialog.exec())
+            saved = dialog.saved
         finally:
             destroy_dialog(dialog)
         if accepted:
+            if saved is not None:
+                self._selected = saved.id
             self.reload()
             self.status.show_info(self._translator.translate("planner.library.updated"))
+
+    def _sync_actions(self) -> None:
+        chosen = self._selected is not None
+        self.edit_button.setEnabled(chosen)
+        self.duplicate_button.setEnabled(chosen)
+        self.adopt_button.setEnabled(chosen)
+        self.delete_button.setEnabled(chosen)
 
     def delete_selected(self) -> None:
         record = self._current()

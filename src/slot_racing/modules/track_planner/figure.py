@@ -253,39 +253,46 @@ def _arc_figure(spec: PartSpec) -> TrackFigure:
     angle = float(spec.angle_deg or 0.0)
     width = spec.width_mm or track_width(spec.lane_count)
     road = RoadArc(radius, angle, width)
-    slots = tuple(
-        SlotPath(
-            (
-                SlotSpan.arc(
-                    0.0,
-                    0.0,
-                    curve_lane_radius(radius, index, spec.lane_count),
-                    road.start_deg,
-                    angle,
-                ),
-            )
-        )
-        for index in range(spec.lane_count)
-    )
-    centers: tuple[SlotPath, ...] = ()
-    if spec.lane_count >= 2:
-        radii = [
-            curve_lane_radius(radius, index, spec.lane_count) for index in range(spec.lane_count)
-        ]
-        centers = tuple(
+    stored = tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
+    if stored:
+        slots = stored
+        centers = tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
+    else:
+        slots = tuple(
             SlotPath(
-                (SlotSpan.arc(0.0, 0.0, (left + right) / 2.0, road.start_deg, angle),),
-                PATH_CENTER,
+                (
+                    SlotSpan.arc(
+                        0.0,
+                        0.0,
+                        curve_lane_radius(radius, index, spec.lane_count),
+                        road.start_deg,
+                        angle,
+                    ),
+                )
             )
-            for left, right in pairwise(radii)
+            for index in range(spec.lane_count)
         )
+        centers = ()
+        if spec.lane_count >= 2:
+            radii = [
+                curve_lane_radius(radius, index, spec.lane_count)
+                for index in range(spec.lane_count)
+            ]
+            centers = tuple(
+                SlotPath(
+                    (SlotSpan.arc(0.0, 0.0, (left + right) / 2.0, road.start_deg, angle),),
+                    PATH_CENTER,
+                )
+                for left, right in pairwise(radii)
+            )
+    # A stored contour is the real outline. The right-hand annulus would hide a left bend.
     edges = spec.contours or (
         SlotPath((SlotSpan.arc(0.0, 0.0, road.outer_mm, road.start_deg, angle),)),
         SlotPath((SlotSpan.arc(0.0, 0.0, road.inner_mm, road.start_deg, angle),)),
     )
     return TrackFigure(
         roadway=spec.outline,
-        road_arc=road,
+        road_arc=None if spec.contours else road,
         slots=slots,
         centerlines=_dashed(centers),
         edges=edges,

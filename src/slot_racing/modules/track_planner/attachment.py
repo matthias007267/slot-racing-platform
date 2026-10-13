@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from slot_racing.modules.track_planner.parts import (
     CURVE,
+    LANE_PITCH_MM,
     SPECIAL,
     STRAIGHT,
     AttachmentProfile,
@@ -21,7 +22,7 @@ from slot_racing.modules.track_planner.parts import (
     PartSpec,
     SlotSpan,
     arc_outline,
-    track_width,
+    curve_bends_left,
 )
 
 HOST_STRAIGHT = "straight"
@@ -45,7 +46,7 @@ _MEASURE_MM = 0.5
 
 def host_shape(spec: PartSpec) -> str | None:
     """Which attachment family a rail belongs to. An accessory is not a host."""
-    if spec.attachment is not None:
+    if spec.attachment is not None or curve_bends_left(spec):
         return None
     if spec.category == STRAIGHT and spec.length_mm:
         return HOST_STRAIGHT
@@ -109,7 +110,7 @@ def placed_outline(spec: PartSpec, slot: str | None) -> tuple[tuple[float, float
         return spec.outline
     if profile.host_shape == HOST_CUSTOM:
         return spec.outline
-    return _strip_outline(profile, slot)
+    return _strip_outline(spec, profile, slot)
 
 
 def follow_hosts(instances: tuple[PartInstance, ...]) -> tuple[PartInstance, ...]:
@@ -151,27 +152,43 @@ def _pose_of(instance: PartInstance, host: PartInstance) -> PartInstance:
     )
 
 
-def _strip_outline(profile: AttachmentProfile, slot: str) -> tuple[tuple[float, float], ...]:
+def _strip_outline(
+    spec: PartSpec, profile: AttachmentProfile, slot: str
+) -> tuple[tuple[float, float], ...]:
+    width = _strip_width(spec)
     if profile.host_shape == HOST_STRAIGHT:
         length = profile.host_length_mm or 0.0
-        return _shifted_rectangle(length, STRIP_WIDTH_MM, _straight_offset(slot))
+        return _shifted_rectangle(length, width, _straight_offset(profile, slot, width))
     radius = profile.host_radius_mm or 0.0
     angle = profile.host_angle_deg or 0.0
-    return arc_outline(_curve_radius(radius, slot), angle, STRIP_WIDTH_MM)
+    return arc_outline(_curve_radius(profile, radius, slot, width), angle, width)
 
 
-def _straight_offset(slot: str) -> float:
-    outside = track_width(2) / 2.0 + STRIP_WIDTH_MM / 2.0
+def _strip_width(spec: PartSpec) -> float:
+    if spec.width_mm is not None and spec.width_mm > 0.0:
+        return spec.width_mm
+    return STRIP_WIDTH_MM
+
+
+def _road_half(profile: AttachmentProfile) -> float:
+    lanes = profile.host_lanes or 2
+    return lanes * LANE_PITCH_MM / 2.0
+
+
+def _straight_offset(profile: AttachmentProfile, slot: str, width_mm: float) -> float:
+    outside = _road_half(profile) + width_mm / 2.0
     if slot == SLOT_LEFT:
         return -outside
     return outside
 
 
-def _curve_radius(road_radius: float, slot: str) -> float:
-    half = track_width(2) / 2.0
+def _curve_radius(
+    profile: AttachmentProfile, road_radius: float, slot: str, width_mm: float
+) -> float:
+    half = _road_half(profile)
     if slot == SLOT_OUTER:
-        return road_radius + half + STRIP_WIDTH_MM / 2.0
-    return max(road_radius - half - STRIP_WIDTH_MM / 2.0, STRIP_WIDTH_MM / 2.0)
+        return road_radius + half + width_mm / 2.0
+    return max(road_radius - half - width_mm / 2.0, width_mm / 2.0)
 
 
 def _shifted_rectangle(
