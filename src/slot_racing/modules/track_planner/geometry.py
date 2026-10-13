@@ -55,6 +55,17 @@ def _tangent_deg(dx: float, dy: float) -> float:
     return math.degrees(math.atan2(dy, dx)) % 360.0
 
 
+def _unit(value: float) -> float:
+    fraction = _finite(value)
+    if not 0.0 < fraction < 1.0:
+        raise ValidationError("error.planner.geometry")
+    return fraction
+
+
+def _lerp(left: tuple[float, float], right: tuple[float, float], t: float) -> tuple[float, float]:
+    return (left[0] + (right[0] - left[0]) * t, left[1] + (right[1] - left[1]) * t)
+
+
 def _turn_deg(start_deg: float, end_deg: float) -> float:
     return abs((end_deg - start_deg + 180.0) % 360.0 - 180.0)
 
@@ -133,6 +144,22 @@ class LineSegment:
             max(self.y0, self.y1),
         )
 
+    def split_at(self, t: float) -> tuple[LineSegment, LineSegment]:
+        fraction = _unit(t)
+        x, y = self.point_at(fraction)
+        return (LineSegment(self.x0, self.y0, x, y), LineSegment(x, y, self.x1, self.y1))
+
+    def closest(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+        """``(t, distance)`` of the nearest point on the segment."""
+        dx = self.x1 - self.x0
+        dy = self.y1 - self.y0
+        square = dx * dx + dy * dy
+        if square <= 0.0:
+            return (0.0, math.hypot(x_mm - self.x0, y_mm - self.y0))
+        t = min(max(((x_mm - self.x0) * dx + (y_mm - self.y0) * dy) / square, 0.0), 1.0)
+        px, py = self.point_at(t)
+        return (t, math.hypot(x_mm - px, y_mm - py))
+
 
 @dataclass(frozen=True, slots=True)
 class ArcSegment:
@@ -207,6 +234,37 @@ class ArcSegment:
         xs = [point[0] for point in points]
         ys = [point[1] for point in points]
         return Bounds(min(xs), min(ys), max(xs), max(ys))
+
+    def split_at(self, t: float) -> tuple[ArcSegment, ArcSegment]:
+        fraction = _unit(t)
+        first = self.sweep_deg * fraction
+        return (
+            ArcSegment(self.cx, self.cy, self.radius_mm, self.start_deg, first),
+            ArcSegment(
+                self.cx, self.cy, self.radius_mm, self.start_deg + first, self.sweep_deg - first
+            ),
+        )
+
+    def closest(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+        """``(t, distance)`` of the nearest point on the arc, ends included."""
+        dx = x_mm - self.cx
+        dy = y_mm - self.cy
+        if self.sweep_deg == 0.0:
+            return (0.0, math.hypot(x_mm - self.start()[0], y_mm - self.start()[1]))
+        angle = math.degrees(math.atan2(dy, dx)) if (dx or dy) else self.start_deg
+        sweep = self.sweep_deg
+        delta = (angle - self.start_deg) % 360.0
+        if sweep < 0.0:
+            delta = delta - 360.0 if delta > 0.0 else 0.0
+        inside = 0.0 <= delta <= sweep if sweep > 0.0 else sweep <= delta <= 0.0
+        if inside:
+            t = delta / sweep
+            return (t, abs(math.hypot(dx, dy) - self.radius_mm))
+        ends = ((0.0, self.start()), (1.0, self.end()))
+        return min(
+            ((end_t, math.hypot(x_mm - p[0], y_mm - p[1])) for end_t, p in ends),
+            key=lambda item: item[1],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +355,47 @@ class CubicBezier:
         for root in _bezier_critical_times(self.p0y, self.p1y, self.p2y, self.p3y):
             ys.append(_bezier_point(self._coords(), root)[1])
         return Bounds(min(xs), min(ys), max(xs), max(ys))
+
+    def split_at(self, t: float) -> tuple[CubicBezier, CubicBezier]:
+        """De Casteljau split. Both halves together draw the original curve."""
+        fraction = _unit(t)
+        p0, p1, p2, p3 = self.control_points()
+        q0 = _lerp(p0, p1, fraction)
+        q1 = _lerp(p1, p2, fraction)
+        q2 = _lerp(p2, p3, fraction)
+        r0 = _lerp(q0, q1, fraction)
+        r1 = _lerp(q1, q2, fraction)
+        mid = _lerp(r0, r1, fraction)
+        return (
+            CubicBezier(*p0, *q0, *r0, *mid),
+            CubicBezier(*mid, *r1, *q2, *p3),
+        )
+
+    def closest(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+        """``(t, distance)`` of the nearest point, found by sampling and refining."""
+        best_t = 0.0
+        best = math.inf
+        steps = 48
+        for index in range(steps + 1):
+            t = index / steps
+            px, py = self.point_at(t)
+            distance = math.hypot(x_mm - px, y_mm - py)
+            if distance < best:
+                best, best_t = distance, t
+        low = max(best_t - 1.0 / steps, 0.0)
+        high = min(best_t + 1.0 / steps, 1.0)
+        for _ in range(24):
+            left = low + (high - low) / 3.0
+            right = high - (high - low) / 3.0
+            lx, ly = self.point_at(left)
+            rx, ry = self.point_at(right)
+            if math.hypot(x_mm - lx, y_mm - ly) <= math.hypot(x_mm - rx, y_mm - ry):
+                high = right
+            else:
+                low = left
+        t = (low + high) / 2.0
+        px, py = self.point_at(t)
+        return (t, math.hypot(x_mm - px, y_mm - py))
 
     def _coords(self) -> tuple[float, float, float, float, float, float, float, float]:
         return (self.p0x, self.p0y, self.p1x, self.p1y, self.p2x, self.p2y, self.p3x, self.p3y)
@@ -536,6 +635,16 @@ def _simpson(
     return _simpson(coords, left, mid, tolerance / 2.0, depth - 1) + _simpson(
         coords, mid, right, tolerance / 2.0, depth - 1
     )
+
+
+def split_segment(segment: Segment, t: float) -> tuple[Segment, Segment]:
+    """Split at ``0 < t < 1``. Both parts follow the original curve."""
+    return segment.split_at(t)
+
+
+def closest_on_segment(segment: Segment, x_mm: float, y_mm: float) -> tuple[float, float]:
+    """``(t, distance)`` from a point to a segment, used for hit tests."""
+    return segment.closest(x_mm, y_mm)
 
 
 def path_length_mm(segments: Sequence[Segment]) -> float:
