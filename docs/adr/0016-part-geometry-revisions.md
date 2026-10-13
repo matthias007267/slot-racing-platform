@@ -39,9 +39,10 @@ The planner reads layout documents through the `track_layouts` table and does no
 tracks module.
 
 The shared path model for lines, arcs and cubic Bézier curves is ADR 0017. The parametric
-editor is ADR 0018 and the graphical editor ADR 0019. The versioned `.slotpart` exchange file is
-still a later step. Those stay on the same definition and the same connector kinds (`track`,
-`border`, `support`). Rail joints and border attachments remain different compatibility rules.
+editor is ADR 0018. ADR 0019 records that the graphical editor was removed; a replacement is
+not implemented. The versioned `.slotpart` exchange file is still a later step. Those stay on
+the same definition and the same connector kinds (`track`, `border`, `support`). Rail joints
+and border attachments remain different compatibility rules.
 
 ## Consequences
 

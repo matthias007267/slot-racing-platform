@@ -1,83 +1,60 @@
-# 0019 Graphical part editor
+# 0019 Graphical part editor withdrawn
 
 ## Context
 
-The parametric editor (ADR 0018) builds simple straights, curves and borders. Everything
-else stays locked there: lanes with a squeeze, a chicane, Bézier grooves and own border
-shapes. Users need to draw those parts with the mouse on the same definition, the same
-millimetre coordinates (+Y down, clockwise rotation, 0° along +x) and the same revision
-rules (ADR 0016), without a second part format.
+The parametric editor (ADR 0018) builds simple straights, curves and borders. Complex bodies
+stay locked there: a squeeze, a chicane, a switch, a lane change, a crossing, a pit part,
+Bézier grooves and a freehand special. A graphical editor was added on the same `PartSpec`,
+with a drawing tab and twelve mouse tools.
+
+Manual use on Windows showed serious interaction problems and a repeated
+`IndexError: tuple index out of range` at `smooth = report[joint][1] <= 1.0` when a joint
+handle was selected. The geometry, the storage and the revision model were not the cause.
 
 ## Decision
 
-`PartDialog` has two tabs on one dialog: the form and a drawing tab. Both read and write one
-`PartSpec`. The drawing tab keeps a dialog-local undo history (`EditSession`). The planner's
-page-level undo is not reused, because it stores whole plans and a part edit must not enter
-it. A drag shows its result live and writes exactly one history step on release. No database
-write happens before the save button.
+The graphical surface is removed completely. `PartDialog` is only the parametric form. There
+is no drawing tab. A new element-oriented point-and-click editor is planned and is **not
+implemented**.
 
-The model is Qt free: `editing.py` (pure functions on frozen specs), `edit_session.py`
-(history, hit tests, snapping), `edit_tools.py` (the twelve tools) and the existing
-`geometry.py` from ADR 0017. Only `ui/part_canvas.py` and `ui/part_graphic.py` use Qt.
+Removed with the surface:
 
-**Lossless switch.** The drawing tab starts from the part with its grooves written out. The
-session counts as changed only when that differs. A saved part is the drawn spec when the
-session changed, the stored spec when the part is locked, and the form result otherwise. A
-form field that no longer applies to a drawn part is disabled and the form says so. Changing
-only texts in the form keeps every control point. A drawn part that the form can express
-exactly can be handed back with an explicit, confirmed button. That conversion rebuilds the
-canonical form: grooves, dashed centre lines and the side edges. It is never done silently.
-A drawn part the form cannot express becomes category `special`; its radius and length stop
-claiming a standard shape.
+- `ui/part_graphic.py` and `ui/part_canvas.py`
+- `edit_tools.py` and `edit_session.py` (the twelve tools, hit tests, editor snaps, dialog undo)
+- `graphic_translations.py`
+- the tools themselves: select, move, line, arc, Bézier, add point, remove point, split
+  segment, delete segment, rail joint, border edge and contour
 
-**Parts that cannot be drawn.** A switch, lane change, crossing and pit part have branching
-grooves, and the planner has no switching logic. They are shown read only with the reason.
-Their texts stay editable and their geometry is never written. A damaged stored geometry is
-shown read only and never replaced; a text change writes the original JSON back.
+Kept, because later drawing and the planner still need them:
 
-**Lanes and lengths.** Lanes are numbered grooves, at most four. A groove is a chain of
-lines, arcs and cubic Béziers. Kinks are allowed and only reported. A gap between two
-segments blocks saving and can be closed. A groove end must meet a rail joint plane within
-1 mm and leave within 5° of the joint direction. A rail joint lists the lanes that pass it.
-A lane length is shown only for a simple through route; a part whose routes branch is
-refused instead of getting a wrong unique length.
+- `geometry.py`: line segments, circular arcs, cubic Bézier curves and composite paths
+- grooves, outer contours, border edges, rail joints, border attachments and lane assignment
+- transforms, length, painting and planner docking
+- `parts.py`, `attachment.py`, `figure.py`, `track_paint.py`, `lane_length.py`, `document.py`
+- the parametric editor
+- the revision model from ADR 0016 (`lineage_id`, `revision`, `catalog_key`, provenance,
+  current and historical rows, explicit adoption). Saved plans and archives are not rewritten
+- `editing.py`, the Qt-free operations on a frozen spec. Nothing in the application imports
+  it until a new editor exists
 
-**Contours.** Outer contours are closed chains of lines, arcs and Béziers. The first closed
-contour is the outline. More contours are stored as holes and, as in ADR 0017, not cut out
-of the fill; the editor says so. An open contour blocks saving, except a single open arc,
-which is a stroke of a curve edge.
+No new geometry format. No new table. No migration.
 
-**Borders.** A standard border is converted to a custom border only after a confirmation.
-A border has no rail joint. It fits a host only when its attachment edge equals a lateral
-`BorderEdge` of that host (`attachment_fits`), so rotation, translation and the host's
-name or ID play no role. A custom host receives side edges with one button. The edge can be
-copied from the host, and a strip contour can be drawn beside it.
+**Complex parts.** Opening a part does not write. A save that does not change geometry copies
+the stored spec and only replaces designation, article number, manufacturer and description.
+Geometry fields are disabled when the form cannot express the body, and the notice says that
+graphical editing is not available. A damaged `slot_paths` list stays read only; a duplicate
+of that row cannot be saved. The form never rebuilds a switch, a crossing or a Bézier groove
+into a simple straight.
 
-**Four separate snaps.** (1) the editor grid, (2) point, tangent and angle snaps inside a
-part, (3) the rail snap in the planner and (4) the border snap in the planner. The first
-two live in `edit_session.snap_point` and can each be switched off. The planner snaps are
-never referenced by the editor modules; a test reads the import tree to keep it so.
-
-Hit tests use a pixel distance divided by the view scale, so they follow the zoom. Handles
-come first, then joints, then segments. A repeated click on the same spot cycles through
-overlapping items.
-
-**Persistence.** Saving goes through the existing revision model. A part that plans use
-forks a new revision; old plans, archives and stock stay as they are; adoption stays an
-explicit choice per track; neighbours are not adjusted. `PartDraft` gains `centerlines` so a
-stored straight or curve with its dashed centre lines is still recognised as simple, and a
-form save writes them back unchanged.
-
-No new table and no migration.
+Rail joints and border edges stay separate compatibility rules. The planner does not close a
+track and does not move neighbours.
 
 ## Consequences
 
-The acceptance cases work through the dialog: an own squeeze, a chicane with Bézier control
-points, an own border for a compatible part, and a graphically edited Carrera squeeze that
-forks a revision.
+Simple straights, curves and borders can still be created, edited, duplicated and placed.
+Complex catalogue and custom parts still load, paint and sit in a plan, and their stored
+control points stay byte-for-byte the same when only texts change.
 
-Limits: switches and crossings cannot be drawn. Holes are stored but not cut out. A Bézier
-strip beside an edge is sampled into lines. A Split on a groove makes a new lane; adding a
-point splits a segment. Join pairs the nearest open ends. Moving a groove does not move its
-dashed centre line, so such a part is no longer expressible in the form and stays a special
-part. Closing a track, `.slotpart` exchange, 3D and physics are out of scope.
+What is temporarily unavailable: drawing or reshaping a part with the mouse, the twelve
+tools, the drawing-tab property bar, and editor-local undo. Those are not hidden; their
+implementation is gone. The replacement editor does not exist yet.

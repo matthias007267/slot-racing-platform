@@ -4,9 +4,10 @@
 
 The library already stores Carrera pieces, revisions (ADR 0016) and shared path geometry
 (ADR 0017). Users need to create a straight, a curve or a simple border, edit a bundled
-part, and duplicate one, then use the result in the planner. A later graphical editor will
-own freehand Bézier curves and hand-drawn outlines. This phase must not replace geometry it
-cannot edit, and it must not give a saved plan a new shape unless that plan adopts it.
+part, and duplicate one, then use the result in the planner. Freehand Bézier curves and
+hand-drawn outlines are not edited here. A graphical editor for them is not implemented
+(ADR 0019). This phase must not replace geometry it cannot edit, and it must not give a
+saved plan a new shape unless that plan adopts it.
 
 ## Decision
 
@@ -43,9 +44,8 @@ No new table and no new migration. Identity remains the designation plus the art
 ## Consequences
 
 A user can create a straight, a curve and a simple border, edit or duplicate a library part,
-and place the result without restarting. Complex bodies stay intact until the graphical
-editor. A custom track width on a left-hand curve is part of that curve’s stored edge; a
-border fits it only when the edge matches. `.slotpart` import and export stay out of this
-phase.
+and place the result without restarting. Complex bodies stay intact. A custom track width on
+a left-hand curve is part of that curve’s stored edge; a border fits it only when the edge
+matches. `.slotpart` import and export stay out of this phase.
 
-The graphical editor for the locked bodies is ADR 0019.
+ADR 0019 records that the graphical editor was removed. A replacement is not implemented.
