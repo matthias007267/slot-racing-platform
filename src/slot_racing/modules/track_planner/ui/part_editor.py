@@ -1,6 +1,7 @@
-"""Parametric part editor. Saving is explicit; cancel drops it.
+"""Parametric editor and a point-and-click floor plate.
 
-Complex geometry stays as stored. A graphical editor is not part of this dialog.
+Saving is explicit. A tab change does not rewrite geometry. Complex parts stay
+as stored: the plate tools edit only a pure line contour.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +60,7 @@ from slot_racing.modules.track_planner.parts import (
     PartSpec,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.ui.plate_editor import PlateEditor
 from slot_racing.modules.track_planner.ui.track_paint import paint_part
 from slot_racing.uikit.dialog import FormDialog
 from slot_racing.uikit.errors import describe_error, is_expected
@@ -202,6 +205,12 @@ class PartDialog(FormDialog):
 
     def _spec_to_save(self) -> PartSpec:
         article, scale, name, manufacturer, description = self._texts()
+        plate_dirty = self.plate.geometry_dirty()
+        form_dirty = self._parametric_geometry_dirty()
+        if plate_dirty and form_dirty:
+            raise ValidationError("error.planner.plate.both")
+        if plate_dirty:
+            return self.plate.to_spec(article, scale, name, manufacturer, description)
         if self._locked:
             if self._source is None:
                 raise ValidationError("error.planner.part")
@@ -280,6 +289,7 @@ class PartDialog(FormDialog):
         if spec is None:
             self.length.setValue(345.0)
             self._sync_fields()
+            self.plate.load(None)
             return
         self.article.setText(spec.article_number)
         self.name.setText(self._copy_name(spec.name) if duplicate else spec.name)
@@ -316,6 +326,7 @@ class PartDialog(FormDialog):
                 save.setEnabled(False)
         if record is not None and not duplicate and record.origin != ORIGIN_CUSTOM:
             self._restore_button.show()
+        self.plate.load(spec)
 
     def _apply_draft(self, draft: PartDraft) -> None:
         self._select(self.shape, draft.body if draft.body != BODY_BORDER else BODY_STRAIGHT)
@@ -475,11 +486,51 @@ class PartDialog(FormDialog):
         side.addWidget(self.preview, 1)
         side.addWidget(self.notice)
         columns.addLayout(side, 1)
+        parameter = QWidget()
+        parameter.setObjectName("part-editor-parameter")
+        parameter_layout = QVBoxLayout(parameter)
+        parameter_layout.setContentsMargins(0, 0, 0, 0)
+        parameter_layout.addWidget(row, 1)
+        self.plate = PlateEditor(self.translator)
+        self.plate.changed.connect(self._plate_changed)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("part-editor-tabs")
+        self.tabs.addTab(parameter, translate("planner.plate.tab.parameter"))
+        self.tabs.addTab(self.plate, translate("planner.plate.tab.graphic"))
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout)
-        layout.insertWidget(0, row, 1)
+        layout.insertWidget(0, self.tabs, 1)
         layout.removeItem(self.form)
         self._style_buttons(translate)
+
+    def _plate_changed(self) -> None:
+        if self._corrupt or self._locked:
+            return
+        if self.plate.geometry_dirty():
+            self.notice.setText(self.translator.translate("planner.plate.separate"))
+            self.notice.setVisible(True)
+        else:
+            self.notice.hide()
+
+    def _geometry_token(self) -> tuple[object, ...]:
+        return (
+            self.category.currentData(),
+            self.shape.currentData(),
+            self.host.currentData(),
+            self.length.value(),
+            self.width_mm.value(),
+            self.height_mm.value(),
+            self.radius.value(),
+            self.angle.value(),
+            self.pitch.value(),
+            self.offsets.text(),
+            self.direction.currentData(),
+            self.border_side.currentData(),
+            self.lanes.value(),
+        )
+
+    def _parametric_geometry_dirty(self) -> bool:
+        return self._geometry_token() != self._geometry_baseline
 
     def _style_buttons(self, translate: object) -> None:
         assert callable(translate)
@@ -537,6 +588,8 @@ class PartDialog(FormDialog):
         return hasattr(self, "_baseline") and self._snapshot() != self._baseline
 
     def _capture(self) -> None:
+        self.plate.capture()
+        self._geometry_baseline = self._geometry_token()
         self._baseline = self._snapshot()
 
     def _snapshot(self) -> tuple[object, ...]:
@@ -559,6 +612,7 @@ class PartDialog(FormDialog):
             self.direction.currentData(),
             self.border_side.currentData(),
             self.lanes.value(),
+            self.plate.geometry_token(),
         )
 
     def _copy_name(self, name: str) -> str:

@@ -86,6 +86,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.accessory.inner": "Innen",
         "planner.accessory.outer": "Außen",
         "planner.category.support": "Stütze",
+        "planner.category.draft": "Entwurf",
         "planner.save_as": "Als neue Strecke speichern",
         "planner.save_as.title": "Neue Strecke",
         "planner.save_as.prompt": "Name der neuen Strecke",
@@ -182,9 +183,40 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.editor.origin.custom": "Eigenbau",
         "planner.editor.locked": (
             "Diese Geometrie kann hier nicht verändert werden. "
-            "Eine grafische Bearbeitung ist derzeit nicht verfügbar. "
             "Bezeichnung, Artikelnummer und Texte bleiben bearbeitbar. "
             "Kurven, Anschlüsse und Kanten bleiben erhalten."
+        ),
+        "planner.plate.tab.parameter": "Parameter",
+        "planner.plate.tab.graphic": "Grafisch",
+        "planner.plate.elements": "Elemente",
+        "planner.plate.select": "Auswahl",
+        "planner.plate.floor": "Bodenplatte",
+        "planner.plate.lane": "Fahrspur",
+        "planner.plate.center": "Mittellinie",
+        "planner.plate.start": "Start-/Ziellinie",
+        "planner.plate.border": "Randstück",
+        "planner.plate.rail": "Schienenanschluss",
+        "planner.plate.edge": "Randanschluss",
+        "planner.plate.later": "Folgt in einer späteren Phase und ist noch nicht implementiert.",
+        "planner.plate.close": "Kontur schließen",
+        "planner.plate.replace": "Bodenplatte ersetzen",
+        "planner.plate.undo": "Rückgängig",
+        "planner.plate.redo": "Wiederholen",
+        "planner.plate.fit": "Einpassen",
+        "planner.plate.count": "Punkte",
+        "planner.plate.state": "Kontur",
+        "planner.plate.open_state": "Offen",
+        "planner.plate.closed_state": "Geschlossen",
+        "planner.plate.perimeter": "Umfang (mm)",
+        "planner.plate.x": "X (mm)",
+        "planner.plate.y": "Y (mm)",
+        "planner.plate.separate": (
+            "Die Bodenplatte ist noch nicht gespeichert. "
+            "Die Maße auf diesem Reiter beschreiben sie nicht."
+        ),
+        "planner.plate.locked": (
+            "Diese Geometrie kann hier nicht punktweise bearbeitet werden. "
+            "Bögen, Bézier-Kurven und Fahrspuren bleiben unverändert."
         ),
         "planner.editor.corrupt": (
             "Die gespeicherte Geometrie ist beschädigt und wird nicht ersetzt. "
@@ -242,5 +274,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.editor.lane_missing": "Eine Spur des Schienenverbinders hat keine Rille.",
         "error.planner.editor.lane_twice": "Eine Spur kommt mehrfach vor.",
         "error.planner.editor.no_lane": "Das Bauteil hat keine Spur.",
+        "error.planner.plate.coords": "Die Koordinate ist keine gültige Zahl.",
+        "error.planner.plate.zero": (
+            "Zwei Punkte liegen aufeinander. Das Segment hätte keine Länge."
+        ),
+        "error.planner.plate.short": (
+            "Eine Bodenplatte braucht mindestens drei unterschiedliche Eckpunkte."
+        ),
+        "error.planner.plate.open": (
+            "Die Kontur ist noch offen. Schließen Sie sie über den Anfangspunkt."
+        ),
+        "error.planner.plate.degenerate": (
+            "Die Fläche ist degeneriert und hat keinen nutzbaren Inhalt."
+        ),
+        "error.planner.plate.crossing": "Die Kanten der Bodenplatte schneiden sich.",
+        "error.planner.plate.exists": (
+            "Es gibt bereits eine Bodenplatte. Wählen Sie sie aus oder ersetzen Sie sie."
+        ),
+        "error.planner.plate.both": (
+            "Parameter und Bodenplatte wurden beide geändert. "
+            "Machen Sie eine der beiden Änderungen rückgängig, bevor Sie speichern."
+        ),
     }
 }
