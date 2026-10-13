@@ -18,8 +18,8 @@ class TimingPlugin(Plugin):
     )
     translations: ClassVar[dict[str, dict[str, str]]] = {
         "de": {
-            "plugin.timing.title": "Zeitmessung",
-            "nav.timing": "Zeitmessung",
+            "plugin.timing.title": "Sensor-Zeitmessung",
+            "nav.timing": "Sensor-Zeitmessung",
             "timing.provider.simulation": "Simulation",
         }
     }
