@@ -53,7 +53,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live HUD, results) and the saved race-HUD layout. Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
 | `statistics`, `track_planner` | Placeholder plugin with navigation entry |
-| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Timing** page that edits that document on the live picture. Zones are not stored per track |
+| `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Zeitmessung** page that edits that document on the live picture. Zones are not stored per track |
 | `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
 
 ### Shared UI helpers (`slot_racing.uikit`)
@@ -320,7 +320,7 @@ snapshot on the source; the capture thread does not read it again. No zones mean
 cannot start a race. Another track does not replace the saved zones. The engine stays
 provider-neutral.
 
-The same document is edited on the **Kamera-Timing** page (`timing_camera.ui`, ADR 0012).
+The same document is edited on the **Kamera-Zeitmessung** page (`timing_camera.ui`, ADR 0012).
 The page is its own navigation entry. It is not part of the track page. Zones are drawn,
 moved and resized on a preview picture and saved again as fractions of the frame. The
 preview opens the capture device only; it does not run the detector and it does not publish
@@ -444,7 +444,7 @@ data can be deactivated but not deleted.
   by plugins. The races module adds **Renn-HUD** there. The shell does not import the module:
   the section factory is registered at activation and returns a widget.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
-  Rennen 40, Zeitmessung 50, Kamera-Timing 55 (only when the camera plugin is enabled),
+  Rennen 40, Sensor-Zeitmessung 50, Kamera-Zeitmessung 55 (only when the camera plugin is enabled),
   Statistiken 60, Streckenplaner 70, Einstellungen (shell).
 
 ## Race HUD

@@ -23,8 +23,8 @@ class CameraTimingPlugin(Plugin):
         "de": {
             "plugin.timing_camera.title": "Kamera-Zeitmessung",
             "timing.provider.camera": "Kamera",
-            "nav.camera_setup": "Kamera-Timing",
-            "camera.heading": "Kamera-Timing",
+            "nav.camera_setup": "Kamera-Zeitmessung",
+            "camera.heading": "Kamera-Zeitmessung",
             "camera.section.camera": "Kamera",
             "camera.section.zones": "Zonen",
             "camera.field.device": "Gerät",

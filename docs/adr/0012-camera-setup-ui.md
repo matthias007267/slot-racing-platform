@@ -18,7 +18,7 @@ A race and the setup page must not open the same USB camera at the same time. Th
 controller does not know about the camera, and that stays so.
 
 ## Decision
-- The camera plugin adds one navigation page, id `camera_setup`, title "Kamera-Timing",
+- The camera plugin adds one navigation page, id `camera_setup`, title "Kamera-Zeitmessung",
   order 55. It is a global page. It is not a button inside track management. It is shown
   only while the camera plugin is enabled.
 - The page lives in `timing_camera.ui`. The plugin is the composition root and creates the

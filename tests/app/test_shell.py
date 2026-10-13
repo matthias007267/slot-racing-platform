@@ -62,13 +62,42 @@ def test_navigation_is_built_from_enabled_modules(qtbot: QtBot, runtime: Runtime
         "Strecken",
         "Rennen",
         "Meisterschaften",
-        "Zeitmessung",
+        "Sensor-Zeitmessung",
         "Statistiken",
         "Streckenplaner",
         "Einstellungen",
     ]
     assert window.windowTitle() == "Slot-Racing Platform"
     assert window.current_id() == "dashboard"
+
+
+def test_timing_menus_name_sensor_and_camera_and_keep_their_places(
+    qtbot: QtBot, runtime: Runtime
+) -> None:
+    from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+
+    runtime.plugins.enable("timing_camera")
+    window = make_window(qtbot, runtime)
+    ids = window.navigation_ids()
+    titles = window.navigation_titles()
+    timing = ids.index("timing")
+    camera = ids.index("camera_setup")
+    assert titles[timing] == "Sensor-Zeitmessung"
+    assert titles[camera] == "Kamera-Zeitmessung"
+    assert camera == timing + 1
+    sensor_button = window.findChild(QPushButton, "nav-timing")
+    camera_button = window.findChild(QPushButton, "nav-camera_setup")
+    assert sensor_button is not None and not sensor_button.icon().isNull()
+    assert camera_button is not None and not camera_button.icon().isNull()
+    window.select("timing")
+    title = window.findChild(QLabel, "shell-title")
+    assert title is not None and title.text() == "Sensor-Zeitmessung"
+    assert "noch nicht implementiert" in page_texts(window)
+    assert "nav.timing" not in page_texts(window)
+    window.select("camera_setup")
+    assert window.current_id() == "camera_setup"
+    assert title.text() == "Kamera-Zeitmessung"
+    assert isinstance(window.current_page(), CameraSetupPage)
 
 
 def test_modules_without_a_page_show_a_placeholder(qtbot: QtBot, runtime: Runtime) -> None:

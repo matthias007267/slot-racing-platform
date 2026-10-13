@@ -37,7 +37,7 @@ shell with a sidebar and dynamic navigation. Usable in the application:
   (start/finish plus any number of sectors) with a sensor assigned to every position. Editor,
   six step wizard and a test mode with simulated events; the simulation and the camera provider
   use the stored layout. Tracks without a configuration use a default layout.
-- **Kamera-Timing:** one global camera and its detection zones, edited on the live picture.
+- **Kamera-Zeitmessung:** one global camera and its detection zones, edited on the live picture.
   Saving that document is what the next camera race uses.
 - **Streckenplaner:** a grid editor for an existing track. Straights, 90° curves, the
   start/finish line and the driving direction are stored with that track.
@@ -148,7 +148,7 @@ uv run pytest -m camera_hardware
 Manuell, mit einem Fahrzeug auf der Bahn:
 
 1. Kamera anschließen
-2. Kamera-Timing öffnen
+2. Kamera-Zeitmessung öffnen
 3. Kamera auswählen
 4. Livebild prüfen
 5. Detection-Zonen konfigurieren
