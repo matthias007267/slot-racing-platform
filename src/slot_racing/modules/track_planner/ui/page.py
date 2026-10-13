@@ -330,6 +330,10 @@ class PlannerPage(QWidget):
         self.stock_warning.hide()
         self.place_part = self._tool("planner-place", "planner.library.place", self._place_part)
         self.add_part = self._tool("planner-add-part", "planner.library.add", self._add_part)
+        self.edit_part = self._tool("planner-edit-part", "planner.library.edit", self._edit_part)
+        self.duplicate_part = self._tool(
+            "planner-duplicate-part", "planner.library.duplicate", self._duplicate_part
+        )
         self.manage_library = self._tool(
             "planner-manage-library", "planner.library.manage", self._manage_library
         )
@@ -470,6 +474,8 @@ class PlannerPage(QWidget):
             self.show_all_parts,
             self.manage_stock,
             self.add_part,
+            self.edit_part,
+            self.duplicate_part,
             self.manage_library,
             self.delete_track_button,
         )
@@ -492,6 +498,8 @@ class PlannerPage(QWidget):
             self.show_all_parts,
             self.manage_stock,
             self.add_part,
+            self.edit_part,
+            self.duplicate_part,
             self.manage_library,
             self.delete_track_button,
         )
@@ -1162,6 +1170,8 @@ class PlannerPage(QWidget):
             self.delete_button,
             self.place_part,
             self.add_part,
+            self.edit_part,
+            self.duplicate_part,
             self.manage_library,
             self.manage_stock,
             self.show_all_parts,
@@ -1232,7 +1242,38 @@ class PlannerPage(QWidget):
         self._commit(updated, created)
 
     def _add_part(self) -> None:
-        dialog = PartDialog(self._translator, self._planner, parent=self)
+        self._open_part_editor(None)
+
+    def _edit_part(self) -> None:
+        record = self._library_record()
+        if record is None:
+            self.status.show_info(self._translator.translate("planner.editor.select"))
+            return
+        self._open_part_editor(record)
+
+    def _duplicate_part(self) -> None:
+        record = self._library_record()
+        if record is None:
+            self.status.show_info(self._translator.translate("planner.editor.select"))
+            return
+        self._open_part_editor(record, duplicate=True)
+
+    def _library_record(self) -> PartRecord | None:
+        item = self.library.currentItem()
+        if item is None:
+            return None
+        part_id = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(part_id, bool) or not isinstance(part_id, int):
+            return None
+        for record in self._records:
+            if record.id == part_id:
+                return record
+        return None
+
+    def _open_part_editor(self, record: PartRecord | None, *, duplicate: bool = False) -> None:
+        dialog = PartDialog(
+            self._translator, self._planner, record, parent=self, duplicate=duplicate
+        )
         try:
             accepted = bool(dialog.exec())
         finally:

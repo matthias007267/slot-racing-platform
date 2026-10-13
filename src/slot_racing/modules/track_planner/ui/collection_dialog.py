@@ -23,6 +23,8 @@ from slot_racing.modules.track_planner.packages import PackageContentView, Packa
 from slot_racing.modules.track_planner.parts import PartRecord
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
+from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog
+from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel
@@ -82,6 +84,7 @@ class CollectionDialog(QDialog):
                 self._usage.get(record.id, 0),
                 line,
                 self._store_adjustment,
+                self._edit_part,
                 self._list,
             )
             self._rows.append(part_row)
@@ -120,6 +123,24 @@ class CollectionDialog(QDialog):
             if row.package_id == package_id:
                 return row.quantity()
         raise KeyError(package_id)
+
+    def _edit_part(self, part_id: int) -> None:
+        record = next((item for item in self._planner.list_parts() if item.id == part_id), None)
+        if record is None:
+            return
+        dialog = PartDialog(self._translator, self._planner, record, parent=self)
+        saved = None
+        try:
+            accepted = bool(dialog.exec())
+            saved = dialog.saved
+        finally:
+            destroy_dialog(dialog)
+        if not accepted or saved is None:
+            return
+        for row in self._rows:
+            if row.part_id == part_id:
+                row.show_saved(saved)
+        self.status.show_info(self._translator.translate("planner.library.updated"))
 
     def _store_adjustment(self, part_id: int, quantity: int) -> bool:
         try:
@@ -268,24 +289,31 @@ class _StockRow(QWidget):
         used: int,
         line: PhysicalStock | None,
         store: Callable[[int, int], bool],
+        edit: Callable[[int], None],
         parent: QWidget,
     ) -> None:
         super().__init__(parent)
         self.part_id = record.id
         self._store = store
+        self._edit = edit
         self._quantity = adjustment
         self._filling = False
         self._translator = translator
         self.setObjectName(f"collection-row-{record.id}")
-        name = QLabel(record.spec.name, self)
-        name.setObjectName("collection-name")
-        name.setWordWrap(True)
-        article = QLabel(record.spec.article_number, self)
-        article.setObjectName("collection-article")
+        self.name = QLabel(record.spec.name, self)
+        self.name.setObjectName("collection-name")
+        self.name.setWordWrap(True)
+        self.article = QLabel(record.spec.article_number, self)
+        self.article.setObjectName("collection-article")
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(name, 1)
-        header.addWidget(article)
+        header.addWidget(self.name, 1)
+        header.addWidget(self.article)
+        self.edit = QPushButton(translator.translate("planner.stock.edit"), self)
+        self.edit.setObjectName(f"collection-edit-{record.id}")
+        set_role(self.edit, "ghost")
+        self.edit.clicked.connect(self._request_edit)
+        header.addWidget(self.edit)
         caption = QLabel(translator.translate("planner.stock.adjustment"), self)
         self.minus = QPushButton("-", self)
         self.minus.setObjectName(f"collection-minus-{record.id}")
@@ -337,6 +365,14 @@ class _StockRow(QWidget):
 
     def quantity(self) -> int:
         return self._quantity
+
+    def show_saved(self, record: PartRecord) -> None:
+        self.part_id = record.id
+        self.name.setText(record.spec.name)
+        self.article.setText(record.spec.article_number)
+
+    def _request_edit(self) -> None:
+        self._edit(self.part_id)
 
     def show_balance(self, derived: int, physical: int, used: int) -> None:
         self.derived.setText(self._translator.format("planner.stock.derived_value", count=derived))

@@ -22,9 +22,11 @@ from dataclasses import dataclass
 
 from slot_racing.modules.track_planner.figure import track_figure
 from slot_racing.modules.track_planner.parts import (
+    PATH_SLOT,
     ConnectorSpec,
     PartInstance,
     PartSpec,
+    SlotPath,
     SlotSpan,
     as_segment,
     connectors_compatible,
@@ -211,6 +213,9 @@ def _bind(spec: PartSpec, point: tuple[float, float]) -> _LocalPort | None:
 
 def _lane_anchor(spec: PartSpec, connector: ConnectorSpec, lane: int) -> tuple[float, float]:
     """Where ``lane`` meets ``connector`` in the part's own coordinates."""
+    stored = _stored_lane_end(spec, connector, lane)
+    if stored is not None:
+        return stored
     index = connector.lanes.index(lane)
     count = len(connector.lanes)
     offset = lane_offset_mm(index, count)
@@ -231,6 +236,29 @@ def _lane_anchor(spec: PartSpec, connector: ConnectorSpec, lane: int) -> tuple[f
     if folded >= 70.0:
         return (connector.x_mm + offset, connector.y_mm)
     return (connector.x_mm, connector.y_mm + offset)
+
+
+def _stored_lane_end(
+    spec: PartSpec, connector: ConnectorSpec, lane: int
+) -> tuple[float, float] | None:
+    """End of a numbered stored groove nearest this joint. Catalogue parts have none."""
+    ends = [
+        _near_end(path, connector)
+        for path in spec.slot_paths
+        if path.kind == PATH_SLOT and path.lane == lane and path.spans
+    ]
+    if len(ends) != 1:
+        return None
+    return ends[0]
+
+
+def _near_end(path: SlotPath, connector: ConnectorSpec) -> tuple[float, float]:
+    start = span_point(path.spans[0], 0.0)
+    end = span_point(path.spans[-1], 1.0)
+    joint = (connector.x_mm, connector.y_mm)
+    start_distance = math.hypot(start[0] - joint[0], start[1] - joint[1])
+    end_distance = math.hypot(end[0] - joint[0], end[1] - joint[1])
+    return start if start_distance <= end_distance else end
 
 
 def _parts_join(

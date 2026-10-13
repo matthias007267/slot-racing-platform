@@ -19,5 +19,6 @@
 | [0015](0015-start-light-measurement.md) | Measure start-light sync without a new control channel |
 | [0016](0016-part-geometry-revisions.md) | Part geometry revisions so saved plans keep their shape |
 | [0017](0017-shared-path-geometry.md) | Shared path geometry for lines, arcs and cubic Bézier curves |
+| [0018](0018-parametric-part-editor.md) | Parametric editor for straights, curves and borders |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

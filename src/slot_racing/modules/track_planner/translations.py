@@ -156,5 +156,74 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.delete_track.done": "Die Strecke wurde gelöscht.",
         "planner.delete_track.cancel": "Abbrechen",
         "planner.delete_track.accept": "Löschen",
+        "planner.library.duplicate": "Bauteil duplizieren",
+        "planner.library.adopt": "Geometrie übernehmen",
+        "planner.library.adopt_none": "Keine Strecke verwendet noch eine ältere Geometrie.",
+        "planner.editor.save": "Speichern",
+        "planner.editor.cancel": "Abbrechen",
+        "planner.editor.preview": "Vorschau",
+        "planner.editor.direction": "Richtung",
+        "planner.editor.direction.right": "Rechts",
+        "planner.editor.direction.left": "Links",
+        "planner.editor.pitch": "Spurabstand (mm)",
+        "planner.editor.offsets": "Spurpositionen (mm)",
+        "planner.editor.offsets.hint": "-40, 40",
+        "planner.editor.side": "Seite",
+        "planner.editor.side.both": "Links und rechts",
+        "planner.editor.side.left": "Links",
+        "planner.editor.side.right": "Rechts",
+        "planner.editor.side.inner": "Innen",
+        "planner.editor.side.outer": "Außen",
+        "planner.editor.manufacturer": "Hersteller",
+        "planner.editor.description": "Beschreibung",
+        "planner.editor.origin": "Herkunft",
+        "planner.editor.origin.catalog": "Katalog",
+        "planner.editor.origin.modified": "Geändert",
+        "planner.editor.origin.custom": "Eigenbau",
+        "planner.editor.locked": (
+            "Diese Geometrie kann hier nicht verändert werden. "
+            "Bezeichnung, Artikelnummer und Texte bleiben bearbeitbar. "
+            "Kurven, Anschlüsse und Kanten bleiben erhalten."
+        ),
+        "planner.editor.corrupt": (
+            "Die gespeicherte Geometrie ist beschädigt und wird nicht ersetzt. "
+            "Texte können gespeichert werden."
+        ),
+        "planner.editor.kept": "Bestehende Strecken behalten zunächst die bisherige Geometrie.",
+        "planner.editor.current": "Aktuelle Revision: {revision}",
+        "planner.editor.adopt": "Neue Geometrie in die ausgewählten Strecken übernehmen",
+        "planner.editor.adopt_hint": (
+            "Nur die aktuelle Fassung der ausgewählten Strecke wird geändert. "
+            "Archivierte Fassungen bleiben unverändert. Nachbarteile werden nicht verschoben."
+        ),
+        "planner.editor.later": "Später",
+        "planner.editor.restore": "Original wiederherstellen",
+        "planner.editor.restore_confirm": (
+            "Die mitgelieferte Geometrie wird wiederhergestellt. "
+            "Bestehende Strecken behalten zunächst die bisherige Geometrie."
+        ),
+        "planner.editor.discard": "Ungespeicherte Änderungen verwerfen?",
+        "planner.editor.copy_name": "Kopie von {name}",
+        "planner.editor.select": "Bitte zuerst ein Bauteil in der Bibliothek auswählen.",
+        "planner.editor.shape": "Form",
+        "planner.editor.host": "Grundform",
+        "planner.stock.edit": "Bearbeiten",
+        "error.planner.editor.name": (
+            "Die Bezeichnung ist erforderlich und darf 120 Zeichen nicht überschreiten."
+        ),
+        "error.planner.editor.article": (
+            "Die Artikelnummer ist erforderlich und darf 40 Zeichen nicht überschreiten."
+        ),
+        "error.planner.editor.manufacturer": "Der Hersteller darf 80 Zeichen nicht überschreiten.",
+        "error.planner.editor.description": (
+            "Die Beschreibung darf 500 Zeichen nicht überschreiten."
+        ),
+        "error.planner.editor.length": "Die Länge muss größer als 0 sein.",
+        "error.planner.editor.radius": "Der Radius muss größer als 0 sein.",
+        "error.planner.editor.angle": "Der Winkel muss größer als 0° und kleiner als 360° sein.",
+        "error.planner.editor.width": "Die Breite muss größer als 0 sein und zur Kurve passen.",
+        "error.planner.editor.pitch": "Der Spurabstand ist ungültig.",
+        "error.planner.editor.offsets": "Die Spurpositionen müssen zur Spuranzahl passen.",
+        "error.planner.editor.side": "Die Seite des Randstreifens ist ungültig.",
     }
 }
