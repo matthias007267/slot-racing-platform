@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from slot_racing.modules.track_planner.graphic_translations import GRAPHIC_TRANSLATIONS
-
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "de": {
         "plugin.track_planner.title": "Streckenplaner",
@@ -184,6 +182,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.editor.origin.custom": "Eigenbau",
         "planner.editor.locked": (
             "Diese Geometrie kann hier nicht verändert werden. "
+            "Eine grafische Bearbeitung ist derzeit nicht verfügbar. "
             "Bezeichnung, Artikelnummer und Texte bleiben bearbeitbar. "
             "Kurven, Anschlüsse und Kanten bleiben erhalten."
         ),
@@ -227,6 +226,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.editor.pitch": "Der Spurabstand ist ungültig.",
         "error.planner.editor.offsets": "Die Spurpositionen müssen zur Spuranzahl passen.",
         "error.planner.editor.side": "Die Seite des Randstreifens ist ungültig.",
-        **GRAPHIC_TRANSLATIONS,
+        "error.planner.editor.attach_edge": (
+            "Die Anschlusskante fehlt oder gehört nicht zu diesem Bauteil."
+        ),
+        "error.planner.editor.branch": "Mehrere Rillen enden an derselben Spur eines Verbinders.",
+        "error.planner.editor.connectors": "Es sind mindestens zwei Schienenverbinder nötig.",
+        "error.planner.editor.contour": "Die Außenkontur ist nicht geschlossen oder zu kurz.",
+        "error.planner.editor.contour_open": "Eine Kontur ist nicht geschlossen.",
+        "error.planner.editor.direction": (
+            "Eine Rille verlässt den Schienenverbinder nicht in dessen Richtung."
+        ),
+        "error.planner.editor.edge_slots": "Randkanten sind doppelt oder gemischt.",
+        "error.planner.editor.gap": "Eine Linie hat eine Lücke zwischen zwei Segmenten.",
+        "error.planner.editor.groove_end": "Eine Rille endet nicht an einem Schienenverbinder.",
+        "error.planner.editor.lane_missing": "Eine Spur des Schienenverbinders hat keine Rille.",
+        "error.planner.editor.lane_twice": "Eine Spur kommt mehrfach vor.",
+        "error.planner.editor.no_lane": "Das Bauteil hat keine Spur.",
     }
 }
