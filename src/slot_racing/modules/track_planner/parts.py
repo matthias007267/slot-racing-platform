@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
@@ -179,14 +179,31 @@ class PartSpec:
     slot_paths: tuple[SlotPath, ...] = ()
     # Set only when this part rides on another instance instead of joining the track.
     attachment: AttachmentProfile | None = None
+    manufacturer: str = ""
+    description: str = ""
+
+
+# A catalogue row, a catalogue row the user changed, or a part they created.
+ORIGIN_CATALOG = "catalog"
+ORIGIN_MODIFIED = "modified"
+ORIGIN_CUSTOM = "custom"
+PART_ORIGINS = frozenset({ORIGIN_CATALOG, ORIGIN_MODIFIED, ORIGIN_CUSTOM})
 
 
 @dataclass(frozen=True, slots=True)
 class PartRecord:
-    """A :class:`PartSpec` stored in the library."""
+    """A :class:`PartSpec` stored in the library.
+
+    ``lineage_id`` stays when the name or the geometry changes. ``revision`` is one
+    frozen geometry. Plans keep the revision they were built with.
+    """
 
     id: int
     spec: PartSpec
+    lineage_id: str = ""
+    revision: int = 1
+    origin: str = ORIGIN_CUSTOM
+    is_current: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +262,66 @@ def identity_key(name: str, article_number: str) -> tuple[str, str]:
     article = normalize_article(article_number)
     if not title or not article:
         raise ValidationError("error.planner.part")
-    return (title, article)
+    return title, article
+
+
+def catalog_storage_key(name: str, article_number: str) -> str:
+    """Stable key of a bundled catalogue part. A rename does not change it."""
+    title, article = identity_key(name, article_number)
+    return f"{title}\t{article}"
+
+
+def same_geometry(left: PartSpec, right: PartSpec) -> bool:
+    """True when the two specs describe the same body, joints and grooves.
+
+    Name, article number, scale, manufacturer and description are not geometry.
+    """
+    return (
+        left.category == right.category
+        and left.length_mm == right.length_mm
+        and left.width_mm == right.width_mm
+        and left.height_mm == right.height_mm
+        and left.radius_mm == right.radius_mm
+        and left.angle_deg == right.angle_deg
+        and left.lane_count == right.lane_count
+        and left.connectors == right.connectors
+        and left.outline == right.outline
+        and left.slot_paths == right.slot_paths
+        and left.attachment == right.attachment
+    )
+
+
+def merge_preserved_geometry(stored: PartSpec, incoming: PartSpec) -> PartSpec:
+    """Keep stored grooves and joints when a parametric edit did not change the measures.
+
+    The library dialog rebuilds a part from length and radius and drops stored slot
+    paths. A rename or a scale change must not become a different body.
+    """
+    if incoming.slot_paths or not stored.slot_paths:
+        return incoming
+    if (
+        stored.category,
+        stored.length_mm,
+        stored.width_mm,
+        stored.radius_mm,
+        stored.angle_deg,
+        stored.lane_count,
+    ) != (
+        incoming.category,
+        incoming.length_mm,
+        incoming.width_mm,
+        incoming.radius_mm,
+        incoming.angle_deg,
+        incoming.lane_count,
+    ):
+        return incoming
+    return replace(
+        incoming,
+        connectors=stored.connectors,
+        outline=stored.outline,
+        slot_paths=stored.slot_paths,
+        attachment=stored.attachment,
+    )
 
 
 def normalize_deg(angle: float) -> float:

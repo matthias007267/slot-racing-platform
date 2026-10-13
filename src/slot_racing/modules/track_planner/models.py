@@ -19,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -54,6 +55,17 @@ class TrackPartDefinition(Base):
     attachment_host_radius_mm: Mapped[float | None] = mapped_column(Float)
     attachment_host_angle_deg: Mapped[float | None] = mapped_column(Float)
     attachment_host_lanes: Mapped[int | None] = mapped_column(Integer)
+    # Stable across renames and geometry revisions. One lineage, many frozen bodies.
+    lineage_id: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # The library places the current revision. Older ones stay for saved plans.
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    # catalog, modified, or custom. Seeding must not overwrite modified or custom rows.
+    origin: Mapped[str] = mapped_column(String(16), default="custom", server_default="custom")
+    # Set for a bundled catalogue part. A rename keeps this, so seeding does not insert a twin.
+    catalog_key: Mapped[str | None] = mapped_column(String(200))
+    manufacturer: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    description: Mapped[str | None] = mapped_column(String(500))
 
 
 class TrackPartConnector(Base):
@@ -163,4 +175,17 @@ Index(
     func.lower(func.trim(TrackPartDefinition.name)),
     func.trim(TrackPartDefinition.article_number),
     unique=True,
+    sqlite_where=TrackPartDefinition.is_current.is_(True),
+)
+Index(
+    "uq_track_part_lineage_revision",
+    TrackPartDefinition.lineage_id,
+    TrackPartDefinition.revision,
+    unique=True,
+)
+Index(
+    "uq_track_part_lineage_current",
+    TrackPartDefinition.lineage_id,
+    unique=True,
+    sqlite_where=TrackPartDefinition.is_current.is_(True),
 )

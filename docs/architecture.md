@@ -52,7 +52,8 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live HUD, results) and the saved race-HUD layout. Requires `drivers_vehicles` and `tracks`, optionally `timing` |
 | `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
-| `statistics`, `track_planner` | Placeholder plugin with navigation entry |
+| `statistics` | Placeholder plugin with navigation entry |
+| `track_planner` | Part library, plans, stock and packages. A geometry edit of a used part forks a revision so saved plans keep their shape (ADR 0016) |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Zeitmessung** page that edits that document on the live picture. Zones are not stored per track |
 | `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
 

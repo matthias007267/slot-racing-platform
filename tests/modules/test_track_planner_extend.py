@@ -552,7 +552,7 @@ def test_carrera_rails_are_seeded_once_at_one_to_twenty_four(env: Env) -> None:
     ]
     assert len(straights) == 1
     assert "system" not in straights[0].spec.__dataclass_fields__
-    assert "manufacturer" not in straights[0].spec.__dataclass_fields__
+    assert straights[0].spec.manufacturer == "Carrera"
 
 
 def _select_ids(page: PlannerPage, ids: set[str]) -> None:

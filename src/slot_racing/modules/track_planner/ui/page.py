@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -208,6 +209,7 @@ class PlannerPage(QWidget):
         self._color_coding = False if config is None else config.track_planner_color_coding
         # Physical pieces. Package counts are expanded before they are stored here.
         self._stock: dict[int, int] = {}
+        self._current_of: dict[int, int] = {}
         self._build_mode: Literal["unlimited", "collection"] = TRACK_PLANNER_BUILD_UNLIMITED
         if config is not None and config.track_planner_build_mode == TRACK_PLANNER_BUILD_COLLECTION:
             self._build_mode = TRACK_PLANNER_BUILD_COLLECTION
@@ -1180,8 +1182,13 @@ class PlannerPage(QWidget):
         trace("LIBRARY_DATA_LOAD_START", result="started")
         records = self._planner.list_parts()
         self._records = records
-        self._parts = {record.id: record.spec for record in records}
+        referenced = self._planner.records_for(
+            [instance.part_id for instance in self._plan.instances]
+        )
+        merged = {record.id: record for record in (*referenced, *records)}
+        self._parts = {part_id: record.spec for part_id, record in merged.items()}
         self._stock = self._planner.stock_quantities()
+        self._current_of = self._planner.current_part_ids()
         trace("LIBRARY_DATA_LOAD_COMPLETE", result="complete", part_count=len(records))
         trace("LIBRARY_WIDGET_BUILD_START", result="started")
         self._apply_filters()
@@ -1509,13 +1516,15 @@ class PlannerPage(QWidget):
         trace("COLLECTION_DIALOG_CREATE", result="started")
         usage: dict[int, int] = {}
         for instance in self._plan.instances:
-            usage[instance.part_id] = usage.get(instance.part_id, 0) + 1
+            part_id = self._current_of.get(instance.part_id, instance.part_id)
+            usage[part_id] = usage.get(part_id, 0) + 1
         dialog = CollectionDialog(self._translator, self._planner, self, usage)
         self._collection_dialog = dialog
         dialog.destroyed.connect(self._release_collection_dialog)
         try:
             self.stock_dialog_runner(dialog)
             self._stock = self._planner.stock_quantities()
+            self._current_of = self._planner.current_part_ids()
             self._draw()
         finally:
             trace("COLLECTION_DIALOG_RETURN", result="closed")
@@ -1570,7 +1579,11 @@ class PlannerPage(QWidget):
         return self._build_mode == TRACK_PLANNER_BUILD_COLLECTION
 
     def _inventory(self) -> InventoryReport:
-        return analyze_inventory(self._plan.instances, self._stock)
+        counting = tuple(
+            replace(instance, part_id=self._current_of.get(instance.part_id, instance.part_id))
+            for instance in self._plan.instances
+        )
+        return analyze_inventory(counting, self._stock)
 
     def _remaining_text(self, report: InventoryReport, part_id: int) -> str:
         available = report.balance(part_id).available
