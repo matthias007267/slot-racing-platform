@@ -323,6 +323,11 @@ class EditSession:
         return self.spec != self.base
 
     @property
+    def is_live(self) -> bool:
+        """True while a drag runs and its undo step is not written yet."""
+        return self._live_from is not None
+
+    @property
     def can_undo(self) -> bool:
         return bool(self._undo) or self._live_from is not None
 

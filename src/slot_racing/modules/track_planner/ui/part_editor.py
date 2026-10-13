@@ -1,4 +1,4 @@
-"""Parametric part editor. Saving is explicit; cancel drops the draft."""
+"""Part editor with a parametric tab and a drawing tab. Saving is explicit; cancel drops it."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +31,7 @@ from slot_racing.core.domain import TrackId
 from slot_racing.core.domain.lanes import MAX_LANE_COUNT
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.track_planner import editing as ed
 from slot_racing.modules.track_planner.parametric import (
     BODY_BORDER,
     BODY_CURVE,
@@ -55,6 +57,7 @@ from slot_racing.modules.track_planner.parts import (
     PartSpec,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.ui.part_graphic import GraphicEditor, ask
 from slot_racing.modules.track_planner.ui.track_paint import paint_part
 from slot_racing.uikit.dialog import FormDialog
 from slot_racing.uikit.errors import describe_error, is_expected
@@ -65,7 +68,12 @@ _EDITOR_CATEGORIES = (STRAIGHT, CURVE, SPECIAL, BORDER)
 
 
 class PartDialog(FormDialog):
-    """Create, edit or duplicate one part. Geometry the form cannot express is kept."""
+    """Create, edit or duplicate one part.
+
+    The parameter tab and the drawing tab edit one part. Geometry the form cannot express is
+    kept. Once the drawing tab has changed the geometry, the form only edits the metadata until
+    the user returns to the parametric form on purpose.
+    """
 
     def __init__(
         self,
@@ -84,7 +92,7 @@ class PartDialog(FormDialog):
             title = translator.translate("planner.library.add")
         super().__init__(translator, title, parent)
         self.setObjectName("part-editor")
-        self.setMinimumSize(920, 680)
+        self.setMinimumSize(1120, 760)
         self._planner = planner
         self._record = None if duplicate else record
         self._source = None if record is None else record.spec
@@ -99,6 +107,7 @@ class PartDialog(FormDialog):
         self.created: PartSpec | None = None
         self.saved: PartRecord | None = None
         self._last_preview: PartSpec | None = None
+        self._graphic: GraphicEditor | None = None
         translate = translator.translate
         self.article = QLineEdit()
         self.article.setObjectName("part-article")
@@ -194,6 +203,17 @@ class PartDialog(FormDialog):
 
     def _spec_to_save(self) -> PartSpec:
         article, scale, name, manufacturer, description = self._texts()
+        if self._graphic_changed() and self._graphic is not None:
+            drawn = self._graphic.result()
+            ed.require_valid(drawn)
+            return with_metadata(
+                drawn,
+                article_number=article,
+                scale=scale,
+                name=name,
+                manufacturer=manufacturer,
+                description=description,
+            )
         if self._locked:
             if self._source is None:
                 raise ValidationError("error.planner.part")
@@ -327,7 +347,7 @@ class PartDialog(FormDialog):
         border = body == BODY_BORDER
         curve = body == BODY_CURVE or (border and str(self.host.currentData()) == BODY_CURVE)
         straight = not curve
-        enabled = not self._locked
+        enabled = not self._geometry_locked()
         self.category.setEnabled(enabled)
         special = str(self.category.currentData()) == SPECIAL
         self.shape.setEnabled(enabled)
@@ -380,6 +400,8 @@ class PartDialog(FormDialog):
         self.preview.set_spec(self._last_preview, literal=self._corrupt)
 
     def _preview_spec(self) -> PartSpec | None:
+        if self._graphic_changed() and self._graphic is not None:
+            return self._graphic.session.spec
         if self._locked and self._source is not None:
             return self._source
         article, scale, name, manufacturer, description = self._texts()
@@ -465,9 +487,18 @@ class PartDialog(FormDialog):
         side.addWidget(self.preview, 1)
         side.addWidget(self.notice)
         columns.addLayout(side, 1)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("part-editor-tabs")
+        self.tabs.addTab(row, translate("planner.gfx.tab.params"))
+        self._draw_host = QWidget()
+        self._draw_host.setObjectName("part-editor-draw-host")
+        self._draw_layout = QVBoxLayout(self._draw_host)
+        self._draw_layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs.addTab(self._draw_host, translate("planner.gfx.tab.draw"))
+        self.tabs.currentChanged.connect(self._tab_changed)
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout)
-        layout.insertWidget(0, row)
+        layout.insertWidget(0, self.tabs, 1)
         layout.removeItem(self.form)
         self._style_buttons(translate)
 
@@ -488,6 +519,113 @@ class PartDialog(FormDialog):
         self._restore_button.hide()
         self._restore_button.clicked.connect(self._restore_catalog)
         box.addButton(self._restore_button, QDialogButtonBox.ButtonRole.ResetRole)
+
+    # ------------------------------------------------------------------ drawing tab
+
+    def _graphic_changed(self) -> bool:
+        return self._graphic is not None and self._graphic.session.changed
+
+    def _geometry_locked(self) -> bool:
+        return self._locked or self._graphic_changed()
+
+    def _tab_changed(self, index: int) -> None:
+        if index == 1:
+            self._enter_draw()
+        else:
+            self._sync_notice()
+            self._sync_fields()
+            self._refresh_preview()
+
+    def _enter_draw(self) -> None:
+        if self._graphic is not None and self._graphic.session.changed:
+            return
+        spec, reason = self._draw_base()
+        if self._graphic is None:
+            self._graphic = GraphicEditor(
+                self.translator,
+                self._planner,
+                spec,
+                reason=reason,
+                exclude_id=None if self._record is None else self._record.id,
+            )
+            self._draw_layout.addWidget(self._graphic, 1)
+            self._reparam = QPushButton(self.translator.translate("planner.gfx.reparametrize"))
+            self._reparam.setObjectName("part-reparametrize")
+            self._reparam.clicked.connect(self._reparametrize)
+            self._draw_layout.addWidget(self._reparam)
+            self._graphic.changed.connect(self._graphic_edited)
+        else:
+            self._graphic.load(
+                spec, reason=reason, exclude_id=None if self._record is None else self._record.id
+            )
+        self._sync_reparam()
+
+    def _draw_base(self) -> tuple[PartSpec, str]:
+        """The part the drawing tab starts from, and why it cannot be drawn on, if so."""
+        if self._locked and self._source is not None:
+            return self._source, ed.support_reason(self._source, corrupt=self._corrupt)
+        spec = self._preview_spec()
+        if spec is None:
+            fallback = self._last_preview
+            if fallback is None:
+                raise ValidationError("error.planner.part")
+            return fallback, "params"
+        return spec, ed.support_reason(spec)
+
+    def _graphic_edited(self) -> None:
+        self._sync_notice()
+        self._sync_fields()
+        self._sync_reparam()
+        self._refresh_preview()
+
+    def _sync_notice(self) -> None:
+        if self._corrupt:
+            self.notice.setText(self.translator.translate("planner.editor.corrupt"))
+            self.notice.setVisible(True)
+        elif self._graphic_changed():
+            self.notice.setText(self.translator.translate("planner.gfx.locked_by_drawing"))
+            self.notice.setVisible(True)
+        elif self._locked:
+            self.notice.setText(self.translator.translate("planner.editor.locked"))
+            self.notice.setVisible(True)
+        else:
+            self.notice.setVisible(False)
+
+    def _sync_reparam(self) -> None:
+        if self._graphic is None:
+            return
+        self._reparam.setEnabled(self._parametric_target() is not None)
+
+    def _parametric_target(self) -> PartDraft | None:
+        """The parameter form that expresses the drawn part exactly, if there is one."""
+        graphic = self._graphic
+        if graphic is None or not (self._locked or graphic.session.changed) or self._corrupt:
+            return None
+        spec = graphic.result()
+        if ed.validate_editing(spec):
+            return None
+        return draft_from_spec(spec)
+
+    def _reparametrize(self) -> None:
+        draft = self._parametric_target()
+        graphic = self._graphic
+        if draft is None or graphic is None:
+            return
+        t = self.translator.translate
+        if not ask(self, t("planner.gfx.reparametrize"), t("planner.gfx.reparametrize_confirm")):
+            return
+        spec = graphic.result()
+        self._locked = False
+        self._explicit = draft.explicit_grooves
+        self._host_shape = draft.host_shape
+        self._select(self.category, spec.category)
+        self._apply_draft(draft)
+        graphic.load(spec, reason=ed.support_reason(spec))
+        self._sync_notice()
+        self._sync_fields()
+        self._sync_reparam()
+        self._refresh_preview()
+        self.tabs.setCurrentIndex(0)
 
     def _restore_catalog(self) -> None:
         if self._record is None:
@@ -549,6 +687,7 @@ class PartDialog(FormDialog):
             self.direction.currentData(),
             self.border_side.currentData(),
             self.lanes.value(),
+            self._graphic.session.spec if self._graphic_changed() and self._graphic else None,
         )
 
     def _copy_name(self, name: str) -> str:

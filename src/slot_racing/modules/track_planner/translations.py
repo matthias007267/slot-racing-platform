@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from slot_racing.modules.track_planner.graphic_translations import GRAPHIC_TRANSLATIONS
+
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "de": {
         "plugin.track_planner.title": "Streckenplaner",
@@ -225,5 +227,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.planner.editor.pitch": "Der Spurabstand ist ungültig.",
         "error.planner.editor.offsets": "Die Spurpositionen müssen zur Spuranzahl passen.",
         "error.planner.editor.side": "Die Seite des Randstreifens ist ungültig.",
+        **GRAPHIC_TRANSLATIONS,
     }
 }
