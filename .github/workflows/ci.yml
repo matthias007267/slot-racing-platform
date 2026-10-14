@@ -30,6 +30,9 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Backstop if a worker ignores the per-test limit in tests/conftest.py.
+    # Phase 2 finished in about three minutes; this must not approach an hour.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +51,9 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - name: Pytest
+        timeout-minutes: 15
         # Four workers matches the 4-vCPU GitHub runners. Measured on Linux;
         # do not switch to -n auto, which follows the host CPU count.
+        # Each test is limited to 120s (tests/conftest.py). On expiry the
+        # worker prints the node id, dumps all thread stacks, and exits.
         run: uv run pytest -n 4

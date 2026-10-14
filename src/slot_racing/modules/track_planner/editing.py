@@ -289,6 +289,61 @@ def arc_through(
     return SlotSpan.arc(centre_x, centre_y, radius, start_deg, sweep)
 
 
+def arc_between(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    radius_mm: float,
+    *,
+    right: bool,
+    long: bool,
+) -> SlotSpan | None:
+    """The one arc from ``start`` to ``end`` for this radius, turn and size.
+
+    ``right`` is a positive sweep, the same direction as a catalogue curve.
+    ``long`` is the variant of at least 180°. The radius must reach at least
+    half the chord. ``None`` when that circle does not exist, so the caller
+    keeps the previous segment.
+    """
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    chord = math.hypot(dx, dy)
+    if chord <= POSITION_GAP_MM or not math.isfinite(radius_mm) or radius_mm <= 0.0:
+        return None
+    half = chord / 2.0
+    if radius_mm + 1e-6 < half:
+        return None
+    radius = max(float(radius_mm), half)
+    height = math.sqrt(max(0.0, radius * radius - half * half))
+    ux = dx / chord
+    uy = dy / chord
+    px, py = -uy, ux
+    mid_x = (start[0] + end[0]) / 2.0
+    mid_y = (start[1] + end[1]) / 2.0
+    centers = [(mid_x + px * height, mid_y + py * height)]
+    if height > 1e-9:
+        centers.append((mid_x - px * height, mid_y - py * height))
+    best: SlotSpan | None = None
+    best_span = 0.0
+    for centre_x, centre_y in centers:
+        start_deg = math.degrees(math.atan2(start[1] - centre_y, start[0] - centre_x))
+        end_deg = math.degrees(math.atan2(end[1] - centre_y, end[0] - centre_x))
+        forward = (end_deg - start_deg) % 360.0
+        if forward <= 1e-6 or forward >= 360.0 - 1e-6:
+            continue
+        sweep = forward if right else forward - 360.0
+        if abs(sweep) < _MIN_SWEEP_DEG:
+            continue
+        span = abs(sweep)
+        if long and span < 180.0 - 1e-4:
+            continue
+        if not long and span > 180.0 + 1e-4:
+            continue
+        if best is None or (span > best_span if long else span < best_span):
+            best = SlotSpan.arc(centre_x, centre_y, radius, start_deg, sweep)
+            best_span = span
+    return best
+
+
 def bezier_between(
     start: tuple[float, float],
     end: tuple[float, float],
