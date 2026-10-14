@@ -32,6 +32,7 @@ from slot_racing.modules.track_planner.parts import (
     extend_article,
     extend_pose,
     find_catalog_part,
+    is_plate_draft,
     is_start_finish_part,
     join_pose,
     rotate_xy,
@@ -652,7 +653,7 @@ def place_instance(
     catalog: dict[int, PartSpec],
 ) -> TrackPlan:
     """Append one instance. A nearby compatible joint wins over the grid."""
-    if spec.attachment is not None:
+    if spec.attachment is not None or is_plate_draft(spec):
         raise ValidationError("error.planner.part")
     placed = _placed(plan, catalog)
     pose = snap_pose(
