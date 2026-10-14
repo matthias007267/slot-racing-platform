@@ -1,4 +1,4 @@
-"""Point-and-click floor plate. Later elements stay disabled until they exist."""
+"""Point-and-click floor plate and driving lanes. Later elements stay disabled."""
 
 from __future__ import annotations
 
@@ -29,21 +29,24 @@ from PySide6.QtWidgets import (
 
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
-from slot_racing.modules.track_planner.parts import PartSpec
+from slot_racing.modules.track_planner.editing import span_end, span_start
+from slot_racing.modules.track_planner.geometry import ArcSegment
+from slot_racing.modules.track_planner.parts import SPAN_ARC, PartSpec, as_segment
 from slot_racing.modules.track_planner.plate_session import (
     PlateSession,
+    draft_lanes,
     plate_corners,
     plate_part,
-    stored_plate,
+    stored_sketch,
 )
 from slot_racing.modules.track_planner.ui.track_paint import paint_part
 from slot_racing.uikit.theme import COLORS, set_role, set_tone
 
 _SELECT = "select"
-_DRAW = "draw"
+_FLOOR = "floor"
+_LANE = "lane"
 _HIT_PX = 10.0
 _LATER = (
-    ("plate-lane", "planner.plate.lane"),
     ("plate-center", "planner.plate.center"),
     ("plate-start", "planner.plate.start"),
     ("plate-border", "planner.plate.border"),
@@ -71,14 +74,29 @@ class PlateEditor(QWidget):
         self.canvas = PlateCanvas(self)
         self.select_button = self._mode_button("plate-select", "planner.plate.select")
         self.floor_button = self._mode_button("plate-floor", "planner.plate.floor")
+        self.lane_button = self._mode_button("plate-lane", "planner.plate.lane")
         self.select_button.setChecked(True)
         modes = QButtonGroup(self)
         modes.setExclusive(True)
         modes.addButton(self.select_button)
         modes.addButton(self.floor_button)
+        modes.addButton(self.lane_button)
         self.select_button.toggled.connect(self._mode_changed)
+        self.floor_button.toggled.connect(self._mode_changed)
+        self.lane_button.toggled.connect(self._mode_changed)
         self.close_button = self._action("plate-close", "planner.plate.close", self._close)
         self.replace_button = self._action("plate-replace", "planner.plate.replace", self._replace)
+        self.add_lane_button = self._action("lane-add", "planner.lane.add", self._add_lane)
+        self.finish_lane_button = self._action(
+            "lane-finish", "planner.lane.finish", self._finish_lane
+        )
+        self.remove_lane_button = self._action(
+            "lane-remove", "planner.lane.remove", self._remove_lane
+        )
+        self.insert_button = self._action("lane-insert", "planner.lane.insert", self._insert_point)
+        self.remove_point_button = self._action(
+            "lane-remove-point", "planner.lane.remove_point", self._remove_point
+        )
         self.undo_button = self._action("plate-undo", "planner.plate.undo", self._undo)
         self.redo_button = self._action("plate-redo", "planner.plate.redo", self._redo)
         self.fit_button = self._action("plate-fit", "planner.plate.fit", self.canvas.fit)
@@ -94,6 +112,69 @@ class PlateEditor(QWidget):
         self.y_spin.valueChanged.connect(self._preview_spin)
         self.x_spin.editingFinished.connect(self._commit_spin)
         self.y_spin.editingFinished.connect(self._commit_spin)
+        self.lane_label = QLabel("—")
+        self.lane_label.setObjectName("lane-number")
+        self.length_label = QLabel("—")
+        self.length_label.setObjectName("lane-length")
+        self.segment_label = QLabel("—")
+        self.segment_label.setObjectName("lane-segment-length")
+        self.angle_label = QLabel("—")
+        self.angle_label.setObjectName("lane-angle")
+        self.ends_label = QLabel("—")
+        self.ends_label.setObjectName("lane-ends")
+        self.ends_label.setWordWrap(True)
+        self.other_label = QLabel("—")
+        self.other_label.setObjectName("lane-other-distance")
+        self.other_label.setToolTip(translate("planner.lane.other_hint"))
+        self.edge_label = QLabel("—")
+        self.edge_label.setObjectName("lane-edge-distance")
+        self.edge_label.setToolTip(translate("planner.lane.edge_hint"))
+        self.drawing_label = QLabel("")
+        self.drawing_label.setObjectName("lane-drawing")
+        self.drawing_label.setWordWrap(True)
+        self.radius_spin = self._coord("lane-radius")
+        self.radius_spin.setRange(0.001, 100_000)
+        self.radius_spin.valueChanged.connect(self._preview_radius)
+        self.radius_spin.editingFinished.connect(self._commit_radius)
+        self.line_button = self._mode_button("lane-line", "planner.lane.line")
+        self.arc_button = self._mode_button("lane-arc", "planner.lane.arc")
+        kinds = QButtonGroup(self)
+        kinds.setExclusive(True)
+        kinds.addButton(self.line_button)
+        kinds.addButton(self.arc_button)
+        self.line_button.toggled.connect(lambda checked: self._kind_toggled("line", checked))
+        self.arc_button.toggled.connect(lambda checked: self._kind_toggled("arc", checked))
+        self.right_button = self._mode_button("lane-right", "planner.lane.right")
+        self.left_button = self._mode_button("lane-left", "planner.lane.left")
+        turns = QButtonGroup(self)
+        turns.setExclusive(True)
+        turns.addButton(self.right_button)
+        turns.addButton(self.left_button)
+        self.right_button.toggled.connect(lambda checked: self._turn_toggled(True, checked))
+        self.left_button.toggled.connect(lambda checked: self._turn_toggled(False, checked))
+        self.short_button = self._mode_button("lane-short", "planner.lane.short")
+        self.long_button = self._mode_button("lane-long", "planner.lane.long")
+        sizes = QButtonGroup(self)
+        sizes.setExclusive(True)
+        sizes.addButton(self.short_button)
+        sizes.addButton(self.long_button)
+        self.short_button.toggled.connect(lambda checked: self._size_toggled(False, checked))
+        self.long_button.toggled.connect(lambda checked: self._size_toggled(True, checked))
+        self.kind_row = QWidget()
+        kind_layout = QHBoxLayout(self.kind_row)
+        kind_layout.setContentsMargins(0, 0, 0, 0)
+        kind_layout.addWidget(self.line_button)
+        kind_layout.addWidget(self.arc_button)
+        self.turn_row = QWidget()
+        turn_layout = QHBoxLayout(self.turn_row)
+        turn_layout.setContentsMargins(0, 0, 0, 0)
+        turn_layout.addWidget(self.right_button)
+        turn_layout.addWidget(self.left_button)
+        self.size_row = QWidget()
+        size_layout = QHBoxLayout(self.size_row)
+        size_layout.setContentsMargins(0, 0, 0, 0)
+        size_layout.addWidget(self.short_button)
+        size_layout.addWidget(self.long_button)
         self.issue = QLabel()
         self.issue.setObjectName("plate-issue")
         self.issue.setWordWrap(True)
@@ -105,6 +186,7 @@ class PlateEditor(QWidget):
         side.addWidget(heading)
         side.addWidget(self.select_button)
         side.addWidget(self.floor_button)
+        side.addWidget(self.lane_button)
         for name, key in _LATER:
             button = QPushButton(translate(key))
             button.setObjectName(name)
@@ -114,6 +196,11 @@ class PlateEditor(QWidget):
         side.addStretch(1)
         side.addWidget(self.close_button)
         side.addWidget(self.replace_button)
+        side.addWidget(self.add_lane_button)
+        side.addWidget(self.finish_lane_button)
+        side.addWidget(self.remove_lane_button)
+        side.addWidget(self.insert_button)
+        side.addWidget(self.remove_point_button)
         side.addWidget(self.undo_button)
         side.addWidget(self.redo_button)
         side.addWidget(self.fit_button)
@@ -123,10 +210,22 @@ class PlateEditor(QWidget):
         form.addRow(translate("planner.plate.perimeter"), self.perimeter_label)
         form.addRow(translate("planner.plate.x"), self.x_spin)
         form.addRow(translate("planner.plate.y"), self.y_spin)
+        form.addRow(translate("planner.lane.which"), self.lane_label)
+        form.addRow(translate("planner.lane.length"), self.length_label)
+        form.addRow(translate("planner.lane.kind"), self.kind_row)
+        form.addRow(translate("planner.lane.radius"), self.radius_spin)
+        form.addRow(translate("planner.lane.turn"), self.turn_row)
+        form.addRow(translate("planner.lane.size"), self.size_row)
+        form.addRow(translate("planner.lane.angle"), self.angle_label)
+        form.addRow(translate("planner.lane.segment"), self.segment_label)
+        form.addRow(translate("planner.lane.ends"), self.ends_label)
+        form.addRow(translate("planner.lane.other"), self.other_label)
+        form.addRow(translate("planner.lane.edge"), self.edge_label)
         properties = QWidget()
         properties.setObjectName("plate-properties")
         column = QVBoxLayout(properties)
         column.addLayout(form)
+        column.addWidget(self.drawing_label)
         column.addWidget(self.issue)
         column.addWidget(self.cursor_label)
         column.addStretch(1)
@@ -134,7 +233,7 @@ class PlateEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         host = QWidget()
         host.setLayout(side)
-        host.setFixedWidth(196)
+        host.setFixedWidth(230)
         layout.addWidget(host)
         layout.addWidget(self.canvas, 1)
         layout.addWidget(properties)
@@ -155,12 +254,13 @@ class PlateEditor(QWidget):
     def load(self, spec: PartSpec | None) -> None:
         """Blank plate, an editable stored plate, or a read-only existing part."""
         corners = None if spec is None else plate_corners(spec)
+        lanes = () if spec is None or corners is None else draft_lanes(spec) or ()
         if spec is None:
             self.session = PlateSession()
             self._editable = True
             self._reference = None
         elif corners is not None:
-            self.session = PlateSession(corners, closed=True)
+            self.session = PlateSession(corners, closed=True, lanes=lanes)
             self._editable = True
             self._reference = None
         else:
@@ -187,6 +287,7 @@ class PlateEditor(QWidget):
     def commit_pending(self) -> None:
         self.canvas.release_drag()
         self._commit_spin()
+        self._commit_radius()
 
     def to_spec(
         self,
@@ -200,8 +301,9 @@ class PlateEditor(QWidget):
         issue = self.session.save_issue()
         if issue is not None:
             raise ValidationError(issue)
-        return stored_plate(
+        return stored_sketch(
             self.session.points,
+            self.session.sketch_lanes(),
             article_number=article_number,
             scale=scale,
             name=name,
@@ -239,7 +341,15 @@ class PlateEditor(QWidget):
         return spin
 
     def _mode_changed(self, _checked: bool = False) -> None:
-        self._mode = _DRAW if self.floor_button.isChecked() else _SELECT
+        if self._filling:
+            return
+        if self.lane_button.isChecked():
+            self._mode = _LANE
+        elif self.floor_button.isChecked():
+            self._mode = _FLOOR
+        else:
+            self._mode = _SELECT
+        self._show_drawing()
         self.canvas.update()
 
     def _close(self) -> None:
@@ -251,6 +361,68 @@ class PlateEditor(QWidget):
         self.floor_button.setChecked(True)
         self.note_change()
 
+    def _add_lane(self) -> None:
+        self.session.add_lane()
+        self.lane_button.setChecked(True)
+        self.note_change()
+
+    def _finish_lane(self) -> None:
+        self.session.finish_lane()
+        self.note_change()
+
+    def _remove_lane(self) -> None:
+        self.session.remove_lane()
+        self.note_change()
+
+    def _insert_point(self) -> None:
+        self.session.insert_point()
+        self.note_change()
+
+    def _remove_point(self) -> None:
+        self.session.remove_lane_point()
+        self.note_change()
+
+    def _kind_toggled(self, kind: str, checked: bool) -> None:
+        if self._filling or not checked:
+            return
+        if kind == "arc":
+            self.session.convert_to_arc()
+        else:
+            self.session.convert_to_line()
+        self.note_change()
+
+    def _turn_toggled(self, right: bool, checked: bool) -> None:
+        if self._filling or not checked:
+            return
+        span = self.session.selected_span()
+        if span is None or span.kind != SPAN_ARC:
+            return
+        long = abs(span.sweep_deg) > 180.0 + 1e-4
+        self.session.set_arc(span.radius_mm, right=right, long=long)
+        self.note_change()
+
+    def _size_toggled(self, long: bool, checked: bool) -> None:
+        if self._filling or not checked:
+            return
+        span = self.session.selected_span()
+        if span is None or span.kind != SPAN_ARC:
+            return
+        self.session.set_arc(span.radius_mm, right=span.sweep_deg >= 0.0, long=long)
+        self.note_change()
+
+    def _preview_radius(self) -> None:
+        if self._filling:
+            return
+        self.session.preview_span_radius(self.radius_spin.value())
+        self.canvas.update()
+        self._show_status()
+
+    def _commit_radius(self) -> None:
+        if self._filling or not self._editable:
+            return
+        self.session.commit_span_radius(self.radius_spin.value())
+        self.note_change()
+
     def _undo(self) -> None:
         self.session.undo()
         self.note_change()
@@ -259,15 +431,18 @@ class PlateEditor(QWidget):
         self.session.redo()
         self.note_change()
 
+    def _point_selected(self) -> bool:
+        return self.session.selected is not None or self.session.lane_point is not None
+
     def _preview_spin(self) -> None:
-        if self._filling or self.session.selected is None:
+        if self._filling or not self._point_selected():
             return
         self.session.preview_selected(self.x_spin.value(), self.y_spin.value())
         self.canvas.update()
         self._show_status()
 
     def _commit_spin(self) -> None:
-        if self._filling or not self._editable or self.session.selected is None:
+        if self._filling or not self._editable or not self._point_selected():
             return
         self.session.commit_selected(self.x_spin.value(), self.y_spin.value())
         self.note_change()
@@ -279,8 +454,14 @@ class PlateEditor(QWidget):
         self._filling = True
         self.select_button.setEnabled(drawing)
         self.floor_button.setEnabled(drawing)
+        self.lane_button.setEnabled(drawing)
         self.close_button.setEnabled(drawing and session.can_close())
         self.replace_button.setEnabled(drawing and session.can_replace())
+        self.add_lane_button.setEnabled(drawing and session.can_add_lane())
+        self.finish_lane_button.setEnabled(drawing and session.can_finish_lane())
+        self.remove_lane_button.setEnabled(drawing and session.can_remove_lane())
+        self.insert_button.setEnabled(drawing and session.can_insert_point())
+        self.remove_point_button.setEnabled(drawing and session.can_remove_lane_point())
         self.undo_button.setEnabled(drawing and session.can_undo())
         self.redo_button.setEnabled(drawing and session.can_redo())
         self.count_label.setText(str(len(session.display_points())))
@@ -288,15 +469,10 @@ class PlateEditor(QWidget):
         self.state_label.setText(translate(state_key))
         perimeter = session.perimeter_mm()
         self.perimeter_label.setText("—" if perimeter is None else f"{perimeter:.3f}")
-        selected = session.selected
-        points = session.display_points()
-        has_point = selected is not None and 0 <= selected < len(points)
-        self.x_spin.setEnabled(drawing and has_point)
-        self.y_spin.setEnabled(drawing and has_point)
-        if has_point and selected is not None:
-            self.x_spin.setValue(points[selected][0])
-            self.y_spin.setValue(points[selected][1])
+        self._fill_point(drawing)
+        self._fill_lane(translate)
         self._filling = False
+        self._show_drawing()
         self._show_status()
         self.canvas.update()
         token = session.geometry_token()
@@ -304,14 +480,101 @@ class PlateEditor(QWidget):
             self._last_token = token
             self.changed.emit()
 
+    def _fill_point(self, drawing: bool) -> None:
+        session = self.session
+        point: tuple[float, float] | None = None
+        if session.lane_point is not None:
+            lane, index = session.lane_point
+            vertices = session.lane_vertices(lane)
+            if 0 <= index < len(vertices):
+                point = vertices[index]
+        elif session.selected is not None:
+            points = session.display_points()
+            if 0 <= session.selected < len(points):
+                point = points[session.selected]
+        self.x_spin.setEnabled(drawing and point is not None)
+        self.y_spin.setEnabled(drawing and point is not None)
+        if point is not None:
+            self.x_spin.setValue(point[0])
+            self.y_spin.setValue(point[1])
+
+    def _fill_lane(self, translate: object) -> None:
+        assert callable(translate)
+        session = self.session
+        focus = None
+        if session.lane_point is not None:
+            focus = session.lane_point[0]
+        elif session.lane_span is not None:
+            focus = session.lane_span[0]
+        elif session.active_lane is not None:
+            focus = session.active_lane
+        self.lane_label.setText("—" if focus is None else str(focus + 1))
+        length = None if focus is None else session.lane_length_mm(focus)
+        self.length_label.setText("—" if length is None else f"{length:.3f}")
+        other = session.point_to_other_lanes_mm()
+        edge = session.point_to_plate_edge_mm()
+        self.other_label.setText("—" if other is None else f"{other:.3f}")
+        self.edge_label.setText("—" if edge is None else f"{edge:.3f}")
+        span = session.selected_span()
+        arc = span is not None and span.kind == SPAN_ARC
+        self.line_button.setEnabled(self._editable and span is not None)
+        self.arc_button.setEnabled(self._editable and span is not None)
+        self.radius_spin.setEnabled(self._editable and arc)
+        self.right_button.setEnabled(self._editable and arc)
+        self.left_button.setEnabled(self._editable and arc)
+        self.short_button.setEnabled(self._editable and arc)
+        self.long_button.setEnabled(self._editable and arc)
+        if span is None:
+            self.segment_label.setText("—")
+            self.angle_label.setText("—")
+            self.ends_label.setText("—")
+            return
+        self.line_button.setChecked(span.kind != SPAN_ARC)
+        self.arc_button.setChecked(span.kind == SPAN_ARC)
+        segment = session.segment_length_mm()
+        self.segment_label.setText("—" if segment is None else f"{segment:.3f}")
+        start, end = span_start(span), span_end(span)
+        self.ends_label.setText(f"{start[0]:.3f}, {start[1]:.3f}  →  {end[0]:.3f}, {end[1]:.3f}")
+        if not arc:
+            self.angle_label.setText("—")
+            return
+        self.radius_spin.setValue(span.radius_mm)
+        self.right_button.setChecked(span.sweep_deg >= 0.0)
+        self.left_button.setChecked(span.sweep_deg < 0.0)
+        long = abs(span.sweep_deg) > 180.0 + 1e-4
+        self.long_button.setChecked(long)
+        self.short_button.setChecked(not long)
+        self.angle_label.setText(f"{abs(span.sweep_deg):.3f}")
+
+    def _show_drawing(self) -> None:
+        session = self.session
+        translate = self._translator.translate
+        open_lane = session.unfinished_lane()
+        if self._mode == _LANE and open_lane is not None:
+            text = translate("planner.lane.drawing").format(number=open_lane + 1)
+        elif self._mode == _LANE and session.active_lane is not None:
+            text = translate("planner.lane.editing").format(number=session.active_lane + 1)
+        elif self._mode == _FLOOR and not session.closed:
+            text = translate("planner.lane.plate_drawing")
+        elif self._mode == _FLOOR:
+            text = translate("planner.lane.plate_editing")
+        else:
+            text = ""
+        self.drawing_label.setText(text)
+
     def _show_status(self) -> None:
         if not self._editable and self._reference is not None:
             self.issue.setText(self._translator.translate("planner.plate.locked"))
             set_tone(self.issue, "warning")
             return
         key = self.session.status_key()
-        self.issue.setText("" if key is None else self._translator.translate(key))
-        set_tone(self.issue, "danger" if key else "")
+        if key is None:
+            key = self.session.warning_key()
+            self.issue.setText("" if key is None else self._translator.translate(key))
+            set_tone(self.issue, "warning" if key else "")
+            return
+        self.issue.setText(self._translator.translate(key))
+        set_tone(self.issue, "danger")
 
 
 class PlateCanvas(QWidget):
@@ -362,6 +625,8 @@ class PlateCanvas(QWidget):
     def fit(self) -> None:
         session = self._editor.session
         points = list(session.display_points())
+        for index in range(len(session.lanes)):
+            points.extend(session.lane_vertices(index))
         reference = self._editor.reference
         if not points and reference is not None and reference.outline:
             points = list(reference.outline)
@@ -411,21 +676,37 @@ class PlateCanvas(QWidget):
         x_mm, y_mm = self._world(event.position())
         session = self._editor.session
         tolerance = _HIT_PX / self._scale
-        if self._editor.mode == _DRAW and not session.closed:
+        if self._editor.mode == _FLOOR and not session.closed:
             if session.near_start(x_mm, y_mm, tolerance):
                 session.close()
             else:
                 session.add_point(x_mm, y_mm)
             self._editor.note_change()
             return
-        if self._editor.mode == _DRAW and session.closed:
+        if self._editor.mode == _LANE:
+            session.add_lane_point(x_mm, y_mm)
+            self._editor.note_change()
+            return
+        if self._editor.mode == _FLOOR and session.closed:
             session.reject_second()
-        index = session.hit(x_mm, y_mm, tolerance)
-        session.select(index)
-        if index is not None and self._editor.mode == _SELECT:
-            session.begin_move(index)
-            self._dragging = True
-            self.grabMouse()
+        target = session.pick(x_mm, y_mm, tolerance)
+        if target is None:
+            session.clear_pick()
+        elif target[0] == "plate":
+            session.select(target[1])
+            if self._editor.mode == _SELECT:
+                session.begin_move(target[1])
+                self._dragging = True
+                self.grabMouse()
+        elif target[0] == "point":
+            if self._editor.mode == _SELECT:
+                session.begin_lane_move(target[1], target[2])
+                self._dragging = True
+                self.grabMouse()
+            else:
+                session.select_lane_point(target[1], target[2])
+        else:
+            session.select_lane_span(target[1], target[2])
         self._panning = False
         self._editor.note_change()
 
@@ -444,8 +725,12 @@ class PlateCanvas(QWidget):
             session.preview_move(x_mm, y_mm)
             self._editor.note_change()
             return
-        drawing = self._editor.editable and self._editor.mode == _DRAW
-        if drawing and not session.closed and session.points:
+        drawing_plate = self._editor.editable and self._editor.mode == _FLOOR
+        drawing_lane = self._editor.editable and self._editor.mode == _LANE
+        open_lane = session.unfinished_lane()
+        lane_vertices = () if open_lane is None else session.lane_vertices(open_lane)
+        plate_hover = drawing_plate and not session.closed and session.points
+        if plate_hover or (drawing_lane and lane_vertices):
             session.set_hover((x_mm, y_mm))
         else:
             session.set_hover(None)
@@ -483,6 +768,8 @@ class PlateCanvas(QWidget):
                 if self.mouseGrabber() is self:
                     self.releaseMouse()
                 self._editor.session.cancel_move()
+            elif self._editor.mode == _LANE:
+                self._editor.session.cancel_lane()
             else:
                 self._editor.session.cancel_open()
             self._editor.note_change()
@@ -562,13 +849,23 @@ class PlateCanvas(QWidget):
                 painter.drawLine(QPointF(*start), QPointF(*end))
             if session.closed:
                 painter.drawLine(QPointF(*points[-1]), QPointF(*points[0]))
+        self._stroke_lanes(painter, session)
         hover = session.hover
-        if hover is not None and points and not session.closed:
+        if hover is not None and self._editor.mode == _FLOOR and points and not session.closed:
             pen = QPen(QColor(COLORS.info))
             pen.setCosmetic(True)
             pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(QPointF(*points[-1]), QPointF(*hover))
+        open_lane = session.unfinished_lane()
+        if hover is not None and open_lane is not None and self._editor.mode == _LANE:
+            vertices = session.lane_vertices(open_lane)
+            if vertices:
+                pen = QPen(QColor(COLORS.info))
+                pen.setCosmetic(True)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(*vertices[-1]), QPointF(*hover))
 
     def _paint_spec(self) -> PartSpec | None:
         if not self._editor.editable and self._editor.reference is not None:
@@ -577,7 +874,7 @@ class PlateCanvas(QWidget):
         if not session.closed:
             return None
         try:
-            return plate_part(session.display_points())
+            return plate_part(session.display_points(), session.sketch_lanes())
         except ValidationError:
             return None
 
@@ -596,3 +893,36 @@ class PlateCanvas(QWidget):
             pen.setCosmetic(True)
             painter.setPen(pen)
             painter.drawEllipse(QPointF(*point), radius * (1.35 if start else 1.0), radius)
+        for lane in range(len(session.lanes)):
+            active = lane == session.active_lane
+            for index, point in enumerate(session.lane_vertices(lane)):
+                chosen = session.lane_point == (lane, index)
+                color = COLORS.accent if chosen else COLORS.info if active else COLORS.elevated
+                painter.setBrush(QColor(color))
+                pen = QPen(QColor(COLORS.text))
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.drawEllipse(QPointF(*point), radius * (1.3 if chosen else 0.8), radius)
+
+    def _stroke_lanes(self, painter: QPainter, session: PlateSession) -> None:
+        for lane in range(len(session.lanes)):
+            active = lane == session.active_lane
+            chosen = session.lane_span
+            for index, span in enumerate(session.lane_spans(lane)):
+                selected = chosen == (lane, index)
+                color = COLORS.accent if selected or active else COLORS.info
+                pen = QPen(QColor(color))
+                pen.setCosmetic(True)
+                pen.setWidthF(2.4 if selected or active else 1.2)
+                painter.setPen(pen)
+                self._stroke_span(painter, span)
+
+    def _stroke_span(self, painter: QPainter, span: object) -> None:
+        segment = as_segment(span)  # type: ignore[arg-type]
+        if isinstance(segment, ArcSegment):
+            steps = max(8, int(abs(segment.sweep_deg) / 6.0))
+            samples = [segment.point_at(index / steps) for index in range(steps + 1)]
+            for start, end in pairwise(samples):
+                painter.drawLine(QPointF(*start), QPointF(*end))
+            return
+        painter.drawLine(QPointF(*segment.start()), QPointF(*segment.end()))

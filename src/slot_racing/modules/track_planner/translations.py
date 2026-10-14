@@ -210,6 +210,37 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.plate.perimeter": "Umfang (mm)",
         "planner.plate.x": "X (mm)",
         "planner.plate.y": "Y (mm)",
+        "planner.lane.add": "Fahrspur hinzufügen",
+        "planner.lane.finish": "Fahrspur abschließen",
+        "planner.lane.remove": "Fahrspur entfernen",
+        "planner.lane.insert": "Punkt einfügen",
+        "planner.lane.remove_point": "Punkt entfernen",
+        "planner.lane.which": "Fahrspur",
+        "planner.lane.length": "Spurlänge (mm)",
+        "planner.lane.kind": "Segment",
+        "planner.lane.line": "Gerade",
+        "planner.lane.arc": "Kreisbogen",
+        "planner.lane.radius": "Radius (mm)",
+        "planner.lane.turn": "Drehrichtung",
+        "planner.lane.right": "Rechts",
+        "planner.lane.left": "Links",
+        "planner.lane.size": "Bogen",
+        "planner.lane.short": "Kurzer Bogen",
+        "planner.lane.long": "Langer Bogen",
+        "planner.lane.angle": "Winkel (°)",
+        "planner.lane.segment": "Segmentlänge (mm)",
+        "planner.lane.ends": "Endpunkte",
+        "planner.lane.other": "Abstand zu anderer Fahrspur (mm)",
+        "planner.lane.other_hint": (
+            "Kürzester Abstand dieses Punkts zu einer anderen Fahrspur. "
+            "Das ist kein fester Spurabstand."
+        ),
+        "planner.lane.edge": "Abstand zur Bodenkante (mm)",
+        "planner.lane.edge_hint": "Kürzester Abstand dieses Punkts zur Kante der Bodenplatte.",
+        "planner.lane.drawing": "Fahrspur {number} wird gezeichnet.",
+        "planner.lane.editing": "Fahrspur {number} wird bearbeitet.",
+        "planner.lane.plate_drawing": "Bodenplatte wird gezeichnet.",
+        "planner.lane.plate_editing": "Bodenplatte wird bearbeitet.",
         "planner.plate.separate": (
             "Die Bodenplatte ist noch nicht gespeichert. "
             "Die Maße auf diesem Reiter beschreiben sie nicht."
@@ -295,5 +326,23 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Parameter und Bodenplatte wurden beide geändert. "
             "Machen Sie eine der beiden Änderungen rückgängig, bevor Sie speichern."
         ),
+        "error.planner.lane.radius": (
+            "Der Radius ist kleiner als die halbe Sehne. Der Bogen bleibt unverändert."
+        ),
+        "error.planner.lane.zero": "Das Segment hätte keine Länge.",
+        "error.planner.lane.open": "Eine Fahrspur ist noch nicht abgeschlossen.",
+        "error.planner.lane.short": "Eine Fahrspur braucht mindestens eine Verbindung.",
+        "error.planner.lane.limit": "Es sind höchstens vier Fahrspuren möglich.",
+        "error.planner.lane.plate": "Zuerst muss die Bodenplatte geschlossen sein.",
+        "error.planner.lane.idle": "Legen Sie zuerst eine Fahrspur an.",
+        "error.planner.lane.done": (
+            "Diese Fahrspur ist abgeschlossen. Wählen Sie sie aus oder legen Sie eine neue an."
+        ),
+        "error.planner.lane.outside": (
+            "Ein Punkt der Fahrspur liegt außerhalb der Bodenplatte. "
+            "Der Entwurf bleibt unvollständig."
+        ),
+        "error.planner.lane.gap": "Die Fahrspur hat eine Lücke.",
+        "error.planner.lane.arc": "Der Kreisbogen ist so nicht bestimmt.",
     }
 }
