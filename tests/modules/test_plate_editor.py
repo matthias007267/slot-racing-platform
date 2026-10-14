@@ -334,5 +334,5 @@ def test_the_planner_palette_hides_the_draft(qtbot: QtBot, env: Env) -> None:
     assert any(row.part_id == dialog.saved.id for row in visible)
     manager_text.append("shown")
     assert manager_text == ["shown"]
-    lane = dialog.findChild(QPushButton, "plate-lane")
-    assert lane is not None and not lane.isEnabled()
+    center = dialog.findChild(QPushButton, "plate-center")
+    assert center is not None and not center.isEnabled()
