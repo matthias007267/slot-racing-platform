@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from slot_racing.core.domain.race import RaceStatus
-from slot_racing.core.statistics import HistoryParticipant, HistoryRace, valid_lap_times
+from slot_racing.core.statistics import HistoryParticipant, HistoryRace, scoring_lap_times
 
 DEFAULT_PLACE_POINTS: tuple[tuple[int, int], ...] = (
     (1, 25),
@@ -210,7 +210,7 @@ def _score_race(race: HistoryRace, rule: PointsRule) -> dict[int, RaceScore]:
     scores: dict[int, RaceScore] = {}
     for person, merged in chosen:
         classified = official and not person.disqualified and person.position is not None
-        own = valid_lap_times(race.laps, person.participant_id)
+        own = scoring_lap_times(race.laps, person.participant_id)
         best = min(own) if own else None
         is_fastest = classified and fastest is not None and best == fastest
         bonus = rule.fastest_lap_bonus if is_fastest and rule.fastest_lap_bonus > 0 else 0
@@ -263,7 +263,7 @@ def _fastest_time(
             continue
         if race.status is not RaceStatus.FINISHED:
             continue
-        valid = valid_lap_times(race.laps, person.participant_id)
+        valid = scoring_lap_times(race.laps, person.participant_id)
         if valid:
             times.append(min(valid))
     return min(times) if times else None

@@ -81,6 +81,45 @@ def _shown_lane(current: int | None, laps: Sequence[Lap]) -> int:
     return 0
 
 
+def _counting_measurements(rows: Sequence[TimeMeasurement]) -> list[TimeMeasurement]:
+    """Measurements that may set a best time. An excluded or non-positive row stays stored."""
+    return [row for row in rows if not row.statistics_excluded and row.time_ns > 0]
+
+
+def _mark_measurement(
+    session: Session, lap: Lap, participant: RaceParticipant | None, *, excluded: bool
+) -> None:
+    """Give the time-trial row of this lap the same statistics mark. Other rows stay put."""
+    linked = list(session.scalars(select(TimeMeasurement).where(TimeMeasurement.lap_id == lap.id)))
+    if linked:
+        for row in linked:
+            row.statistics_excluded = excluded
+        return
+    if participant is None:
+        return
+    lane = lap.lane if lap.lane is not None else participant.lane
+    if lane is None:
+        return
+    pending = list(
+        session.scalars(
+            select(TimeMeasurement)
+            .where(
+                TimeMeasurement.race_id == lap.race_id,
+                TimeMeasurement.driver_id == participant.driver_id,
+                TimeMeasurement.lane == lane,
+                TimeMeasurement.time_ns == lap.lap_time_ns,
+                TimeMeasurement.lap_id.is_(None),
+                TimeMeasurement.statistics_excluded.is_(not excluded),
+            )
+            .order_by(TimeMeasurement.id)
+        )
+    )
+    if not pending:
+        return
+    pending[0].lap_id = lap.id
+    pending[0].statistics_excluded = excluded
+
+
 def _best_row(rows: Sequence[TimeMeasurement]) -> TimeMeasurement | None:
     if not rows:
         return None
@@ -684,6 +723,20 @@ class RaceService(RaceHistoryCatalog):
             rows = self._measurement_rows(session, race_id=race_id, track_id=track_id)
             return [self._measurement_info(row) for row in rows]
 
+    def set_lap_excluded(self, lap_id: int, *, excluded: bool) -> None:
+        """Mark or restore one lap for statistics. The race result is not rewritten.
+
+        Position, lap count, total time and the stored best lap stay on the participant.
+        The lap row keeps its time. A time-trial measurement of that lap receives the same mark.
+        """
+        with self._database.session() as session:
+            lap = session.get(Lap, lap_id)
+            if lap is None:
+                raise ValidationError("error.statistics.lap_unknown")
+            lap.statistics_excluded = excluded
+            participant = session.get(RaceParticipant, lap.participant_id)
+            _mark_measurement(session, lap, participant, excluded=excluded)
+
     def personal_best(
         self,
         driver_id: DriverId,
@@ -694,25 +747,29 @@ class RaceService(RaceHistoryCatalog):
     ) -> TimeBest | None:
         """Best time of one driver with one vehicle on one lane. Other lanes stay untouched."""
         with self._database.session() as session:
-            rows = [
-                row
-                for row in self._measurement_rows(session, track_id=track_id)
-                if row.driver_id == driver_id
-                and row.vehicle_id == vehicle_id
-                and row.lane == lane
-                and (track_id is None or row.track_id == track_id)
-            ]
+            rows = _counting_measurements(
+                [
+                    row
+                    for row in self._measurement_rows(session, track_id=track_id)
+                    if row.driver_id == driver_id
+                    and row.vehicle_id == vehicle_id
+                    and row.lane == lane
+                    and (track_id is None or row.track_id == track_id)
+                ]
+            )
             best = _best_row(rows)
             return None if best is None else self._time_best(best)
 
     def driver_bests_on_lane(self, lane: int, *, track_id: TrackId | None = None) -> list[TimeBest]:
         """Fastest driver on this lane first. Each driver keeps only that lane's best time."""
         with self._database.session() as session:
-            rows = [
-                row
-                for row in self._measurement_rows(session, track_id=track_id)
-                if row.lane == lane
-            ]
+            rows = _counting_measurements(
+                [
+                    row
+                    for row in self._measurement_rows(session, track_id=track_id)
+                    if row.lane == lane
+                ]
+            )
             grouped = _best_by(rows, lambda row: (row.track_id, row.driver_id, row.lane))
             return [self._time_best(row) for row in sorted(grouped, key=_measurement_order)]
 
@@ -721,11 +778,13 @@ class RaceService(RaceHistoryCatalog):
     ) -> list[TimeBest]:
         """How fast this vehicle was driven on this lane, one row per driver, fastest first."""
         with self._database.session() as session:
-            rows = [
-                row
-                for row in self._measurement_rows(session, track_id=track_id)
-                if row.vehicle_id == vehicle_id and row.lane == lane
-            ]
+            rows = _counting_measurements(
+                [
+                    row
+                    for row in self._measurement_rows(session, track_id=track_id)
+                    if row.vehicle_id == vehicle_id and row.lane == lane
+                ]
+            )
             grouped = _best_by(
                 rows,
                 lambda row: (row.track_id, row.driver_id, row.vehicle_id, row.lane),
@@ -735,7 +794,7 @@ class RaceService(RaceHistoryCatalog):
     def overall_bests(self, *, track_id: TrackId | None = None) -> list[TimeBest]:
         """Personal bests of driver + vehicle + lane, fastest first. Every row names its lane."""
         with self._database.session() as session:
-            rows = self._measurement_rows(session, track_id=track_id)
+            rows = _counting_measurements(self._measurement_rows(session, track_id=track_id))
             grouped = _best_by(
                 rows, lambda row: (row.track_id, row.driver_id, row.vehicle_id, row.lane)
             )
@@ -744,7 +803,7 @@ class RaceService(RaceHistoryCatalog):
     def lane_rankings(self, *, track_id: TrackId | None = None) -> list[LaneRanking]:
         """One ranking per lane that has a measurement. Lanes are never combined into one list."""
         with self._database.session() as session:
-            rows = self._measurement_rows(session, track_id=track_id)
+            rows = _counting_measurements(self._measurement_rows(session, track_id=track_id))
             lanes = sorted({row.lane for row in rows})
             rankings: list[LaneRanking] = []
             for lane in lanes:
@@ -820,6 +879,7 @@ class RaceService(RaceHistoryCatalog):
                         lane=lane,
                         time_ns=lap_time_ns,
                         recorded_at=utc_now(),
+                        lap_id=lap.id,
                     )
                 )
 
@@ -1151,6 +1211,7 @@ class RaceService(RaceHistoryCatalog):
             lane=row.lane,
             time_ns=row.time_ns,
             recorded_at=row.recorded_at,
+            excluded=bool(row.statistics_excluded),
         )
 
     def _time_best(self, row: TimeMeasurement) -> TimeBest:

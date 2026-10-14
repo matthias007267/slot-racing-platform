@@ -297,6 +297,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.race.lane_taken": "Spur {lane} ist bereits vergeben.",
         "error.race.driver_duplicate": "Der Fahrer „{driver}“ nimmt bereits teil.",
         "error.race.participant_unknown": "Der Teilnehmer existiert nicht.",
+        "error.statistics.lap_unknown": "Diese Runde ist nicht gespeichert.",
         "error.race.participant_required": "Bitte wählen Sie Fahrer, Fahrzeug und Spur aus.",
         "error.race.no_drivers": (
             "Das Rennen kann nicht gestartet werden, da noch keine Fahrer angelegt wurden. "

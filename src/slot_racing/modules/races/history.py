@@ -94,6 +94,8 @@ def _race(
                 lap_number=int(lap.lap_number),
                 lap_time_ns=int(lap.lap_time_ns),
                 lane=None if lap.lane is None else int(lap.lane),
+                lap_id=int(lap.id),
+                excluded=bool(lap.statistics_excluded),
             )
             for lap in laps
         ),

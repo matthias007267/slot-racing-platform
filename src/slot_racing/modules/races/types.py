@@ -80,6 +80,7 @@ class TimeMeasurementInfo:
     lane: int
     time_ns: int
     recorded_at: datetime | None
+    excluded: bool = False
 
 
 @dataclass(frozen=True, slots=True)

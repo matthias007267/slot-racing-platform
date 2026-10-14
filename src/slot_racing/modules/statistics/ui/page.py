@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -21,10 +24,11 @@ from PySide6.QtWidgets import (
 from slot_racing.core.catalog import RaceHistoryCatalog, TimeMeasurementCatalog, TrackCatalog
 from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceId, TrackId
+from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
-from slot_racing.core.statistics import TimeScope, track_records
+from slot_racing.core.statistics import RecordLine, TimeScope, track_records
 from slot_racing.modules.statistics.lanes import lane_statistic_cells, statistics_for_track
-from slot_racing.uikit import fill_table, make_table
+from slot_racing.uikit import describe_error, fill_table, make_table
 from slot_racing.uikit.career import MISSING
 from slot_racing.uikit.report_view import RaceReportView
 from slot_racing.uikit.theme import configure_page, set_role
@@ -119,18 +123,17 @@ class StatisticsPage(QWidget):
         self.records_empty.setObjectName("statistics-records-empty")
         self.records_empty.setWordWrap(True)
         set_role(self.records_empty, "caption")
-        self.records_table = make_table(
-            [
-                tr("records.column.time"),
-                tr("records.column.driver"),
-                tr("records.column.vehicle"),
-                tr("records.column.lane"),
-                tr("records.column.date"),
-                tr("records.column.race"),
-                tr("records.column.lap"),
-            ],
-            "statistics-records",
-        )
+        self.records_table = make_table(_record_headers(tr), "statistics-records")
+        self.exclude_button = QPushButton(tr("records.exclude"))
+        self.exclude_button.setObjectName("statistics-exclude")
+        self.excluded_heading = QLabel(tr("records.excluded.heading"))
+        self.excluded_heading.setObjectName("statistics-excluded-heading")
+        set_role(self.excluded_heading, "section")
+        self.excluded_table = make_table(_record_headers(tr), "statistics-excluded")
+        self.restore_button = QPushButton(tr("records.restore"))
+        self.restore_button.setObjectName("statistics-restore")
+        self._counting: dict[int, RecordLine] = {}
+        self._excluded: dict[int, RecordLine] = {}
         filters = QHBoxLayout()
         filters.addWidget(self.layout_combo, 2)
         filters.addWidget(self.lane_combo, 1)
@@ -153,6 +156,16 @@ class StatisticsPage(QWidget):
         layout.addLayout(period)
         layout.addWidget(self.records_empty)
         layout.addWidget(self.records_table, 2)
+        actions = QHBoxLayout()
+        actions.addWidget(self.exclude_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        layout.addWidget(self.excluded_heading)
+        layout.addWidget(self.excluded_table, 1)
+        restore = QHBoxLayout()
+        restore.addWidget(self.restore_button)
+        restore.addStretch(1)
+        layout.addLayout(restore)
         self.track_combo.currentIndexChanged.connect(lambda _index: self._show_selected())
         for widget in (self.layout_combo, self.lane_combo, self.driver_combo, self.vehicle_combo):
             widget.currentIndexChanged.connect(lambda _index: self._show_records())
@@ -161,6 +174,12 @@ class StatisticsPage(QWidget):
         self.since_edit.dateChanged.connect(lambda _date: self._show_records())
         self.until_edit.dateChanged.connect(lambda _date: self._show_records())
         self.records_table.cellDoubleClicked.connect(lambda *_args: self.show_selected_record())
+        self.records_table.itemSelectionChanged.connect(self._update_actions)
+        self.excluded_table.itemSelectionChanged.connect(self._update_actions)
+        self.exclude_button.clicked.connect(self.exclude_selected)
+        self.restore_button.clicked.connect(self.restore_selected)
+        self.confirm: Callable[[str], bool] = self._ask
+        self._update_actions()
         self.refresh()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
@@ -184,11 +203,19 @@ class StatisticsPage(QWidget):
 
     def show_selected_record(self) -> None:
         """Open the race that produced the selected lap. A missing race shows the empty report."""
-        race_id = selected_id(self.records_table)
+        line = self._selected_line(self.records_table, self._counting)
         catalog = None if self._history is None else self._history()
-        if race_id is None or catalog is None:
+        if line is None or catalog is None:
             return
-        self.dialog_runner(RecordDialog(self._translator, catalog, race_id, self))
+        self.dialog_runner(RecordDialog(self._translator, catalog, line.race_id, self))
+
+    def exclude_selected(self) -> None:
+        """Ask, then drop the selected lap from the statistics. The stored lap stays."""
+        self._mark_selected(self.records_table, self._counting, excluded=True)
+
+    def restore_selected(self) -> None:
+        """Ask, then count the selected lap in the statistics again."""
+        self._mark_selected(self.excluded_table, self._excluded, excluded=False)
 
     def _show_selected(self) -> None:
         raw = self.track_combo.currentData()
@@ -200,7 +227,8 @@ class StatisticsPage(QWidget):
         self._set_records_visible(has_track)
         if track is None:
             fill_table(self.table, [])
-            fill_sortable(self.records_table, [])
+            self._clear_lap_tables()
+            self.records_empty.setVisible(False)
             return
         catalog = self._measurements()
         rows = () if catalog is None else catalog.list_for_track(track.id)
@@ -214,31 +242,81 @@ class StatisticsPage(QWidget):
         raw = self.track_combo.currentData()
         catalog = None if self._history is None else self._history()
         if raw is None or catalog is None:
-            fill_sortable(self.records_table, [])
+            self._clear_lap_tables()
             self.records_empty.setVisible(self.track_combo.currentData() is not None)
             self.records_table.setVisible(False)
             return
-        lines = track_records(catalog.list_completed(), self._scope(int(raw)))
+        scope = self._scope(int(raw))
+        races = catalog.list_completed()
+        counting = track_records(races, scope)
+        excluded = track_records(races, scope, excluded=True)
+        self._counting = {line.lap_id: line for line in counting}
+        self._excluded = {line.lap_id: line for line in excluded}
         tr = self._translator.translate
         self.records_empty.setText(tr("records.empty"))
-        self.records_empty.setVisible(not lines)
-        self.records_table.setVisible(bool(lines))
-        fill_sortable(
-            self.records_table,
-            [
-                (
-                    format_duration(line.time_ns),
-                    line.driver_label,
-                    line.vehicle_label,
-                    MISSING if line.lane is None else str(line.lane),
-                    MISSING if line.when is None else line.when.strftime("%d.%m.%Y"),
-                    line.race_name,
-                    str(line.lap_number),
-                )
-                for line in lines
-            ],
-            [line.race_id for line in lines],
+        self.records_empty.setVisible(not counting)
+        self.records_table.setVisible(bool(counting))
+        self.excluded_heading.setVisible(bool(excluded))
+        self.excluded_table.setVisible(bool(excluded))
+        self.restore_button.setVisible(bool(excluded))
+        _fill_records(self.records_table, counting)
+        _fill_records(self.excluded_table, excluded)
+        self._update_actions()
+
+    def _mark_selected(
+        self, table: QTableWidget, lines: dict[int, RecordLine], *, excluded: bool
+    ) -> None:
+        line = self._selected_line(table, lines)
+        catalog = None if self._history is None else self._history()
+        if line is None or catalog is None or line.lap_id <= 0:
+            return
+        key = "records.exclude.confirm" if excluded else "records.restore.confirm"
+        question = self._translator.format(
+            key,
+            driver=line.driver_label,
+            vehicle=line.vehicle_label,
+            time=format_duration(line.time_ns),
         )
+        if not self.confirm(question):
+            return
+        try:
+            catalog.set_lap_excluded(line.lap_id, excluded=excluded)
+        except ValidationError as error:
+            QMessageBox.warning(
+                self,
+                self._translator.translate("common.confirm"),
+                describe_error(self._translator, error),
+            )
+            return
+        self._show_selected()
+
+    def _selected_line(
+        self, table: QTableWidget, lines: dict[int, RecordLine]
+    ) -> RecordLine | None:
+        lap_id = selected_id(table)
+        if lap_id is None:
+            return None
+        return lines.get(lap_id)
+
+    def _ask(self, text: str) -> bool:
+        answer = QMessageBox.question(self, self._translator.translate("common.confirm"), text)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _update_actions(self) -> None:
+        counting = self._selected_line(self.records_table, self._counting) is not None
+        marked = self._selected_line(self.excluded_table, self._excluded) is not None
+        self.exclude_button.setEnabled(counting)
+        self.restore_button.setEnabled(marked)
+
+    def _clear_lap_tables(self) -> None:
+        self._counting = {}
+        self._excluded = {}
+        fill_sortable(self.records_table, [])
+        fill_sortable(self.excluded_table, [])
+        self.excluded_heading.setVisible(False)
+        self.excluded_table.setVisible(False)
+        self.restore_button.setVisible(False)
+        self._update_actions()
 
     def _scope(self, track_id: int) -> TimeScope:
         layout = self.layout_combo.currentData()
@@ -329,8 +407,44 @@ class StatisticsPage(QWidget):
             self.until_edit,
             self.records_empty,
             self.records_table,
+            self.exclude_button,
+            self.excluded_heading,
+            self.excluded_table,
+            self.restore_button,
         ):
             widget.setVisible(visible)
+
+
+def _record_headers(translate: Callable[[str], str]) -> list[str]:
+    return [
+        translate("records.column.time"),
+        translate("records.column.driver"),
+        translate("records.column.vehicle"),
+        translate("records.column.lane"),
+        translate("records.column.date"),
+        translate("records.column.race"),
+        translate("records.column.lap"),
+    ]
+
+
+def _record_cells(line: RecordLine) -> tuple[str, ...]:
+    return (
+        format_duration(line.time_ns),
+        line.driver_label,
+        line.vehicle_label,
+        MISSING if line.lane is None else str(line.lane),
+        MISSING if line.when is None else line.when.strftime("%d.%m.%Y"),
+        line.race_name,
+        str(line.lap_number),
+    )
+
+
+def _fill_records(table: QTableWidget, lines: tuple[RecordLine, ...]) -> None:
+    fill_sortable(
+        table,
+        [_record_cells(line) for line in lines],
+        [line.lap_id for line in lines],
+    )
 
 
 def _date_edit() -> QDateEdit:

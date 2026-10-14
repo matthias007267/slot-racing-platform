@@ -73,6 +73,30 @@ def test_a_disqualified_lap_neither_scores_nor_sets_the_fastest_lap() -> None:
     assert ben.wins == 0
 
 
+def test_an_excluded_fastest_lap_keeps_the_place_and_loses_the_bonus() -> None:
+    people = (_person(1, 1, "Anna", 1), _person(2, 2, "Ben", 2))
+    standing = score_championship(
+        [
+            _race(
+                1,
+                people,
+                laps=(
+                    HistoryLap(1, 1, 4_000_000_000, 1, excluded=True),
+                    HistoryLap(2, 1, 9_000_000_000, 2),
+                ),
+            )
+        ],
+        PointsRule(DEFAULT_PLACE_POINTS, fastest_lap_bonus=3),
+    )
+    by_name = {row.driver_label: row for row in standing}
+    assert by_name["Anna"].points == 25
+    assert by_name["Anna"].bonus_points == 0
+    assert by_name["Anna"].results[0].position == 1
+    assert by_name["Ben"].bonus_points == 3
+    assert by_name["Ben"].results[0].fastest is True
+    assert by_name["Ben"].points == 21
+
+
 def test_no_valid_lap_awards_no_bonus() -> None:
     standing = score_championship(
         [_race(1, (_person(1, 1, "Anna", 1),), laps=(_lap(1, 0),))],

@@ -79,6 +79,10 @@ class Lap(Base):
     lap_number: Mapped[int]
     lap_time_ns: Mapped[int] = mapped_column(BigInteger)
     race_time_ns: Mapped[int] = mapped_column(BigInteger)
+    statistics_excluded: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    """Left out of statistical figures. The stored lap and the race result stay."""
 
 
 class TimeMeasurement(Base):
@@ -102,6 +106,12 @@ class TimeMeasurement(Base):
     lane: Mapped[int]
     time_ns: Mapped[int] = mapped_column(BigInteger)
     recorded_at: Mapped[datetime] = mapped_column(DateTime)
+    lap_id: Mapped[int | None] = mapped_column(ForeignKey("laps.id", ondelete="SET NULL"))
+    """The lap this measurement was written with. Empty for rows stored before the link existed."""
+    statistics_excluded: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    """The same mark as the linked lap. Rankings skip it; the row itself stays."""
 
 
 class Sector(Base):

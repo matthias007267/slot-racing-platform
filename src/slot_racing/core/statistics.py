@@ -3,7 +3,9 @@
 The functions read plain facts and return plain facts. They do not open the database and they
 do not draw. A stored lap is one completed lap: the pass that only starts a lap is not a row.
 A non-positive time is ignored. An outlier stays in every average; it is only marked.
-Missing comparisons stay ``None``. Nothing here invents a time, a place or a length.
+A lap marked ``excluded`` stays stored and still belongs to the race result, but career
+figures and record lists leave it out. Missing comparisons stay ``None``. Nothing here
+invents a time, a place or a length.
 """
 
 from __future__ import annotations
@@ -26,6 +28,10 @@ class HistoryLap:
     lap_number: int
     lap_time_ns: int
     lane: int | None
+    lap_id: int = 0
+    """Stored row id. ``0`` is only for a lap that was never written to the database."""
+    excluded: bool = False
+    """Dropped from statistical figures. The time itself is unchanged."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,15 +188,38 @@ class RecordLine:
     race_id: int
     race_name: str
     lap_number: int
+    lap_id: int = 0
+    excluded: bool = False
 
 
 def valid_lap_times(laps: Sequence[HistoryLap], participant_id: int) -> tuple[int, ...]:
-    """Completed laps with a positive time, in lap order. A start-only pass is not in ``laps``."""
-    ordered = sorted(
-        (lap for lap in laps if lap.participant_id == participant_id),
-        key=lambda lap: lap.lap_number,
-    )
+    """Completed laps with a positive time, in lap order. A start-only pass is not in ``laps``.
+
+    An excluded lap is still valid as a stored measurement. Race results keep using this list.
+    """
+    ordered = _ordered_laps(laps, participant_id)
     return tuple(lap.lap_time_ns for lap in ordered if lap.lap_time_ns > 0)
+
+
+def scoring_lap_times(laps: Sequence[HistoryLap], participant_id: int) -> tuple[int, ...]:
+    """Positive laps that still count in statistics, in lap order.
+
+    An excluded lap is omitted. The stored time is not changed and is not replaced.
+    """
+    return tuple(
+        lap.lap_time_ns
+        for lap in _ordered_laps(laps, participant_id)
+        if lap.lap_time_ns > 0 and not lap.excluded
+    )
+
+
+def _ordered_laps(laps: Sequence[HistoryLap], participant_id: int) -> tuple[HistoryLap, ...]:
+    return tuple(
+        sorted(
+            (lap for lap in laps if lap.participant_id == participant_id),
+            key=lambda lap: lap.lap_number,
+        )
+    )
 
 
 def average_ns(times: Sequence[int]) -> int | None:
@@ -309,7 +338,9 @@ def career_summary(
         race_times: list[int] = []
         best_position: int | None = None
         for person in people:
-            times = () if person.disqualified else valid_lap_times(race.laps, person.participant_id)
+            times = (
+                () if person.disqualified else scoring_lap_times(race.laps, person.participant_id)
+            )
             race_times.extend(times)
             lap_total += len(times)
             if _counts_result(race, person):
@@ -351,8 +382,14 @@ def career_summary(
     )
 
 
-def track_records(races: Sequence[HistoryRace], scope: TimeScope) -> tuple[RecordLine, ...]:
-    """Fastest valid laps in one layout bucket. Other layouts and other tracks are left out."""
+def track_records(
+    races: Sequence[HistoryRace], scope: TimeScope, *, excluded: bool = False
+) -> tuple[RecordLine, ...]:
+    """Fastest laps in one layout bucket. Other layouts and other tracks are left out.
+
+    ``excluded`` selects the marked laps instead of the ones that still count. A marked lap
+    is not a record, but it stays addressable so the mark can be cleared.
+    """
     if not _times_are_comparable(scope):
         return ()
     lines: list[RecordLine] = []
@@ -371,7 +408,7 @@ def track_records(races: Sequence[HistoryRace], scope: TimeScope) -> tuple[Recor
         }
         for lap in race.laps:
             person = people.get(lap.participant_id)
-            if person is None or lap.lap_time_ns <= 0:
+            if person is None or lap.lap_time_ns <= 0 or lap.excluded != excluded:
                 continue
             if scope.lane is not None and (lap.lane or person.lane) != scope.lane:
                 continue
@@ -387,6 +424,8 @@ def track_records(races: Sequence[HistoryRace], scope: TimeScope) -> tuple[Recor
                     race_id=race.race_id,
                     race_name=race.name,
                     lap_number=lap.lap_number,
+                    lap_id=lap.lap_id,
+                    excluded=lap.excluded,
                 )
             )
     lines.sort(key=_record_order)
