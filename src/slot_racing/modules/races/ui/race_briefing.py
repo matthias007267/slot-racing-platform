@@ -208,6 +208,7 @@ class OverviewBoard(QWidget):
             fmt("race.overview.active_lanes", lanes=race.active_lanes),
             mode,
             fmt("race.overview.provider", provider=provider),
+            fmt("race.overview.repetitions", count=race.repetitions),
         )
         for text in facts:
             self._layout.addWidget(_wrapped(text, "wizard-value"))

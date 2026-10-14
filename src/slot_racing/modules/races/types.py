@@ -38,6 +38,8 @@ class RaceInfo:
     duration_minutes: int | None = None
     active_lanes: int = 0
     """Lanes this race plans. The track's ``lane_count`` stays the physical count."""
+    repetitions: int = 1
+    """Stored repetition count. Lap targets and the heat rotation do not read it."""
 
     @property
     def is_editable(self) -> bool:
@@ -46,6 +48,42 @@ class RaceInfo:
     @property
     def is_over(self) -> bool:
         return self.status in (RaceStatus.FINISHED, RaceStatus.ABORTED)
+
+
+@dataclass(frozen=True, slots=True)
+class RestartSeat:
+    """One copied assignment. ``issue_key`` is empty when the assignment can be kept."""
+
+    driver_id: DriverId
+    driver_label: str
+    vehicle_id: VehicleId | None
+    vehicle_label: str
+    lane: int | None
+    issue_key: str | None = None
+    issue_driver: str = ""
+    issue_vehicle: str = ""
+    issue_lane: int | None = None
+    issue_maximum: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RestartPreview:
+    """Settings a new race would take from a finished or aborted one. Nothing is stored yet."""
+
+    source_id: RaceId
+    source_name: str
+    suggested_name: str
+    track_id: TrackId | None
+    track_name: str
+    lane_count: int
+    mode: RaceMode
+    laps: int
+    timing_provider: str
+    duration_minutes: int | None
+    active_lanes: int
+    repetitions: int
+    uses_heats: bool
+    seats: tuple[RestartSeat, ...]
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QLabel
 from pytestqt.qtbot import QtBot
+from sqlalchemy import select
 
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.errors import ValidationError
+from slot_racing.core.storage import Database
+from slot_racing.modules.races.models import Lap, Race
 from slot_racing.modules.races.types import HeatInfo, RaceInfo
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
+from slot_racing.modules.track_planner.document import STRAIGHT_H, add_piece
+from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.tracks.models import Track
 from slot_racing.uikit.widgets import ID_ROLE
 from tests.modules.conftest import Env
 from tests.modules.test_race_flow import drive_until_done
@@ -46,11 +53,13 @@ def test_restart_copies_the_race_and_leaves_the_aborted_results(env: Env) -> Non
     assert restarted.id != aborted.id
     assert restarted.status is RaceStatus.READY
     assert restarted.started_at is None and restarted.finished_at is None
-    assert (restarted.name, restarted.track_id, restarted.mode, restarted.laps) == (
-        aborted.name,
+    assert restarted.name == "Finale (2)"
+    assert restarted.name != aborted.name
+    assert (restarted.track_id, restarted.mode, restarted.laps, restarted.repetitions) == (
         aborted.track_id,
         RaceMode.LAPS,
         8,
+        1,
     )
     assert restarted.timing_provider == "simulation"
     assert restarted.duration_minutes is None
@@ -124,16 +133,41 @@ def test_restart_keeps_a_time_trial_and_builds_a_fresh_heat_plan(env: Env) -> No
     assert env.races.require_race(heat.id).status is RaceStatus.ABORTED
 
 
-def test_a_finished_race_cannot_be_restarted(env: Env) -> None:
+def test_a_finished_race_restarts_as_a_new_race_and_keeps_the_result(env: Env) -> None:
     race = env.races.create_race("Ziel", env.track_id(), 1)
     driver_id, vehicle_id = env.pair(1)
     env.races.add_participant(race.id, driver_id, vehicle_id, 1)
     runner = env.controller.start_race(race.id)
     drive_until_done(env, runner)
-    assert env.races.require_race(race.id).status is RaceStatus.FINISHED
+    finished = env.races.require_race(race.id)
+    assert finished.status is RaceStatus.FINISHED
+    results = env.races.get_results(race.id)
+    restarted = env.races.restart_aborted(race.id)
+    assert restarted.id != finished.id
+    assert restarted.name == "Ziel (2)"
+    assert restarted.status is RaceStatus.READY
+    assert env.races.get_laps(restarted.id) == []
+    assert env.races.list_time_measurements(race_id=restarted.id) == []
+    assert [row.laps_completed for row in env.races.get_results(restarted.id)] == [0]
+    stored = env.races.require_race(race.id)
+    assert stored.status is RaceStatus.FINISHED
+    assert [row.laps_completed for row in env.races.get_results(race.id)] == [
+        row.laps_completed for row in results
+    ]
+
+
+def test_an_open_or_running_race_cannot_be_restarted(env: Env) -> None:
+    race = env.races.create_race("Offen", env.track_id(), 2)
+    driver_id, vehicle_id = env.pair(1)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
     with pytest.raises(ValidationError) as caught:
         env.races.restart_aborted(race.id)
     assert key_of(caught) == "error.race.not_restartable"
+    runner = env.controller.start_race(race.id)
+    with pytest.raises(ValidationError) as running:
+        env.races.restart_aborted(race.id)
+    assert key_of(running) == "error.race.not_restartable"
+    runner.stop()
     assert [stored.id for stored in env.races.list_races()] == [race.id]
 
 
@@ -164,19 +198,44 @@ def test_restart_button_is_only_offered_for_an_aborted_race(qtbot: QtBot, env: E
         "races-restart",
         "races-live",
     ]
-    assert page.buttons["restart"].text() == "Rennen Neustart"
+    assert page.buttons["restart"].text() == "Rennen neu starten"
+
+    waiting = env.races.create_race("Wartet", track.id, 3)
+    page.refresh()
+    _select_status(page, "Angelegt")
+    assert page.buttons["restart"].isHidden()
+    assert page.buttons["start"].isEnabled()
 
     _select_status(page, "Beendet")
-    assert page.buttons["restart"].isHidden()
+    assert not page.buttons["restart"].isHidden()
     assert page.buttons["delete"].isEnabled()
     assert not page.buttons["start"].isEnabled()
+    page.buttons["restart"].click()
+    finished_dialog = page.restart_dialog
+    assert finished_dialog is not None
+    assert finished_dialog.name_edit.text() == "Ziel (2)"
+    assert finished_dialog.name_edit.text() != "Ziel"
+    before_cancel = [stored.id for stored in env.races.list_races()]
+    finished_dialog.cancel_button.click()
+    assert [stored.id for stored in env.races.list_races()] == before_cancel
 
     _select_status(page, "Abgebrochen")
-    assert page.buttons["restart"].isVisible()
+    assert not page.buttons["restart"].isHidden()
     assert page.buttons["delete"].isEnabled()
     assert not page.buttons["start"].isEnabled()
 
     page.buttons["restart"].click()
+    dialog = page.restart_dialog
+    assert dialog is not None
+    assert dialog.name_edit.text() == "Abbruch (2)"
+    dialog.cancel_button.click()
+    assert env.races.require_race(aborted.id).status is RaceStatus.ABORTED
+    assert [stored.id for stored in env.races.list_races()] == before_cancel
+
+    page.buttons["restart"].click()
+    dialog = page.restart_dialog
+    assert dialog is not None
+    dialog.create_button.click()
     assert env.races.require_race(aborted.id).status is RaceStatus.ABORTED
     assert env.races.get_laps(aborted.id) == original_laps
     selected = page.table.item(page.table.currentRow(), 0)
@@ -203,6 +262,157 @@ def test_restart_button_is_only_offered_for_an_aborted_race(qtbot: QtBot, env: E
     assert live.runner is not None and live.runner.status is RaceStatus.RUNNING
     assert live.runner.race.id == restarted.id
     live.runner.stop()
+    assert env.races.require_race(waiting.id).status is RaceStatus.CREATED
+
+
+def test_repetitions_default_to_one_and_a_chosen_value_survives_the_dialog(
+    qtbot: QtBot, env: Env
+) -> None:
+    track = env.track("Heimbahn")
+    window, page = open_page(qtbot, env, "races")
+    window.show()
+    assert isinstance(page, RacesPage)
+    page.new_race()
+    wizard = page.wizard
+    assert wizard.repetitions_caption.text() == "Wiederholungen"
+    assert "Wiederholen" not in wizard.repetitions_hint.text().split()
+    assert "Wiederholungen" in wizard.repetitions_hint.text().split()
+    assert wizard.repetitions_spin.value() == 1
+    wizard.name_edit.setText("Abend")
+    assert wizard.go_next()
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(track.id))
+    assert wizard.go_next()
+    wizard.repetitions_spin.setValue(4)
+    assert wizard.go_next()
+    stored = wizard.race
+    assert stored is not None and stored.repetitions == 4
+    wizard.repetitions_spin.setValue(9)
+    wizard.begin(stored.id)
+    assert wizard.repetitions_spin.value() == 4
+    wizard.begin(None)
+    assert wizard.repetitions_spin.value() == 1
+
+
+def test_an_invalid_lane_is_reported_and_does_not_create_a_race(env: Env) -> None:
+    track = env.track("Schmal", lanes=2)
+    race = env.races.create_race("Eng", track.id, 2)
+    first_driver, first_vehicle = env.pair(1)
+    second_driver, second_vehicle = env.pair(2)
+    env.races.add_participant(race.id, first_driver, first_vehicle, 1)
+    env.races.add_participant(race.id, second_driver, second_vehicle, 2)
+    env.controller.start_race(race.id).stop()
+    with env.runtime.database.session() as session:
+        stored_track = session.get(Track, int(track.id))
+        assert stored_track is not None
+        stored_track.lane_count = 1
+    preview = env.races.restart_preview(race.id)
+    invalid = [seat for seat in preview.seats if seat.issue_key is not None]
+    assert [seat.lane for seat in invalid] == [2]
+    assert invalid[0].issue_key == "error.race.lane_invalid"
+    with pytest.raises(ValidationError) as caught:
+        env.races.restart_aborted(race.id)
+    assert key_of(caught) == "error.race.lane_invalid"
+    assert [stored.id for stored in env.races.list_races()] == [race.id]
+    with pytest.raises(ValidationError) as same_name:
+        env.races.restart_aborted(race.id, name="Eng")
+    assert key_of(same_name) == "error.race.restart_name"
+
+
+def test_restart_copies_the_source_layout_and_drops_excluded_laps(env: Env) -> None:
+    track = env.track("Plan", lanes=2)
+    planner = env.runtime.services.get(TrackPlannerService)
+    planner.save(add_piece(planner.load(track.id), STRAIGHT_H, 0, 0))
+    race = env.races.create_race("Layout", track.id, 20, repetitions=3)
+    driver_id, vehicle_id = env.pair(1)
+    other_driver, other_vehicle = env.pair(2)
+    env.races.add_participant(race.id, driver_id, vehicle_id, 1)
+    env.races.add_participant(race.id, other_driver, other_vehicle, 2)
+    once = env.races.plan_heats(race.id)
+    runner = env.controller.start_race(race.id)
+    for _ in range(130):
+        env.clock.advance(STEP_NS)
+        runner.tick()
+    runner.stop()
+    with env.runtime.database.session() as session:
+        source = session.get(Race, int(race.id))
+        assert source is not None
+        source_layout = source.track_layout_id
+        lap = session.scalar(select(Lap).where(Lap.race_id == int(race.id)))
+        assert lap is not None
+        lap_id = int(lap.id)
+    assert source_layout is not None
+    env.races.set_lap_excluded(lap_id, excluded=True)
+    planner.save(add_piece(planner.load(track.id), STRAIGHT_H, 4, 0))
+    assert env.tracks.current_layout_id(track.id) != source_layout
+    restarted = env.races.restart_aborted(race.id)
+    assert restarted.repetitions == 3
+    assert restarted.name == "Layout (2)"
+    fresh = env.races.heat_plan(restarted.id)
+    assert [item.status for item in fresh] == ["planned"] * len(once)
+    assert len(fresh) == len(once)
+    with env.runtime.database.session() as session:
+        copied = session.get(Race, int(restarted.id))
+        marked = session.get(Lap, lap_id)
+        assert copied is not None and marked is not None
+        assert copied.track_layout_id == source_layout
+        assert marked.statistics_excluded is True
+        assert session.scalar(select(Lap).where(Lap.race_id == int(restarted.id))) is None
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+
+
+def test_an_inactive_driver_must_be_replaced_before_the_restart(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Heimbahn", lanes=2)
+    zoe = env.driver("Zoe")
+    chris = env.driver("Chris")
+    porsche = env.vehicle("Porsche", driver_id=zoe.id)
+    env.vehicle("BMW", driver_id=chris.id)
+    race = env.races.create_race("Alt", track.id, 2)
+    env.races.add_participant(race.id, zoe.id, porsche.id, 1)
+    env.controller.start_race(race.id).stop()
+    env.drivers.set_active(zoe.id, False)
+    window, page = open_page(qtbot, env, "races")
+    window.show()
+    assert isinstance(page, RacesPage)
+    page.refresh()
+    _select_status(page, "Abgebrochen")
+    page.buttons["restart"].click()
+    dialog = page.restart_dialog
+    assert dialog is not None
+    problem = dialog.findChild(QLabel, "restart-problem-0")
+    assert problem is not None
+    assert "Zoe" in problem.text()
+    assert "deaktiviert" in problem.text()
+    dialog.create_button.click()
+    assert [stored.id for stored in env.races.list_races()] == [race.id]
+    assert "korrigieren" in dialog.status.text()
+    combo = dialog.findChild(QComboBox, "restart-driver-0")
+    assert combo is not None
+    combo.setCurrentIndex(combo.findData(chris.id))
+    dialog.create_button.click()
+    created = [stored for stored in env.races.list_races() if stored.id != race.id]
+    assert len(created) == 1
+    assert created[0].name == "Alt (2)"
+    assert [(row.driver_id, row.vehicle_id, row.lane) for row in created[0].participants] == [
+        (chris.id, porsche.id, 1)
+    ]
+    assert env.races.get_laps(created[0].id) == []
+    assert env.races.require_race(race.id).status is RaceStatus.ABORTED
+
+
+def test_existing_races_gain_one_repetition_without_losing_their_laps() -> None:
+    database = Database.in_memory()
+    database.migrate("0021")
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO races (name, status, mode, target_laps, timing_provider) "
+            "VALUES ('Alt', 'finished', 'laps', 8, 'simulation')"
+        )
+    database.migrate()
+    with database.engine.connect() as connection:
+        stored = connection.exec_driver_sql("SELECT target_laps, repetitions FROM races").one()
+    assert stored == (8, 1)
+    assert database.schema_revision() == "0022"
+    database.dispose()
 
 
 def _select_status(page: RacesPage, status: str) -> None:

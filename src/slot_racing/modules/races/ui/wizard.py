@@ -31,7 +31,12 @@ from slot_racing.modules.races.hud import (
     ViewStyle,
 )
 from slot_racing.modules.races.naming import suggest_race_name
-from slot_racing.modules.races.service import MAX_LAPS, RaceService, parse_duration_minutes
+from slot_racing.modules.races.service import (
+    MAX_LAPS,
+    MAX_REPETITIONS,
+    RaceService,
+    parse_duration_minutes,
+)
 from slot_racing.modules.races.types import RaceInfo
 from slot_racing.modules.races.ui.race_briefing import (
     BriefingBoard,
@@ -136,6 +141,16 @@ class RaceWizard(QWidget):
         self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.one"), 1)
         self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.two"), 2)
         self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
+        self.repetitions_caption = QLabel(tr("race.wizard.repetitions"))
+        self.repetitions_caption.setObjectName("race-repetitions-label")
+        self.repetitions_caption.setWordWrap(True)
+        self.repetitions_spin = QSpinBox()
+        self.repetitions_spin.setObjectName("race-repetitions")
+        self.repetitions_spin.setRange(1, MAX_REPETITIONS)
+        self.repetitions_spin.setValue(1)
+        self.repetitions_hint = QLabel(tr("race.wizard.repetitions.hint"))
+        self.repetitions_hint.setObjectName("race-repetitions-hint")
+        self.repetitions_hint.setWordWrap(True)
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("race-driver")
         self.vehicle_combo = QComboBox()
@@ -240,6 +255,7 @@ class RaceWizard(QWidget):
             self.laps_spin.setValue(5)
             self.duration_edit.setText("5")
             self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
+            self.repetitions_spin.setValue(1)
         else:
             self.name_edit.setText(self._race.name)
             self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._race.mode.value)))
@@ -252,6 +268,7 @@ class RaceWizard(QWidget):
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
             chosen = 1 if self._race.active_lanes == 1 else 2
             self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(chosen))
+            self.repetitions_spin.setValue(self._race.repetitions)
         self._sync_lap_target()
         self._sync_active_lanes()
         self._cancel_participant_edit()
@@ -318,6 +335,9 @@ class RaceWizard(QWidget):
                 layout.addLayout(duration_row)
                 layout.addWidget(self.active_lanes_caption)
                 layout.addWidget(self.active_lanes_combo)
+                layout.addWidget(self.repetitions_caption)
+                layout.addWidget(self.repetitions_spin)
+                layout.addWidget(self.repetitions_hint)
             elif index == PARTICIPANTS:
                 row = QHBoxLayout()
                 for label, combo in (
@@ -532,15 +552,20 @@ class RaceWizard(QWidget):
         provider = self._check_provider()
         mode = self._selected_mode()
         laps = self.laps_spin.value()
+        repetitions = self.repetitions_spin.value()
         duration = (
             None if mode is RaceMode.LAPS else parse_duration_minutes(self.duration_edit.text())
         )
         chosen_lanes = self._selected_active_lanes()
         if self._race is None:
             self._race = (
-                self._service.create_time_trial(name, track_id, provider, duration)
+                self._service.create_time_trial(
+                    name, track_id, provider, duration, repetitions=repetitions
+                )
                 if mode is RaceMode.TIME_TRIAL
-                else self._service.create_race(name, track_id, laps, provider)
+                else self._service.create_race(
+                    name, track_id, laps, provider, repetitions=repetitions
+                )
             )
         self._race = self._service.update_race(
             self._race.id,
@@ -553,6 +578,8 @@ class RaceWizard(QWidget):
             set_duration=True,
             active_lanes=chosen_lanes,
             set_active_lanes=True,
+            repetitions=repetitions,
+            set_repetitions=True,
         )
         self._refresh_participants()
 
@@ -655,6 +682,7 @@ class RaceWizard(QWidget):
                 "race.overview.provider",
                 provider=provider_label(self.translator, race.timing_provider),
             ),
+            fmt("race.overview.repetitions", count=race.repetitions),
             "",
             self.translator.translate("race.overview.participants"),
         ]
@@ -696,6 +724,8 @@ class RaceWizard(QWidget):
         apply_text_size(self.duration_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
         apply_text_size(self.duration_unit, FONT_CAPTION, max(self.width(), 640), bold=False)
         apply_text_size(self.active_lanes_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.repetitions_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.repetitions_hint, FONT_CAPTION, max(self.width(), 640), bold=False)
         apply_text_size(self.provider_status, FONT_CAPTION, max(self.width(), 640), bold=False)
 
     def resizeEvent(self, event: object) -> None:  # noqa: N802

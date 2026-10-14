@@ -16,7 +16,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.list.new": "Neues Rennen",
         "race.list.edit": "Bearbeiten",
         "race.list.start": "Starten",
-        "race.list.restart": "Rennen Neustart",
+        "race.list.restart": "Rennen neu starten",
         "race.list.restarted": "Das Rennen wurde erneut angelegt.",
         "race.list.live": "Live-Ansicht",
         "race.list.results": "Ergebnisse",
@@ -48,6 +48,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.wizard.mode.laps": "Rundenrennen",
         "race.wizard.mode.time_trial": "Zeitrennen",
         "race.wizard.laps": "Anzahl Runden",
+        "race.wizard.repetitions": "Wiederholungen",
+        "race.wizard.repetitions.hint": (
+            "Die Wiederholungen werden mit dem Rennen gespeichert. "
+            "Runden, Spurfolge und Ergebnisse zählen wie bisher."
+        ),
         "race.wizard.duration": "Renndauer:",
         "race.wizard.minutes": "Minuten",
         "race.wizard.driver": "Fahrer",
@@ -62,6 +67,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.overview.track": "Strecke: {track} ({lanes} Spuren)",
         "race.overview.active_lanes": "Aktive Spuren: {lanes}",
         "race.overview.laps": "Modus: Rundenrennen über {laps} Runden",
+        "race.overview.repetitions": "Wiederholungen: {count}",
         "race.overview.time_trial": "Modus: Zeitrennen, ohne Rundenlimit",
         "race.overview.time_trial_duration": "Modus: Zeitrennen über {minutes} Minuten",
         "race.overview.participants": "Teilnehmer:",
@@ -309,7 +315,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.race.not_startable": (
             "Ein Rennen mit dem Status „{status}“ kann nicht gestartet werden."
         ),
-        "error.race.not_restartable": "Nur ein abgebrochenes Rennen kann neu gestartet werden.",
+        "error.race.not_restartable": (
+            "Nur ein abgeschlossenes oder abgebrochenes Rennen kann neu gestartet werden."
+        ),
+        "error.race.restart_name": "Der Name muss sich vom ursprünglichen Rennen unterscheiden.",
+        "error.race.restart_incomplete": (
+            "Bitte korrigieren Sie die ungültigen Zuordnungen, bevor das Rennen angelegt wird."
+        ),
+        "error.race.lane_missing": "Für {driver} ist keine gültige Spur gespeichert.",
+        "error.race.repetitions": "Die Wiederholungen müssen zwischen 1 und {maximum} liegen.",
+        "race.restart.title": "Rennen neu starten",
+        "race.restart.create": "Rennen anlegen",
+        "race.restart.kept": (
+            "Messungen, Ergebnisse und der Status bleiben beim ursprünglichen Rennen."
+        ),
+        "race.restart.fix": "Diese Zuordnung ist ungültig und muss korrigiert werden.",
+        "race.restart.choose": "Bitte wählen",
         "error.race.already_running": "Es läuft bereits ein Rennen.",
         "error.race.provider_required": "Bitte wählen Sie eine Zeitmessung aus.",
         "error.race.provider_invalid": "Die Kennung der Zeitmessung ist ungültig.",

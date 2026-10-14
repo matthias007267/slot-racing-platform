@@ -35,6 +35,7 @@ from slot_racing.core.timing_registry import DEFAULT_TIMING_PROVIDER, TimingProv
 from slot_racing.modules.races import heats
 from slot_racing.modules.races.history import load_completed, load_layouts, load_one
 from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector, TimeMeasurement
+from slot_racing.modules.races.naming import suggest_distinct_name
 from slot_racing.modules.races.planning import effective_lane_count
 from slot_racing.modules.races.types import (
     HeatBriefing,
@@ -43,17 +44,21 @@ from slot_racing.modules.races.types import (
     LapRecord,
     ParticipantInfo,
     RaceInfo,
+    RestartPreview,
+    RestartSeat,
     ResultRow,
     TimeBest,
     TimeMeasurementInfo,
 )
 
 MAX_LAPS = 999
+MAX_REPETITIONS = 99
 MAX_DURATION_MINUTES = 999
 MAX_PROVIDER_ID_LENGTH = 64
 
 _EDITABLE = (RaceStatus.CREATED, RaceStatus.READY)
 _LIVE = (RaceStatus.RUNNING, RaceStatus.PAUSED)
+_RESTARTABLE = (RaceStatus.FINISHED, RaceStatus.ABORTED)
 _MISSING_LAP_TIME = 2**62
 
 
@@ -187,10 +192,17 @@ class RaceService(RaceHistoryCatalog):
     # --- configuration -------------------------------------------------------------------------
 
     def create_race(
-        self, name: str, track_id: TrackId, laps: int, timing_provider: str | None = None
+        self,
+        name: str,
+        track_id: TrackId,
+        laps: int,
+        timing_provider: str | None = None,
+        *,
+        repetitions: int = 1,
     ) -> RaceInfo:
         clean_name = self._validate_name(name)
         self._validate_laps(laps)
+        self._validate_repetitions(repetitions)
         provider = self._validate_provider(timing_provider or self.default_provider_id())
         self._require_active_track(track_id)
         with self._database.session() as session:
@@ -202,6 +214,7 @@ class RaceService(RaceHistoryCatalog):
                 mode=RaceMode.LAPS.value,
                 timing_provider=provider,
                 duration_minutes=None,
+                repetitions=repetitions,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
@@ -214,6 +227,8 @@ class RaceService(RaceHistoryCatalog):
         track_id: TrackId,
         timing_provider: str | None = None,
         duration_minutes: int | None = None,
+        *,
+        repetitions: int = 1,
     ) -> RaceInfo:
         """A time trial has no lap target. Each measured lap is stored as its own result.
 
@@ -222,6 +237,7 @@ class RaceService(RaceHistoryCatalog):
         """
         clean_name = self._validate_name(name)
         provider = self._validate_provider(timing_provider or self.default_provider_id())
+        self._validate_repetitions(repetitions)
         self._require_active_track(track_id)
         if duration_minutes is not None:
             self._validate_duration(duration_minutes)
@@ -234,6 +250,7 @@ class RaceService(RaceHistoryCatalog):
                 mode=RaceMode.TIME_TRIAL.value,
                 timing_provider=provider,
                 duration_minutes=duration_minutes,
+                repetitions=repetitions,
                 status=RaceStatus.CREATED.value,
             )
             session.add(race)
@@ -253,6 +270,8 @@ class RaceService(RaceHistoryCatalog):
         set_duration: bool = False,
         active_lanes: int | None = None,
         set_active_lanes: bool = False,
+        repetitions: int | None = None,
+        set_repetitions: bool = False,
     ) -> RaceInfo:
         """Change the configuration. ``timing_provider=None`` keeps the stored provider.
 
@@ -292,6 +311,11 @@ class RaceService(RaceHistoryCatalog):
                 race.duration_minutes = duration_minutes
             if provider is not None:
                 race.timing_provider = provider
+            if set_repetitions:
+                if repetitions is None:
+                    raise ValidationError("error.race.repetitions", maximum=MAX_REPETITIONS)
+                self._validate_repetitions(repetitions)
+                race.repetitions = repetitions
             physical = self._physical_lanes(race)
             if set_active_lanes:
                 self._store_active_lanes(race, physical, active_lanes)
@@ -914,33 +938,12 @@ class RaceService(RaceHistoryCatalog):
             race.status = (RaceStatus.ABORTED if aborted else RaceStatus.FINISHED).value
             race.finished_at = utc_now()
 
-    def restart_aborted(self, race_id: RaceId) -> RaceInfo:
-        """Open a new race from an aborted one and leave the aborted race in the history.
-
-        Mode, track, participants, lanes and the lap or time target are copied.
-        Laps, times and the aborted status are not. A heat race gets a fresh
-        plan from the same drivers instead of the heats that were already driven.
-        """
+    def restart_preview(self, race_id: RaceId) -> RestartPreview:
+        """Describe a new race copied from a finished or aborted one. Nothing is stored."""
         with self._database.session() as session:
             source = self._load(session, race_id)
-            if RaceStatus(source.status) is not RaceStatus.ABORTED:
-                raise ValidationError("error.race.not_restartable")
-            if source.track_id is None:
-                raise ValidationError("error.race.no_track")
-            self._require_active_track(TrackId(source.track_id))
-            race = Race(
-                name=source.name,
-                track_id=source.track_id,
-                track_layout_id=source.track_layout_id,
-                target_laps=source.target_laps,
-                mode=source.mode,
-                timing_provider=source.timing_provider,
-                duration_minutes=source.duration_minutes,
-                active_lanes=source.active_lanes,
-                status=RaceStatus.CREATED.value,
-            )
-            session.add(race)
-            session.flush()
+            self._require_restartable(source)
+            names = list(session.scalars(select(Race.name)))
             previous = list(
                 session.scalars(
                     select(RaceParticipant)
@@ -949,13 +952,78 @@ class RaceService(RaceHistoryCatalog):
                 )
             )
             planned = heats.uses_heats(session, source.id)
-            for old in previous:
+            track = self._tracks.get_track(TrackId(source.track_id)) if source.track_id else None
+            lane_count = 0 if track is None else track.lane_count
+            seats = self._restart_seats(previous, lane_count=lane_count, check_lane=not planned)
+            return RestartPreview(
+                source_id=RaceId(source.id),
+                source_name=source.name,
+                suggested_name=suggest_distinct_name(source.name, names),
+                track_id=None if source.track_id is None else TrackId(source.track_id),
+                track_name=track.name if track else "-",
+                lane_count=lane_count,
+                mode=RaceMode(source.mode),
+                laps=source.target_laps,
+                timing_provider=source.timing_provider,
+                duration_minutes=source.duration_minutes,
+                active_lanes=effective_lane_count(source.active_lanes, lane_count),
+                repetitions=source.repetitions,
+                uses_heats=planned,
+                seats=tuple(seats),
+            )
+
+    def restart_aborted(
+        self,
+        race_id: RaceId,
+        *,
+        name: str | None = None,
+        seats: Sequence[tuple[DriverId, VehicleId, int | None]] | None = None,
+    ) -> RaceInfo:
+        """Open a new race from a finished or aborted one and leave the source in the history.
+
+        Mode, track, timing layout, participants, lanes, repetitions and the lap or time
+        target are copied. The name is never the source name. Laps, measurements, results,
+        progress and exclusion marks are not. A heat race gets a fresh plan from the same
+        drivers instead of the heats that were already driven.
+        """
+        with self._database.session() as session:
+            source = self._load(session, race_id)
+            self._require_restartable(source)
+            if source.track_id is None:
+                raise ValidationError("error.race.no_track")
+            self._require_active_track(TrackId(source.track_id))
+            taken = list(session.scalars(select(Race.name)))
+            chosen = self._validate_name(
+                suggest_distinct_name(source.name, taken) if name is None else name
+            )
+            if chosen == source.name.strip():
+                raise ValidationError("error.race.restart_name")
+            planned = heats.uses_heats(session, source.id)
+            track = self._tracks.get_track(TrackId(source.track_id))
+            lane_count = 0 if track is None else track.lane_count
+            copied = self._restart_choices(session, source.id, seats)
+            self._require_restart_seats(copied, lane_count=lane_count, check_lane=not planned)
+            race = Race(
+                name=chosen,
+                track_id=source.track_id,
+                track_layout_id=source.track_layout_id,
+                target_laps=source.target_laps,
+                mode=source.mode,
+                timing_provider=source.timing_provider,
+                duration_minutes=source.duration_minutes,
+                active_lanes=source.active_lanes,
+                repetitions=source.repetitions,
+                status=RaceStatus.CREATED.value,
+            )
+            session.add(race)
+            session.flush()
+            for driver_id, vehicle_id, lane in copied:
                 session.add(
                     RaceParticipant(
                         race_id=race.id,
-                        driver_id=old.driver_id,
-                        vehicle_id=old.vehicle_id,
-                        lane=None if planned else old.lane,
+                        driver_id=int(driver_id),
+                        vehicle_id=int(vehicle_id),
+                        lane=None if planned else lane,
                     )
                 )
             session.flush()
@@ -972,6 +1040,144 @@ class RaceService(RaceHistoryCatalog):
             source_race_id=int(race_id),
         )
         return info
+
+    def _require_restartable(self, race: Race) -> None:
+        if RaceStatus(race.status) not in _RESTARTABLE:
+            raise ValidationError("error.race.not_restartable")
+
+    def _restart_choices(
+        self,
+        session: Session,
+        source_id: int,
+        seats: Sequence[tuple[DriverId, VehicleId, int | None]] | None,
+    ) -> list[tuple[DriverId, VehicleId, int | None]]:
+        if seats is not None:
+            return [(DriverId(driver), VehicleId(vehicle), lane) for driver, vehicle, lane in seats]
+        previous = session.scalars(
+            select(RaceParticipant)
+            .where(RaceParticipant.race_id == source_id)
+            .order_by(RaceParticipant.id)
+        )
+        return [
+            (
+                DriverId(row.driver_id),
+                VehicleId(row.vehicle_id or 0),
+                row.lane,
+            )
+            for row in previous
+        ]
+
+    def _restart_seats(
+        self,
+        previous: Sequence[RaceParticipant],
+        *,
+        lane_count: int,
+        check_lane: bool,
+    ) -> list[RestartSeat]:
+        seats: list[RestartSeat] = []
+        seen_lanes: set[int] = set()
+        seen_drivers: set[int] = set()
+        for row in previous:
+            driver_id = DriverId(row.driver_id)
+            vehicle_id = None if row.vehicle_id is None else VehicleId(row.vehicle_id)
+            issue = self._assignment_issue(
+                driver_id,
+                vehicle_id,
+                row.lane,
+                lane_count=lane_count,
+                check_lane=check_lane,
+                seen_lanes=seen_lanes,
+                seen_drivers=seen_drivers,
+            )
+            driver = self._drivers.get_driver(driver_id)
+            vehicle = None if vehicle_id is None else self._vehicles.get_vehicle(vehicle_id)
+            if issue is None:
+                key, driver_name, vehicle_name, lane_value, maximum = None, "", "", None, None
+            else:
+                key, driver_name, vehicle_name, lane_value, maximum = issue
+            seats.append(
+                RestartSeat(
+                    driver_id=driver_id,
+                    driver_label=driver.label if driver else f"#{row.driver_id}",
+                    vehicle_id=vehicle_id,
+                    vehicle_label=vehicle.label if vehicle else "-",
+                    lane=row.lane,
+                    issue_key=key,
+                    issue_driver=driver_name,
+                    issue_vehicle=vehicle_name,
+                    issue_lane=lane_value,
+                    issue_maximum=maximum,
+                )
+            )
+        return seats
+
+    def _require_restart_seats(
+        self,
+        seats: Sequence[tuple[DriverId, VehicleId, int | None]],
+        *,
+        lane_count: int,
+        check_lane: bool,
+    ) -> None:
+        seen_lanes: set[int] = set()
+        seen_drivers: set[int] = set()
+        for driver_id, vehicle_id, lane in seats:
+            issue = self._assignment_issue(
+                driver_id,
+                vehicle_id,
+                lane,
+                lane_count=lane_count,
+                check_lane=check_lane,
+                seen_lanes=seen_lanes,
+                seen_drivers=seen_drivers,
+            )
+            if issue is None:
+                continue
+            key, driver_name, vehicle_name, lane_value, maximum = issue
+            raise ValidationError(
+                key,
+                driver=driver_name,
+                vehicle=vehicle_name,
+                lane=0 if lane_value is None else lane_value,
+                maximum=0 if maximum is None else maximum,
+            )
+
+    def _assignment_issue(
+        self,
+        driver_id: DriverId,
+        vehicle_id: VehicleId | None,
+        lane: int | None,
+        *,
+        lane_count: int,
+        check_lane: bool,
+        seen_lanes: set[int],
+        seen_drivers: set[int],
+    ) -> tuple[str, str, str, int | None, int | None] | None:
+        """Return a translation key and the values it fills, or nothing when the seat counts."""
+        driver = self._drivers.get_driver(driver_id)
+        if driver is None:
+            return ("error.race.driver_unknown", "", "", None, None)
+        if not driver.is_active:
+            return ("error.race.driver_inactive", driver.label, "", None, None)
+        if driver_id in seen_drivers:
+            return ("error.race.driver_duplicate", driver.label, "", None, None)
+        seen_drivers.add(int(driver_id))
+        if vehicle_id is None:
+            return ("error.race.vehicle_unknown", "", "", None, None)
+        vehicle = self._vehicles.get_vehicle(vehicle_id)
+        if vehicle is None:
+            return ("error.race.vehicle_unknown", "", "", None, None)
+        if not vehicle.is_active:
+            return ("error.race.vehicle_inactive", "", vehicle.label, None, None)
+        if not check_lane:
+            return None
+        if lane is None:
+            return ("error.race.lane_missing", driver.label, "", None, None)
+        if not 1 <= lane <= lane_count:
+            return ("error.race.lane_invalid", "", "", lane, lane_count)
+        if lane in seen_lanes:
+            return ("error.race.lane_taken", "", "", lane, None)
+        seen_lanes.add(lane)
+        return None
 
     def abort_race(self, race_id: RaceId) -> None:
         """Mark a race that is recorded as running as aborted. Other races are left alone."""
@@ -1074,6 +1280,11 @@ class RaceService(RaceHistoryCatalog):
     def _validate_laps(laps: int) -> None:
         if not 1 <= laps <= MAX_LAPS:
             raise ValidationError("error.race.laps", maximum=MAX_LAPS)
+
+    @staticmethod
+    def _validate_repetitions(repetitions: int) -> None:
+        if not 1 <= repetitions <= MAX_REPETITIONS:
+            raise ValidationError("error.race.repetitions", maximum=MAX_REPETITIONS)
 
     @staticmethod
     def _validate_duration(minutes: int) -> None:
@@ -1284,4 +1495,5 @@ class RaceService(RaceHistoryCatalog):
             finished_at=race.finished_at,
             duration_minutes=race.duration_minutes,
             active_lanes=effective_lane_count(race.active_lanes, track.lane_count if track else 0),
+            repetitions=race.repetitions,
         )
