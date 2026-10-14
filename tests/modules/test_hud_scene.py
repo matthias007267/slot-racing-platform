@@ -259,7 +259,7 @@ def test_between_heats_uses_the_briefing_and_hides_the_stage() -> None:
     assert scene.briefing is not None
     assert scene.panel("briefing").width == 960
     assert "clock" not in [panel.id for panel in scene.panels]
-    assert scene.briefing.title == "Durchlauf 2"
+    assert scene.briefing.title == "Durchlauf 2 von 3"
     assert scene.briefing.seats[0].driver == "Zoe"
     assert scene.briefing.seats[1].driver == "frei"
     assert scene.briefing.seats[0].column == 0

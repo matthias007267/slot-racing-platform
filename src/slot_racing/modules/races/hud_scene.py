@@ -1247,7 +1247,9 @@ def _briefing(
     return HudBriefing(
         box=box,
         sequence=briefing.sequence,
-        title=translator.format("race.heat.title", sequence=briefing.sequence),
+        title=translator.format(
+            "race.heat.title", sequence=briefing.sequence, total=briefing.heat_count
+        ),
         title_px=briefing_px(BRIEFING_TITLE_BASE, width, view.text_scale(TEXT_PLACE)),
         seats=tuple(seats),
         seat_columns=columns,

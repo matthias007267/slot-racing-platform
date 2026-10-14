@@ -56,8 +56,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.wizard.laps": "Anzahl Runden",
         "race.wizard.repetitions": "Wiederholungen",
         "race.wizard.repetitions.hint": (
-            "Die Wiederholungen werden mit dem Rennen gespeichert. "
-            "Runden, Spurfolge und Ergebnisse zählen wie bisher."
+            "Die Wiederholungen sind die Gesamtzahl der Ausführungen des Rotationsplans. "
+            "1 bedeutet einmal insgesamt."
         ),
         "race.wizard.duration": "Renndauer:",
         "race.wizard.minutes": "Minuten",
@@ -81,8 +81,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.overview.participant": "{driver} mit {vehicle}",
         "race.overview.free_participant": "Spur {lane}: {driver} mit {vehicle}",
         "race.overview.heats": "Durchläufe:",
-        "race.overview.heat": "Durchlauf {sequence}: {seats}",
-        "race.heat.title": "Durchlauf {sequence}",
+        "race.overview.heat": "Durchlauf {sequence} von {total}: {seats}",
+        "race.heat.title": "Durchlauf {sequence} von {total}",
         "race.heat.next": "Nächster Durchlauf",
         "race.heat.seat": "Bahn {lane}: {driver}",
         "race.heat.rotation": "Spurwechsel",

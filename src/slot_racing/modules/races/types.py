@@ -39,7 +39,7 @@ class RaceInfo:
     active_lanes: int = 0
     """Lanes this race plans. The track's ``lane_count`` stays the physical count."""
     repetitions: int = 1
-    """Stored repetition count. Lap targets and the heat rotation do not read it."""
+    """How often the rotation plan is driven. One is a single pass of that plan."""
 
     @property
     def is_editable(self) -> bool:

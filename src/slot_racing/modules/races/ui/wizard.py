@@ -859,7 +859,14 @@ class RaceWizard(QWidget):
                     fmt("race.heat.seat", lane=lane, driver=names.get(participant_id, ""))
                     for participant_id, lane in heat.seats
                 )
-                lines.append(fmt("race.overview.heat", sequence=heat.sequence, seats=seated))
+                lines.append(
+                    fmt(
+                        "race.overview.heat",
+                        sequence=heat.sequence,
+                        total=len(plan),
+                        seats=seated,
+                    )
+                )
         return "\n".join(lines)
 
     def _show_overview_board(self) -> None:
@@ -904,7 +911,10 @@ class RaceWizard(QWidget):
             return
         fmt = self.translator.format
         free = self.translator.translate("race.time_trial.free")
-        lines = [fmt("race.heat.title", sequence=briefing.sequence), ""]
+        lines = [
+            fmt("race.heat.title", sequence=briefing.sequence, total=briefing.heat_count),
+            "",
+        ]
         for seat in briefing.seats:
             lines.append(fmt("race.heat.seat", lane=seat.lane, driver=seat.driver_label or free))
         lines.extend(["", self.translator.translate("race.heat.ready_hint")])

@@ -497,7 +497,7 @@ def test_the_heat_change_briefing_uses_large_blocks(qtbot: QtBot, env: Env) -> N
     assert gate.body_label.wordWrap()
     assert "Spurwechsel" in gate.body_label.text()
     assert "Bahn 1: Anna" in gate.body_label.text()
-    assert gate.board.title.text() == "Durchlauf 2"
+    assert gate.board.title.text() == "Durchlauf 2 von 2"
     assert gate.board.title.wordWrap()
     assert gate.board.title.font().pixelSize() >= 28
     anna = gate.findChild(QLabel, "heat-seat-driver-1")

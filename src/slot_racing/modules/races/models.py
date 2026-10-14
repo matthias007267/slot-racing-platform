@@ -40,7 +40,7 @@ class Race(Base):
     active_lanes: Mapped[int | None]
     """Lanes this race uses on a two-lane track. Empty keeps the track's own lane count."""
     repetitions: Mapped[int] = mapped_column(default=1, server_default="1")
-    """Stored repetition count. One is what every race used before the field was shown."""
+    """How often the rotation plan is driven. One is a single pass, including older races."""
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)

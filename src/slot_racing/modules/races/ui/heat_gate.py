@@ -64,7 +64,10 @@ class HeatGate(QWidget):
         fmt = self.translator.format
         tr = self.translator.translate
         free = tr("race.time_trial.free")
-        lines = [fmt("race.heat.next", sequence=briefing.sequence), ""]
+        lines = [
+            fmt("race.heat.title", sequence=briefing.sequence, total=briefing.heat_count),
+            "",
+        ]
         for seat in briefing.seats:
             name = seat.driver_label or free
             lines.append(fmt("race.heat.seat", lane=seat.lane, driver=name))
@@ -81,7 +84,9 @@ class HeatGate(QWidget):
                     )
                 )
         lines.extend(["", tr("race.heat.ready_hint")])
-        self.title_label.setText(fmt("race.heat.title", sequence=briefing.sequence))
+        self.title_label.setText(
+            fmt("race.heat.title", sequence=briefing.sequence, total=briefing.heat_count)
+        )
         self.body_label.setText("\n".join(lines))
         self.board.show_briefing(briefing, self.translator)
         chosen = self.driver_combo.currentData()

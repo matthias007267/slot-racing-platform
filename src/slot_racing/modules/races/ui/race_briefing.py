@@ -117,7 +117,9 @@ class BriefingBoard(QWidget):
     def show_briefing(self, briefing: HeatBriefing, translator: Translator) -> None:
         fmt = translator.format
         free = translator.translate("race.time_trial.free")
-        self.title.setText(fmt("race.heat.title", sequence=briefing.sequence))
+        self.title.setText(
+            fmt("race.heat.title", sequence=briefing.sequence, total=briefing.heat_count)
+        )
         self.hint.setText(translator.translate("race.heat.ready_hint"))
         _clear(self._seats)
         columns = 2 if len(briefing.seats) > 1 else 1
@@ -240,9 +242,13 @@ class OverviewBoard(QWidget):
                 _wrapped(translator.translate("race.overview.heats"), "wizard-caption")
             )
             names = {person.id: person.driver_label for person in race.participants}
+            total = len(heats)
             for heat in heats:
                 self._layout.addWidget(
-                    _wrapped(fmt("race.heat.title", sequence=heat.sequence), "heat-title")
+                    _wrapped(
+                        fmt("race.heat.title", sequence=heat.sequence, total=total),
+                        "heat-title",
+                    )
                 )
                 host = QWidget()
                 grid = QGridLayout(host)
