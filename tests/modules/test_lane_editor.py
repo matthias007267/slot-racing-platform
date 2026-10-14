@@ -24,7 +24,7 @@ from slot_racing.modules.track_planner.ui.part_editor import PartDialog
 from tests.modules.conftest import Env
 from tests.modules.test_parametric_editor import _draft, _save_draft
 from tests.modules.test_part_revisions import _article
-from tests.modules.test_plate_editor import _RECT, _click, _editor
+from tests.modules.test_plate_editor import _RECT, _click, _editor, _move
 from tests.modules.test_track_parts import _planner
 
 _LANE_A = ((40.0, 50.0), (200.0, 50.0), (200.0, 140.0))
@@ -89,8 +89,7 @@ def test_clicks_draw_two_lanes_and_an_arc_then_reopen(qtbot: QtBot, env: Env) ->
     dialog.plate.add_lane_button.click()
     _click(qtbot, dialog, *_LANE_A[0])
     _click(qtbot, dialog, *_LANE_A[1])
-    canvas = dialog.plate.canvas
-    qtbot.mouseMove(canvas, canvas.widget_point(120.0, 80.0))  # type: ignore[no-untyped-call]
+    _move(dialog, 120.0, 80.0)
     assert dialog.plate.session.hover is not None
     assert len(dialog.plate.session.lane_spans(0)) == 1
     dialog.plate.select_button.click()
