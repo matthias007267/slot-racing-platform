@@ -45,6 +45,14 @@ def _click(qtbot: QtBot, dialog: PartDialog, x_mm: float, y_mm: float) -> None:
     qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=pos)  # type: ignore[no-untyped-call]
 
 
+def test_a_dirty_dialog_closes_when_the_test_ends(qtbot: QtBot, env: Env) -> None:
+    """Teardown must not ask. A modal discard question blocks a worker forever."""
+    dialog = _editor(qtbot, env)
+    dialog.name.setText("Nicht gespeichert")
+    assert dialog._dirty()
+    assert not dialog._dismissed
+
+
 def test_four_clicks_close_the_floor_plate(qtbot: QtBot, env: Env) -> None:
     dialog = _editor(qtbot, env)
     dialog.plate.floor_button.click()

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from itertools import pairwise
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QGuiApplication,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -46,6 +48,16 @@ _SELECT = "select"
 _FLOOR = "floor"
 _LANE = "lane"
 _HIT_PX = 10.0
+
+
+def _offscreen() -> bool:
+    """True when Qt has no real pointer. ``grabMouse`` then warns and can stall Windows."""
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        return True
+    app = QGuiApplication.instance()
+    return isinstance(app, QGuiApplication) and app.platformName() == "offscreen"
+
+
 _LATER = (
     ("plate-center", "planner.plate.center"),
     ("plate-start", "planner.plate.start"),
@@ -641,9 +653,19 @@ class PlateCanvas(QWidget):
         if not self._dragging:
             return
         self._dragging = False
+        self._end_grab()
+        self._editor.session.commit_move()
+
+    def _begin_drag(self) -> None:
+        """Track the pointer until release. Offscreen cannot grab, and trying locks Windows CI."""
+        self._dragging = True
+        if _offscreen():
+            return
+        self.grabMouse()
+
+    def _end_grab(self) -> None:
         if self.mouseGrabber() is self:
             self.releaseMouse()
-        self._editor.session.commit_move()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -696,13 +718,11 @@ class PlateCanvas(QWidget):
             session.select(target[1])
             if self._editor.mode == _SELECT:
                 session.begin_move(target[1])
-                self._dragging = True
-                self.grabMouse()
+                self._begin_drag()
         elif target[0] == "point":
             if self._editor.mode == _SELECT:
                 session.begin_lane_move(target[1], target[2])
-                self._dragging = True
-                self.grabMouse()
+                self._begin_drag()
             else:
                 session.select_lane_point(target[1], target[2])
         else:
@@ -765,8 +785,7 @@ class PlateCanvas(QWidget):
         if event.key() == Qt.Key.Key_Escape and self._editor.editable:
             if self._dragging:
                 self._dragging = False
-                if self.mouseGrabber() is self:
-                    self.releaseMouse()
+                self._end_grab()
                 self._editor.session.cancel_move()
             elif self._editor.mode == _LANE:
                 self._editor.session.cancel_lane()
