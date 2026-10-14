@@ -124,13 +124,14 @@ class LiveHudStage(QScrollArea):
         self.time_label.setText(format_duration(snapshot.elapsed_ns))
         ended = snapshot.status is RaceStatus.FINISHED
         paused = snapshot.status is RaceStatus.PAUSED
+        ranking = snapshot.standings or snapshot.rows
         fill_table(
             self.table,
             [
                 ranking_cells(self._translator, snapshot, row, ended=ended, paused=paused)
-                for row in snapshot.rows
+                for row in ranking
             ],
-            [row.lane for row in snapshot.rows],
+            [row.participant_id or row.lane for row in ranking],
         )
         self.ranking.present()
         self.lanes.show_snapshot(

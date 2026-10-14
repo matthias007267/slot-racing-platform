@@ -324,6 +324,7 @@ class LiveRaceView(QWidget):
 
     def _hide_cue(self) -> None:
         self.start_lights.clear()
+        self.audio.release()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -376,6 +377,7 @@ class LiveRaceView(QWidget):
             schedule = cue.schedule
             if not started and schedule is not None:
                 self._hand_schedule(schedule.to_document(), revoked=True)
+            cue.deleteLater()
         self._hide_cue()
         self._publish_live()
 

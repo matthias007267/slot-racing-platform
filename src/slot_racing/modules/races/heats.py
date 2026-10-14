@@ -314,14 +314,40 @@ def briefing(
     )
 
 
+def ranked_field(session: Session, race: Race) -> list[tuple[RaceParticipant, list[Lap]]]:
+    """Every participant of this race, in the order :func:`_rank` stores."""
+    return _ranked(session, race, missing_lane=0)
+
+
+def live_ranked(session: Session, race: Race) -> list[tuple[RaceParticipant, list[Lap]]]:
+    """Same scoring as :func:`ranked_field`, for the live table.
+
+    A driver who is waiting and has no stored lap sorts after drivers tied on the same
+    empty result. The stored result still breaks that tie by lane number, including an
+    empty lane. The live table keeps the drivers who are on track ahead of that tie.
+    """
+    return _ranked(session, race, missing_lane=_MISSING)
+
+
+def _ranked(
+    session: Session, race: Race, *, missing_lane: int
+) -> list[tuple[RaceParticipant, list[Lap]]]:
+    stored = [
+        (participant, _laps(session, participant.id))
+        for participant in _participants(session, race.id)
+    ]
+    if RaceMode(race.mode) is RaceMode.TIME_TRIAL:
+        return sorted(
+            stored, key=lambda item: _time_trial_key(item[0], item[1], missing_lane=missing_lane)
+        )
+    return sorted(
+        stored,
+        key=lambda item: _lap_key(item[0], item[1], race.target_laps, missing_lane=missing_lane),
+    )
+
+
 def _rank(session: Session, race: Race) -> None:
-    participants = _participants(session, race.id)
-    stored = [(participant, _laps(session, participant.id)) for participant in participants]
-    mode = RaceMode(race.mode)
-    if mode is RaceMode.TIME_TRIAL:
-        ranked = sorted(stored, key=lambda item: _time_trial_key(item[0], item[1]))
-    else:
-        ranked = sorted(stored, key=lambda item: _lap_key(item[0], item[1], race.target_laps))
+    ranked = ranked_field(session, race)
     for position, (participant, laps) in enumerate(ranked, start=1):
         participant.laps_completed = len(laps)
         participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
@@ -330,7 +356,11 @@ def _rank(session: Session, race: Race) -> None:
 
 
 def _lap_key(
-    participant: RaceParticipant, laps: list[Lap], target: int
+    participant: RaceParticipant,
+    laps: list[Lap],
+    target: int,
+    *,
+    missing_lane: int = 0,
 ) -> tuple[int, int, int, int]:
     """More completed laps first, then the smaller combined race time.
 
@@ -339,25 +369,31 @@ def _lap_key(
     """
     del target
     last = laps[-1].race_time_ns if laps else _MISSING
-    lane = _tie_lane(participant, laps)
+    lane = _tie_lane(participant, laps, missing=missing_lane)
     group = 1 if participant.disqualified else 0
     return (group, -len(laps), last, lane)
 
 
 def _time_trial_key(
-    participant: RaceParticipant, laps: list[Lap]
+    participant: RaceParticipant, laps: list[Lap], *, missing_lane: int = 0
 ) -> tuple[int, int, int, int, int]:
     best = min(laps, key=lambda lap: lap.lap_time_ns) if laps else None
-    lane = best.lane if best is not None and best.lane is not None else _tie_lane(participant, laps)
+    lane = (
+        best.lane
+        if best is not None and best.lane is not None
+        else _tie_lane(participant, laps, missing=missing_lane)
+    )
     key = time_trial_stored_key(None if best is None else best.lap_time_ns, lane)
     group = 1 if participant.disqualified else 0
     return (group, *key)
 
 
-def _tie_lane(participant: RaceParticipant, laps: list[Lap]) -> int:
+def _tie_lane(participant: RaceParticipant, laps: list[Lap], *, missing: int = 0) -> int:
     if laps and laps[-1].lane is not None:
         return laps[-1].lane
-    return participant.lane or 0
+    if participant.lane is not None:
+        return participant.lane
+    return missing
 
 
 def _open_heats(

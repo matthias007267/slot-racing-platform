@@ -32,7 +32,7 @@ from slot_racing.core.timing import TimingSessionSpec, TimingSetupService
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.engine import RaceConfig, RaceEngine
 from slot_racing.modules.races.service import RaceService
-from slot_racing.modules.races.types import ParticipantInfo, RaceInfo
+from slot_racing.modules.races.types import FieldStanding, ParticipantInfo, RaceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ class LiveRow:
     finished: bool
     lap_times_ns: tuple[int, ...]
     """Completed lap times in lap order, taken from ``LapCompleted`` events."""
+    participant_id: int = 0
+    """Stable identity of this driver in the race. Zero when the row was built without one."""
+    seated: bool = True
+    """False while this driver is enrolled but waiting out the current heat."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +74,8 @@ class RaceSnapshot:
     elapsed_ns: int
     rows: tuple[LiveRow, ...]
     source_errors: tuple[str, ...]
+    standings: tuple[LiveRow, ...] = ()
+    """Ranking of every enrolled driver. Empty means the lane rows already are that ranking."""
 
 
 class RaceRunner:
@@ -79,10 +85,12 @@ class RaceRunner:
         engine: RaceEngine,
         bus: EventDispatcher,
         storage_errors: Callable[[], Sequence[str]] = lambda: (),
+        field: Callable[[], Sequence[FieldStanding]] = lambda: (),
     ) -> None:
         self.race = race
         self._engine = engine
         self._storage_errors = storage_errors
+        self._field = field
         self._participants: dict[int, ParticipantInfo] = {}
         for participant in race.participants:
             if participant.lane is not None:
@@ -179,6 +187,7 @@ class RaceRunner:
             elapsed_ns=self._engine.elapsed_ns(),
             rows=rows,
             source_errors=tuple(errors),
+            standings=self._standings(rows),
         )
 
     def _row(self, result: ParticipantResult) -> LiveRow:
@@ -204,7 +213,47 @@ class RaceRunner:
             best_lap_ns=min(valid_times) if valid_times else None,
             finished=result.finished,
             lap_times_ns=lap_times,
+            participant_id=info.id,
+            seated=True,
         )
+
+    def _standings(self, rows: tuple[LiveRow, ...]) -> tuple[LiveRow, ...]:
+        """Ranking of the whole enrolled field.
+
+        A free session keeps the engine rows: they are the current lane assignments, and a
+        switch replaces that row. A race without heats does the same. A heat race adds every
+        enrolled driver, with the laps already stored for this race.
+        """
+        if self.race.mode is RaceMode.FREE:
+            return ()
+        field = tuple(self._field())
+        if not field:
+            return ()
+        on_track = {row.lane: row for row in rows}
+        standings: list[LiveRow] = []
+        for position, standing in enumerate(field, start=1):
+            engine = on_track.get(standing.lane) if standing.lane is not None else None
+            seated = engine is not None
+            current_lap = standing.laps_completed if engine is None else engine.current_lap
+            standings.append(
+                LiveRow(
+                    position=position,
+                    lane=0 if standing.lane is None else standing.lane,
+                    driver_label=standing.driver_label,
+                    vehicle_label=standing.vehicle_label,
+                    start_number=standing.start_number,
+                    current_lap=current_lap,
+                    laps_completed=standing.laps_completed,
+                    last_lap_ns=standing.last_lap_ns,
+                    total_time_ns=standing.total_time_ns,
+                    best_lap_ns=standing.best_lap_ns,
+                    finished=engine.finished if engine is not None else standing.finished,
+                    lap_times_ns=standing.lap_times_ns,
+                    participant_id=standing.participant_id,
+                    seated=seated,
+                )
+            )
+        return tuple(standings)
 
     def _on_lap(self, event: LapCompleted) -> None:
         if event.race_id == self.race.id:
@@ -336,7 +385,14 @@ class RaceController:
             mode=race.mode,
         )
         engine = RaceEngine(config, self._bus, self._clock, [source])
-        return RaceRunner(race, engine, self._bus, self._storage_errors)
+        race_id = race.id
+        return RaceRunner(
+            race,
+            engine,
+            self._bus,
+            self._storage_errors,
+            field=lambda: self._service.live_field(race_id),
+        )
 
     def _start_runner(self, runner: RaceRunner) -> None:
         race_id = int(runner.race.id)

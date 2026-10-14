@@ -3,11 +3,17 @@
 The race UI must not import this module at load time. :func:`open_tone_output`
 does, and turns a missing ``libpulse`` (or any other native import failure)
 into a silent player. Playback itself still returns before the buffer ends.
+
+One tone owns the device. The next tone, and the end of a start sequence, stop
+that sink and drop its buffer. Leaving every past sink attached to the output
+mixes them on the next race, which is what makes the start sound harsher after
+each finished race.
 """
 
 from __future__ import annotations
 
 import array
+from contextlib import suppress
 
 from PySide6.QtCore import QBuffer, QIODevice, QObject, Slot
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QtAudio
@@ -36,45 +42,70 @@ class QtToneOutput(QObject):
 
     def __init__(self, parent: QObject) -> None:
         super().__init__(parent)
-        self._parent = parent
         self._format = QAudioFormat()
         self._format.setSampleRate(SAMPLE_RATE_HZ)
         self._format.setChannelCount(1)
         self._format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         self._full_scale = {LAMP_TONE: render_tone(LAMP_TONE), GO_TONE: render_tone(GO_TONE)}
         self._live: list[tuple[QAudioSink, QBuffer]] = []
+        self._dropping: set[QAudioSink] = set()
+
+    @property
+    def retained_count(self) -> int:
+        """Sinks still held. A new tone replaces the previous one, so this stays at most one."""
+        return len(self._live)
 
     def play(self, tone: ToneSpec, *, volume: int) -> None:
         device = QMediaDevices.defaultAudioOutput()
         if device is None or device.isNull() or not device.isFormatSupported(self._format):
             return
+        self.release()
         pcm = self._full_scale.get(tone)
         if pcm is None:
             pcm = render_tone(tone)
-        buffer = QBuffer(self._parent)
+        buffer = QBuffer(self)
         buffer.setData(_scale(pcm, volume))
         if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+            buffer.deleteLater()
             return
-        sink = QAudioSink(device, self._format, self._parent)
+        sink = QAudioSink(device, self._format, self)
         self._live.append((sink, buffer))
         sink.stateChanged.connect(self._on_sink_state)
         sink.start(buffer)
+
+    def release(self) -> None:
+        """Stop the current tone and drop its sink and buffer. A second call does nothing."""
+        for item in tuple(self._live):
+            self._drop(item)
 
     @Slot()
     def _on_sink_state(self) -> None:
         sender = self.sender()
         if not isinstance(sender, QAudioSink):
             return
+        finished = (QtAudio.State.IdleState, QtAudio.State.StoppedState)
+        if sender.state() not in finished:
+            return
         for item in tuple(self._live):
             if item[0] is sender:
-                self._release(item)
+                self._drop(item)
                 return
 
-    def _release(self, item: tuple[QAudioSink, QBuffer]) -> None:
-        state = item[0].state()
-        finished = (QtAudio.State.IdleState, QtAudio.State.StoppedState)
-        if state in finished and item in self._live:
+    def _drop(self, item: tuple[QAudioSink, QBuffer]) -> None:
+        sink, buffer = item
+        if sink in self._dropping:
+            return
+        if item in self._live:
             self._live.remove(item)
+        self._dropping.add(sink)
+        with suppress(RuntimeError):
+            sink.stateChanged.disconnect(self._on_sink_state)
+        sink.stop()
+        if buffer.isOpen():
+            buffer.close()
+        sink.deleteLater()
+        buffer.deleteLater()
+        self._dropping.discard(sink)
 
 
 def _scale(pcm: bytes, volume: int) -> bytes:

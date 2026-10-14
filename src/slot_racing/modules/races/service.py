@@ -38,6 +38,7 @@ from slot_racing.modules.races.models import Lap, Race, RaceParticipant, Sector,
 from slot_racing.modules.races.naming import suggest_distinct_name
 from slot_racing.modules.races.planning import effective_lane_count
 from slot_racing.modules.races.types import (
+    FieldStanding,
     HeatBriefing,
     HeatInfo,
     LaneRanking,
@@ -627,6 +628,42 @@ class RaceService(RaceHistoryCatalog):
         with self._database.session() as session:
             self._load(session, race_id)
             return heats.list_heats(session, race_id)
+
+    def live_field(self, race_id: RaceId) -> tuple[FieldStanding, ...]:
+        """Standings of every driver enrolled in this race.
+
+        A free session and a race without heats return an empty tuple: the live engine already
+        lists exactly the drivers who are on track. Heat races include drivers who are waiting
+        out the current heat. The figures are the laps stored for this race, across every heat
+        and repetition, in the same order the race result uses. Drivers who were never enrolled
+        are not included.
+        """
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if race.mode == RaceMode.FREE.value or not heats.uses_heats(session, race.id):
+                return ()
+            standings: list[FieldStanding] = []
+            for participant, laps in heats.live_ranked(session, race):
+                info = self._participant_info(participant)
+                positive = [lap.lap_time_ns for lap in laps if lap.lap_time_ns > 0]
+                last = laps[-1].lap_time_ns if laps else None
+                total = laps[-1].race_time_ns if laps else None
+                standings.append(
+                    FieldStanding(
+                        participant_id=participant.id,
+                        driver_label=info.driver_label,
+                        vehicle_label=info.vehicle_label,
+                        start_number=info.start_number,
+                        lane=participant.lane,
+                        laps_completed=len(laps),
+                        last_lap_ns=last if last is not None and last > 0 else None,
+                        best_lap_ns=min(positive) if positive else None,
+                        total_time_ns=total if total is not None and total > 0 else None,
+                        lap_times_ns=tuple(lap.lap_time_ns for lap in laps),
+                        finished=bool(participant.finished),
+                    )
+                )
+            return tuple(standings)
 
     def heat_briefing(self, race_id: RaceId) -> HeatBriefing | None:
         with self._database.session() as session:

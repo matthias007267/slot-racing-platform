@@ -528,9 +528,10 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert runner.snapshot().track_name.endswith("Heimbahn")
     assert runner.snapshot().timing_provider == "simulation"
     assert live.lanes.cards[1].lap_label.text().endswith("2")
-    assert live.table.rowCount() == 2
+    assert live.table.rowCount() == 3
     assert column_text(live.table, 0, "Fahrer") == "Anna"
     assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
+    assert {column_text(live.table, row, "Fahrer") for row in range(3)} == {"Anna", "Ben", "Chris"}
 
     for _ in range(80):
         if column_text(live.table, 0, "Runden") != "0":

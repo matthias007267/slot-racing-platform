@@ -21,6 +21,27 @@ class ParticipantInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldStanding:
+    """One driver of the current race, including a driver who is waiting out this heat.
+
+    Lap figures are the stored race scoring across every heat already driven. ``lane`` is the
+    lane of the heat that is on track, or empty while the driver is waiting.
+    """
+
+    participant_id: int
+    driver_label: str
+    vehicle_label: str
+    start_number: int | str | None
+    lane: int | None
+    laps_completed: int
+    last_lap_ns: int | None
+    best_lap_ns: int | None
+    total_time_ns: int | None
+    lap_times_ns: tuple[int, ...]
+    finished: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RaceInfo:
     id: RaceId
     name: str

@@ -358,6 +358,7 @@ class HudRankingRow:
     lane: int
     cells: tuple[str, ...]
     leader: bool
+    participant_id: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -834,7 +835,7 @@ def _cards(
     )
     origins_x = _origins(widths, LANE_CARD_MARGIN, lanes_box.x)
     origins_y = _origins(heights, LANE_CARD_MARGIN, lanes_box.y)
-    by_lane = {row.lane: row for row in snapshot.rows}
+    by_lane = {row.lane: row for row in snapshot.rows if row.seated}
     paused = snapshot.status is RaceStatus.PAUSED
     ended = snapshot.status is RaceStatus.FINISHED
     free = presentation.translator.translate("race.time_trial.free")
@@ -978,7 +979,7 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
     ended = snapshot.status is RaceStatus.FINISHED
     paused = snapshot.status is RaceStatus.PAUSED
     rows = []
-    for standing in snapshot.rows:
+    for standing in snapshot.standings or snapshot.rows:
         cells = ranking_cells(translator, snapshot, standing, ended=ended, paused=paused)
         rows.append(
             HudRankingRow(
@@ -986,6 +987,7 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
                 lane=standing.lane,
                 cells=cells,
                 leader=cells[0] == "1",
+                participant_id=standing.participant_id,
             )
         )
     columns = tuple(

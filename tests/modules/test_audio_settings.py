@@ -37,6 +37,9 @@ class RecordingOutput:
     def play(self, tone: ToneSpec, *, volume: int) -> None:
         self.calls.append((tone, volume))
 
+    def release(self) -> None:
+        """Matches :class:`ToneOutput`. The settings page does not call it."""
+
 
 def test_settings_show_and_store_the_audio_choice(qtbot: QtBot, env: Env) -> None:
     env.runtime.config.audio_enabled = False
