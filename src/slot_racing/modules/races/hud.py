@@ -128,6 +128,44 @@ VIEW_BETWEEN = "between"
 VIEW_RESULTS = "results"
 VIEW_IDS: tuple[str, ...] = (VIEW_PRESTART, VIEW_LIVE, VIEW_BETWEEN, VIEW_RESULTS)
 
+# Column order of the live ranking table. The between-heats ranking uses the same
+# ids and the same cell order; it only chooses which of them are shown.
+RANKING_COLUMN_IDS: tuple[str, ...] = (
+    "position",
+    "driver",
+    "vehicle",
+    "start_number",
+    "lane",
+    "laps",
+    "current_lap",
+    "last_lap",
+    "best_lap",
+    "total_time",
+    "progress",
+    "status",
+)
+RANKING_COLUMN_LABELS: dict[str, str] = {
+    "position": "race.column.position",
+    "driver": "race.column.driver",
+    "vehicle": "race.column.vehicle",
+    "start_number": "race.column.start_number",
+    "lane": "race.column.lane",
+    "laps": "race.column.laps_done",
+    "current_lap": "race.column.current_lap",
+    "last_lap": "race.column.last_lap",
+    "best_lap": "race.column.best_lap",
+    "total_time": "race.column.total_time",
+    "progress": "race.column.progress",
+    "status": "race.column.status",
+}
+BETWEEN_RANKING_DEFAULT_SHOWN: frozenset[str] = frozenset(
+    {"position", "driver", "laps", "last_lap", "best_lap", "total_time", "status"}
+)
+BETWEEN_RANKING_FONT_BASE = 16
+_FACTORY_BETWEEN_COLUMNS: tuple[tuple[str, bool], ...] = tuple(
+    (column_id, column_id in BETWEEN_RANKING_DEFAULT_SHOWN) for column_id in RANKING_COLUMN_IDS
+)
+
 TEXT_DRIVER = "driver"
 TEXT_VEHICLE = "vehicle"
 TEXT_PLACE = "place"
@@ -221,6 +259,29 @@ class LightFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class BetweenRanking:
+    """The live ranking placed on the surface between heats.
+
+    Fractions are shares of that surface, the same way the start gantry is placed.
+    ``columns`` is the live ranking's columns in display order. A missing column in a
+    stored document is appended from the factory list, so an older layout stays usable.
+    """
+
+    visible: bool = True
+    x: float = 0.50
+    y: float = 0.02
+    width: float = 0.48
+    height: float = 0.96
+    font_scale: int = 100
+    columns: tuple[tuple[str, bool], ...] = _FACTORY_BETWEEN_COLUMNS
+
+    def as_config(self) -> HudWidgetConfig:
+        return HudWidgetConfig(
+            "between_ranking", self.visible, self.x, self.y, self.width, self.height
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ViewStyle:
     """Typography for one race surface. 100 is the size that surface already used.
 
@@ -262,6 +323,7 @@ class HudLayout:
     ranking_share: int = 1
     lights: LightFrame = LightFrame()
     views: tuple[tuple[str, ViewStyle], ...] = ()
+    between_ranking: BetweenRanking = BetweenRanking()
 
     def field(self, field_id: str) -> FieldStyle:
         for key, style in self.fields:
@@ -301,6 +363,48 @@ class HudConfiguration:
         return self.layouts[0]
 
 
+def factory_between_ranking() -> BetweenRanking:
+    """Readable default: the ranking sits beside the briefing and shows the race totals."""
+    return BetweenRanking()
+
+
+def ranking_columns(frame: BetweenRanking) -> tuple[tuple[str, bool], ...]:
+    """Configured order, with any column an older document does not mention appended."""
+    return _ranking_columns(frame.columns)
+
+
+def visible_ranking_columns(frame: BetweenRanking) -> tuple[str, ...]:
+    return tuple(column_id for column_id, shown in ranking_columns(frame) if shown)
+
+
+def normalize_between_ranking(frame: BetweenRanking) -> BetweenRanking:
+    """Keep the rectangle on the surface and the column list complete."""
+    widget = clamp_widget(frame.as_config())
+    return replace(
+        frame,
+        x=widget.x,
+        y=widget.y,
+        width=widget.width,
+        height=widget.height,
+        font_scale=snap_scale(frame.font_scale),
+        columns=_ranking_columns(frame.columns),
+    )
+
+
+def between_ranking_pixels(frame: BetweenRanking, width: int, height: int) -> PixelRect:
+    """The ranking rectangle on a between-heats surface of this size."""
+    normalized = normalize_between_ranking(frame)
+    return to_pixels(normalized.as_config(), width, height)
+
+
+def project_ranking_cells(cells: tuple[str, ...], frame: BetweenRanking) -> tuple[str, ...]:
+    """Pick the configured visible cells. ``cells`` follows :data:`RANKING_COLUMN_IDS`."""
+    if len(cells) != len(RANKING_COLUMN_IDS):
+        raise ValueError("ranking cells do not match the live column order")
+    index = {column_id: position for position, column_id in enumerate(RANKING_COLUMN_IDS)}
+    return tuple(cells[index[column_id]] for column_id in visible_ranking_columns(frame))
+
+
 def factory_layout() -> HudLayout:
     """The built-in presentation. It cannot be deleted."""
     return HudLayout(
@@ -316,6 +420,7 @@ def factory_layout() -> HudLayout:
         ranking_share=1,
         lights=LightFrame(),
         views=tuple((view_id, ViewStyle()) for view_id in VIEW_IDS),
+        between_ranking=factory_between_ranking(),
     )
 
 
@@ -821,6 +926,7 @@ def _layout_document(layout: HudLayout) -> dict[str, Any]:
             "width": lights.width,
             "height": lights.height,
         },
+        "between_ranking": _between_ranking_document(layout.between_ranking),
     }
 
 
@@ -848,6 +954,7 @@ def _layout(value: object) -> HudLayout | None:
         ranking_share=snap_share(value.get("ranking_share"), base.ranking_share),
         lights=_lights(value.get("lights")),
         views=_views(value.get("views")),
+        between_ranking=_between_ranking(value.get("between_ranking")),
     )
 
 
@@ -975,6 +1082,73 @@ def _kept(layout_id: str, layouts: tuple[HudLayout, ...], fallback: str) -> str:
     if any(item.id == layout_id for item in layouts):
         return layout_id
     return fallback
+
+
+def _between_ranking_document(frame: BetweenRanking) -> dict[str, Any]:
+    normalized = normalize_between_ranking(frame)
+    return {
+        "visible": normalized.visible,
+        "x": normalized.x,
+        "y": normalized.y,
+        "width": normalized.width,
+        "height": normalized.height,
+        "font_scale": normalized.font_scale,
+        "columns": [
+            {"id": column_id, "visible": visible} for column_id, visible in normalized.columns
+        ],
+    }
+
+
+def _between_ranking(value: object) -> BetweenRanking:
+    """A missing block is the factory ranking. Known columns an old file lacks are added."""
+    base = factory_between_ranking()
+    if not isinstance(value, dict):
+        return base
+    visible = value.get("visible")
+    shown = visible if isinstance(visible, bool) else base.visible
+    draft = BetweenRanking(
+        visible=shown,
+        x=_number(value.get("x"), base.x),
+        y=_number(value.get("y"), base.y),
+        width=_number(value.get("width"), base.width),
+        height=_number(value.get("height"), base.height),
+        font_scale=snap_scale(value.get("font_scale", base.font_scale)),
+        columns=_ranking_columns(value["columns"]) if "columns" in value else base.columns,
+    )
+    return normalize_between_ranking(draft)
+
+
+def _ranking_columns(value: object) -> tuple[tuple[str, bool], ...]:
+    found: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    raw: object = value
+    if not isinstance(raw, list | tuple):
+        raw = ()
+    for item in raw:
+        column_id, visible = _column_entry(item)
+        if column_id is None or column_id in seen:
+            continue
+        found.append((column_id, visible))
+        seen.add(column_id)
+    for column_id in RANKING_COLUMN_IDS:
+        if column_id not in seen:
+            found.append((column_id, column_id in BETWEEN_RANKING_DEFAULT_SHOWN))
+    return tuple(found)
+
+
+def _column_entry(item: object) -> tuple[str | None, bool]:
+    column_id: object
+    visible: object
+    if isinstance(item, dict):
+        column_id = item.get("id")
+        visible = item.get("visible", True)
+    elif isinstance(item, tuple) and len(item) == 2:
+        column_id, visible = item
+    else:
+        return None, True
+    if not isinstance(column_id, str) or column_id not in RANKING_COLUMN_IDS:
+        return None, True
+    return column_id, bool(visible) if isinstance(visible, bool) else True
 
 
 def _number(value: object, default: float) -> float:

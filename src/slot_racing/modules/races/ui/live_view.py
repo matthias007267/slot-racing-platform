@@ -733,7 +733,10 @@ class LiveRaceView(QWidget):
             self._briefing = None
             return
         self._briefing = briefing
-        self.heat_gate.board.set_view_style(self.bound_layout().view(VIEW_BETWEEN))
+        layout = self.bound_layout()
+        self.heat_gate.board.set_view_style(layout.view(VIEW_BETWEEN))
+        if self._snapshot is not None:
+            self.heat_gate.show_standings(self._snapshot, layout.between_ranking)
         self.stage.hide()
         self.board.hide()
         self.heat_gate.show_briefing(briefing)

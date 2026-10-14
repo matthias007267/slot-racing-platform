@@ -53,15 +53,19 @@ from slot_racing.modules.races.hud import (
     DISPLAY_MODES,
     FIELD_IDS,
     LIGHT_ASPECT,
+    MIN_SPAN,
     PANEL_RECORDS,
+    RANKING_COLUMN_LABELS,
     SCALE_MAX,
     SCALE_MIN,
     SCALE_STEP,
     SHARE_MAX,
     SHARE_MIN,
     TEXT_ROLES,
+    VIEW_BETWEEN,
     VIEW_IDS,
     VIEW_LIVE,
+    BetweenRanking,
     FieldStyle,
     HudConfiguration,
     HudConfigurationStore,
@@ -78,7 +82,9 @@ from slot_racing.modules.races.hud import (
     light_pixels,
     light_scale_limits,
     mark_default,
+    normalize_between_ranking,
     normalize_light,
+    ranking_columns,
     replace_layout,
     snap_alignment,
     snap_display,
@@ -88,6 +94,8 @@ from slot_racing.modules.races.hud import (
     with_view,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
+from slot_racing.modules.races.types import HeatBriefing, HeatSeat, LaneChange
+from slot_racing.modules.races.ui.heat_gate import HeatGate
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.race_briefing import apply_text_size
 from slot_racing.modules.races.ui.start_lights import StartLightWidget
@@ -219,6 +227,54 @@ def _fresh_id(document: HudConfiguration) -> str:
     while f"layout-{number}" in taken:
         number += 1
     return f"layout-{number}"
+
+
+def _between_sample() -> tuple[HeatBriefing, RaceSnapshot]:
+    """Five drivers, one of them still without a valid lap. The preview uses these rows."""
+    names = ("Anna", "Ben", "Chris", "Dana", "Erik")
+    standings: list[LiveRow] = []
+    for index, name in enumerate(names):
+        has_time = index < 4
+        standings.append(
+            LiveRow(
+                position=index + 1,
+                lane=(index % 2) + 1 if index < 2 else 0,
+                driver_label=name,
+                vehicle_label="Porsche 911",
+                start_number=index + 1,
+                current_lap=2 if has_time else 0,
+                laps_completed=1 if has_time else 0,
+                last_lap_ns=4_200_000_000 if has_time else None,
+                total_time_ns=4_200_000_000 if has_time else None,
+                best_lap_ns=4_100_000_000 if has_time else None,
+                finished=False,
+                lap_times_ns=(4_100_000_000,) if has_time else (),
+                participant_id=index + 1,
+                seated=index < 2,
+            )
+        )
+    snapshot = RaceSnapshot(
+        race_id=RaceId(1),
+        name="Zwischen",
+        track_name="Heimbahn",
+        timing_provider="simulation",
+        status=RaceStatus.FINISHED,
+        aborted=False,
+        laps=1,
+        elapsed_ns=40_000_000_000,
+        rows=tuple(row for row in standings if row.seated),
+        source_errors=(),
+        standings=tuple(standings),
+    )
+    briefing = HeatBriefing(
+        race_id=RaceId(1),
+        sequence=2,
+        heat_count=15,
+        seats=(HeatSeat(1, 1, "Anna"), HeatSeat(2, 2, "Ben")),
+        changes=(LaneChange("Chris", 1, 2),),
+        drivers=tuple((index + 1, name) for index, name in enumerate(names)),
+    )
+    return briefing, snapshot
 
 
 def _sample(status_key: str, lanes: int) -> tuple[RaceSnapshot, str]:
@@ -522,6 +578,27 @@ class HudEditor(QWidget):
     def set_light_frame(self, frame: LightFrame) -> None:
         self._commit(replace(self.selected_layout(), lights=normalize_light(frame)))
 
+    def set_between_ranking(self, frame: BetweenRanking) -> None:
+        normalized = normalize_between_ranking(frame)
+        self._commit(replace(self.selected_layout(), between_ranking=normalized))
+
+    def set_ranking_column_visible(self, column_id: str, visible: bool) -> None:
+        current = self.selected_layout().between_ranking
+        columns = tuple(
+            (key, visible if key == column_id else shown) for key, shown in ranking_columns(current)
+        )
+        self.set_between_ranking(replace(current, columns=columns))
+
+    def move_ranking_column(self, column_id: str, delta: int) -> None:
+        columns = list(ranking_columns(self.selected_layout().between_ranking))
+        index = next((pos for pos, (key, _shown) in enumerate(columns) if key == column_id), -1)
+        target = index + delta
+        if index < 0 or target < 0 or target >= len(columns):
+            return
+        columns[index], columns[target] = columns[target], columns[index]
+        current = self.selected_layout().between_ranking
+        self.set_between_ranking(replace(current, columns=tuple(columns)))
+
     def reset_lights(self) -> None:
         self._commit(replace(self.selected_layout(), lights=LightFrame()))
 
@@ -719,6 +796,40 @@ class HudEditor(QWidget):
             text_form.addRow(caption, scale)
             self._board_only.extend((caption, scale))
 
+        ranking_form = self._add_group(
+            column, tr("hud.group.between_ranking"), "hud-group-between-ranking"
+        )
+        self._ranking_visible = QCheckBox(tr("hud.ranking.visible"))
+        self._ranking_visible.setObjectName("hud-ranking-visible")
+        self._ranking_visible.toggled.connect(self._on_ranking_visible)
+        ranking_form.addRow(self._ranking_visible)
+        self._ranking_font = _scale_spin("hud-ranking-font")
+        self._ranking_font.valueChanged.connect(self._on_ranking_font)
+        ranking_form.addRow(_form_label(tr("hud.ranking.font")), self._ranking_font)
+        self._ranking_spins: dict[str, QSpinBox] = {}
+        span_floor = round(MIN_SPAN * 100)
+        for axis, key, low in (
+            ("x", "hud.ranking.x", 0),
+            ("y", "hud.ranking.y", 0),
+            ("width", "hud.ranking.width", span_floor),
+            ("height", "hud.ranking.height", span_floor),
+        ):
+            spin = QSpinBox()
+            spin.setObjectName(f"hud-ranking-{axis}")
+            spin.setSuffix(" %")
+            spin.setRange(low, 100)
+            spin.valueChanged.connect(self._on_ranking_geometry)
+            self._ranking_spins[axis] = spin
+            ranking_form.addRow(_form_label(tr(key)), spin)
+        self._ranking_columns = QWidget()
+        self._ranking_columns.setObjectName("hud-ranking-columns")
+        self._ranking_column_layout = QVBoxLayout(self._ranking_columns)
+        self._ranking_column_layout.setContentsMargins(0, 0, 0, 0)
+        self._ranking_column_layout.setSpacing(SPACE.xs)
+        ranking_form.addRow(_form_label(tr("hud.ranking.columns")), self._ranking_columns)
+        self._ranking_order: list[str] = []
+        self._ranking_checks: dict[str, QCheckBox] = {}
+
         alignment_form = self._add_group(column, tr("hud.group.alignment"), "hud-group-alignment")
         self._alignment = QComboBox()
         self._alignment.setObjectName("hud-alignment")
@@ -848,9 +959,13 @@ class HudEditor(QWidget):
         canvas_layout = QVBoxLayout(canvas)
         canvas_layout.setSpacing(0)
         self.sample = SurfaceSample()
+        self.between = HeatGate(self._translator)
+        self.between.setObjectName("hud-between-preview")
         canvas_layout.addWidget(self.preview, 1)
         canvas_layout.addWidget(self.sample, 1)
+        canvas_layout.addWidget(self.between, 1)
         self.sample.hide()
+        self.between.hide()
         self._canvas_layout = canvas_layout
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -901,8 +1016,15 @@ class HudEditor(QWidget):
 
     def _apply_preview(self) -> None:
         live = self._surface == VIEW_LIVE
+        between = self._surface == VIEW_BETWEEN
         self.preview.setVisible(live)
-        self.sample.setVisible(not live)
+        self.sample.setVisible(not live and not between)
+        self.between.setVisible(between)
+        if between:
+            self.lights.hide()
+            self.handle.hide()
+            self._show_between()
+            return
         if not live:
             self.lights.hide()
             self.handle.hide()
@@ -911,6 +1033,13 @@ class HudEditor(QWidget):
         self.stage.apply_layout(self.selected_layout())
         self._show_sample()
         self._place_lights()
+
+    def _show_between(self) -> None:
+        briefing, snapshot = _between_sample()
+        frame = self.selected_layout().between_ranking
+        self.between.board.set_view_style(self.selected_layout().view(VIEW_BETWEEN))
+        self.between.show_briefing(briefing)
+        self.between.show_standings(snapshot, frame)
 
     def _show_sample(self) -> None:
         snapshot, message_key = _sample(self._preview_status, self._preview_lanes)
@@ -948,6 +1077,8 @@ class HudEditor(QWidget):
                 widget.setVisible(live)
             for widget in self._board_only:
                 widget.setVisible(not live)
+            self._groups["hud-group-between-ranking"].setVisible(self._surface == VIEW_BETWEEN)
+            self._fill_ranking_columns(layout.between_ranking)
             self._lock_settings()
             view_index = self._views.findData(self._surface)
             self._views.setCurrentIndex(max(view_index, 0))
@@ -970,11 +1101,67 @@ class HudEditor(QWidget):
             self._shares["status"].setValue(layout.status_share)
             self._shares["lanes"].setValue(layout.lanes_share)
             self._shares["ranking"].setValue(layout.ranking_share)
+            self._sync_ranking_controls(layout.between_ranking)
             self._sync_light_controls(layout.lights)
             self._status.setCurrentIndex(max(self._status.findData(self._preview_status), 0))
             self._lanes.setValue(self._preview_lanes)
         finally:
             self._filling = False
+
+    def _sync_ranking_controls(self, frame: BetweenRanking) -> None:
+        normalized = normalize_between_ranking(frame)
+        self._ranking_visible.setChecked(normalized.visible)
+        self._ranking_font.setValue(normalized.font_scale)
+        self._ranking_spins["x"].setValue(round(normalized.x * 100))
+        self._ranking_spins["y"].setValue(round(normalized.y * 100))
+        self._ranking_spins["width"].setValue(round(normalized.width * 100))
+        self._ranking_spins["height"].setValue(round(normalized.height * 100))
+
+    def _fill_ranking_columns(self, frame: BetweenRanking) -> None:
+        columns = ranking_columns(frame)
+        order = [column_id for column_id, _shown in columns]
+        if order == self._ranking_order and self._ranking_checks:
+            for column_id, shown in columns:
+                self._ranking_checks[column_id].setChecked(shown)
+            return
+        while self._ranking_column_layout.count():
+            item = self._ranking_column_layout.takeAt(0)
+            widget = None if item is None else item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._ranking_checks = {}
+        self._ranking_order = order
+        translate = self._translator.translate
+        for index, (column_id, shown) in enumerate(columns):
+            row = QWidget()
+            row.setObjectName(f"hud-ranking-row-{column_id}")
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            check = QCheckBox(translate(RANKING_COLUMN_LABELS[column_id]))
+            check.setObjectName(f"hud-ranking-column-{column_id}")
+            check.setChecked(shown)
+            check.toggled.connect(
+                lambda checked, name=column_id: self._on_ranking_column(name, checked)
+            )
+            up = QPushButton(translate("hud.ranking.up"))
+            up.setObjectName(f"hud-ranking-up-{column_id}")
+            up.setProperty("compact", True)
+            up.setEnabled(index > 0)
+            up.clicked.connect(
+                lambda _checked=False, name=column_id: self.move_ranking_column(name, -1)
+            )
+            down = QPushButton(translate("hud.ranking.down"))
+            down.setObjectName(f"hud-ranking-down-{column_id}")
+            down.setProperty("compact", True)
+            down.setEnabled(index < len(columns) - 1)
+            down.clicked.connect(
+                lambda _checked=False, name=column_id: self.move_ranking_column(name, 1)
+            )
+            line.addWidget(check, 1)
+            line.addWidget(up)
+            line.addWidget(down)
+            self._ranking_checks[column_id] = check
+            self._ranking_column_layout.addWidget(row)
 
     def _sync_light_controls(self, frame: LightFrame) -> None:
         stage_w = self.stage.width()
@@ -1152,6 +1339,46 @@ class HudEditor(QWidget):
         current = getattr(self.selected_layout(), f"{part}_share")
         if value != current:
             self.set_share(part, value)
+
+    def _on_ranking_visible(self, visible: bool) -> None:
+        if self._filling or visible == self.selected_layout().between_ranking.visible:
+            return
+        current = self.selected_layout().between_ranking
+        self.set_between_ranking(replace(current, visible=visible))
+
+    def _on_ranking_font(self, value: int) -> None:
+        if self._filling:
+            return
+        snapped = snap_scale(value)
+        if snapped != value:
+            self._ranking_font.setValue(snapped)
+            return
+        current = self.selected_layout().between_ranking
+        if snapped != current.font_scale:
+            self.set_between_ranking(replace(current, font_scale=snapped))
+
+    def _on_ranking_geometry(self) -> None:
+        if self._filling:
+            return
+        current = self.selected_layout().between_ranking
+        draft = replace(
+            current,
+            x=self._ranking_spins["x"].value() / 100,
+            y=self._ranking_spins["y"].value() / 100,
+            width=self._ranking_spins["width"].value() / 100,
+            height=self._ranking_spins["height"].value() / 100,
+        )
+        normalized = normalize_between_ranking(draft)
+        if normalized != current:
+            self.set_between_ranking(normalized)
+
+    def _on_ranking_column(self, column_id: str, visible: bool) -> None:
+        if self._filling:
+            return
+        shown = dict(ranking_columns(self.selected_layout().between_ranking))
+        if shown.get(column_id) is visible:
+            return
+        self.set_ranking_column_visible(column_id, visible)
 
     def _on_lights_visible(self, visible: bool) -> None:
         if self._filling or visible == self.selected_layout().lights.visible:

@@ -30,12 +30,14 @@ from slot_racing.modules.races.hud import (
     delete_layout,
     effective_light_scale,
     effective_px,
+    factory_between_ranking,
     factory_layout,
     light_frame,
     light_frame_from_box,
     light_pixels,
     light_scale_limits,
     mark_default,
+    ranking_columns,
     replace_layout,
     snap_scale,
     to_document,
@@ -59,6 +61,7 @@ def test_the_factory_layout_is_selected_and_the_default() -> None:
     assert (layout.clock_share, layout.status_share) == (1, 1)
     assert (layout.lanes_share, layout.ranking_share) == (3, 1)
     assert layout.lights == LightFrame()
+    assert layout.between_ranking == factory_between_ranking()
 
 
 def test_effective_type_keeps_the_hierarchy_inside_the_scale_range() -> None:
@@ -341,6 +344,47 @@ def test_a_broken_editor_window_falls_back_to_the_default_placement() -> None:
     with database.session() as session:
         session.add(Setting(key=HUD_WINDOW_KEY, value=["nope"]))
     assert store.load_window() == HudWindowPlacement()
+
+
+def test_an_older_layout_gains_the_between_ranking_without_losing_its_settings() -> None:
+    payload = to_document(default_hud_configuration())
+    layout = payload["layouts"][0]
+    del layout["between_ranking"]
+    layout["font_scale"] = 120
+    layout["ranking_share"] = 4
+    loaded = coerce(payload)
+    kept = loaded.default_layout()
+    assert kept.font_scale == 120
+    assert kept.ranking_share == 4
+    assert kept.between_ranking == factory_between_ranking()
+
+    partial = to_document(default_hud_configuration())
+    partial["layouts"][0]["between_ranking"] = {
+        "visible": True,
+        "x": 0.10,
+        "y": 0.20,
+        "width": 0.30,
+        "height": 0.40,
+        "font_scale": 73,
+        "columns": [{"id": "driver", "visible": True}, {"id": "unknown", "visible": True}],
+    }
+    restored = coerce(partial).default_layout().between_ranking
+    assert restored.font_scale == 75
+    assert restored.x == pytest.approx(0.10)
+    assert restored.width == pytest.approx(0.30)
+    columns = ranking_columns(restored)
+    assert columns[0] == ("driver", True)
+    assert [column_id for column_id, _shown in columns] == [
+        "driver",
+        *[
+            column_id
+            for column_id, _shown in factory_between_ranking().columns
+            if column_id != "driver"
+        ],
+    ]
+    assert columns[1] == ("position", True)
+    again = coerce(to_document(loaded))
+    assert again.default_layout().between_ranking == kept.between_ranking
 
 
 def _database() -> Database:
