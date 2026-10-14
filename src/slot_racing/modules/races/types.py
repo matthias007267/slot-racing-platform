@@ -21,6 +21,27 @@ class ParticipantInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldStanding:
+    """One driver of the current race, including a driver who is waiting out this heat.
+
+    Lap figures are the stored race scoring across every heat already driven. ``lane`` is the
+    lane of the heat that is on track, or empty while the driver is waiting.
+    """
+
+    participant_id: int
+    driver_label: str
+    vehicle_label: str
+    start_number: int | str | None
+    lane: int | None
+    laps_completed: int
+    last_lap_ns: int | None
+    best_lap_ns: int | None
+    total_time_ns: int | None
+    lap_times_ns: tuple[int, ...]
+    finished: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RaceInfo:
     id: RaceId
     name: str
@@ -38,6 +59,8 @@ class RaceInfo:
     duration_minutes: int | None = None
     active_lanes: int = 0
     """Lanes this race plans. The track's ``lane_count`` stays the physical count."""
+    repetitions: int = 1
+    """How often the rotation plan is driven. One is a single pass of that plan."""
 
     @property
     def is_editable(self) -> bool:
@@ -46,6 +69,42 @@ class RaceInfo:
     @property
     def is_over(self) -> bool:
         return self.status in (RaceStatus.FINISHED, RaceStatus.ABORTED)
+
+
+@dataclass(frozen=True, slots=True)
+class RestartSeat:
+    """One copied assignment. ``issue_key`` is empty when the assignment can be kept."""
+
+    driver_id: DriverId
+    driver_label: str
+    vehicle_id: VehicleId | None
+    vehicle_label: str
+    lane: int | None
+    issue_key: str | None = None
+    issue_driver: str = ""
+    issue_vehicle: str = ""
+    issue_lane: int | None = None
+    issue_maximum: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RestartPreview:
+    """Settings a new race would take from a finished or aborted one. Nothing is stored yet."""
+
+    source_id: RaceId
+    source_name: str
+    suggested_name: str
+    track_id: TrackId | None
+    track_name: str
+    lane_count: int
+    mode: RaceMode
+    laps: int
+    timing_provider: str
+    duration_minutes: int | None
+    active_lanes: int
+    repetitions: int
+    uses_heats: bool
+    seats: tuple[RestartSeat, ...]
 
 
 @dataclass(frozen=True, slots=True)

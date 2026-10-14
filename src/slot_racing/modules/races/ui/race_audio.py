@@ -91,9 +91,15 @@ def render_tone(tone: ToneSpec) -> bytes:
 
 
 class ToneOutput(Protocol):
-    """Starts one tone and returns. It must not wait for the tone to finish."""
+    """Starts one tone and returns. It must not wait for the tone to finish.
+
+    ``release`` stops whatever is still playing and drops the device. The next
+    ``play`` is then the only tone, including after the next race.
+    """
 
     def play(self, tone: ToneSpec, *, volume: int) -> None: ...
+
+    def release(self) -> None: ...
 
 
 class SilentToneOutput:
@@ -101,6 +107,9 @@ class SilentToneOutput:
 
     def play(self, tone: ToneSpec, *, volume: int) -> None:
         del tone, volume
+
+    def release(self) -> None:
+        """Nothing was opened, so there is nothing to drop."""
 
 
 def open_tone_output(parent: QObject) -> ToneOutput:
@@ -194,6 +203,10 @@ class RaceAudio(QObject):
                 return
             self._reported = True
             logger.warning("Race sound %s was not played: %s", sound_id, error)
+
+    def release(self) -> None:
+        """Drop the output held for the race that just ended or was cancelled."""
+        self._output.release()
 
 
 class StartSoundPreview(QObject):

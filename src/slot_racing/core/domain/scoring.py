@@ -16,13 +16,16 @@ _MISSING_TIME_NS = 2**62
 
 
 class RaceScoring(Protocol):
-    """Answers the two questions that differ between race modes."""
+    """Answers the questions that differ between race modes."""
 
     stop_is_abort: bool
     """An early stop aborts a lap race and finishes a time trial normally."""
 
     marks_result_when_session_ends: bool
     """A stored time trial lap counts once the session ends. There is no lap target."""
+
+    determines_winner: bool
+    """A lap race and a time trial name a winner. A free session does not."""
 
     def participant_finished(self, laps_completed: int, target_laps: int) -> bool:
         """Whether this completed lap reaches the mode's finish condition."""
@@ -44,6 +47,7 @@ class LapScoring:
 
     stop_is_abort = True
     marks_result_when_session_ends = False
+    determines_winner = True
 
     def participant_finished(self, laps_completed: int, target_laps: int) -> bool:
         return laps_completed >= target_laps
@@ -76,6 +80,7 @@ class TimeTrialScoring:
 
     stop_is_abort = False
     marks_result_when_session_ends = True
+    determines_winner = True
 
     def participant_finished(self, laps_completed: int, target_laps: int) -> bool:
         return False
@@ -94,12 +99,42 @@ class TimeTrialScoring:
         return (0, best_lap_ns, lane, 0)
 
 
+class FreeRaceScoring:
+    """Each lane counts completed laps until the session is stopped.
+
+    Nobody finishes because of a lap target or a clock, and stopping does not name a winner or
+    store a classified result. The live order follows the best lap of the current assignment.
+    """
+
+    stop_is_abort = False
+    marks_result_when_session_ends = False
+    determines_winner = False
+
+    def participant_finished(self, laps_completed: int, target_laps: int) -> bool:
+        return False
+
+    def rank_key(
+        self,
+        *,
+        finish_order: int | None,
+        laps_completed: int,
+        last_lap_end_ns: int | None,
+        best_lap_ns: int | None,
+        lane: int,
+    ) -> tuple[int, int, int, int]:
+        if best_lap_ns is None:
+            return (1, lane, 0, 0)
+        return (0, best_lap_ns, lane, 0)
+
+
 def scoring_for(mode: RaceMode) -> RaceScoring:
     """Scoring of ``mode``. An unknown mode is rejected instead of being treated as a lap race."""
     if mode is RaceMode.LAPS:
         return LapScoring()
     if mode is RaceMode.TIME_TRIAL:
         return TimeTrialScoring()
+    if mode is RaceMode.FREE:
+        return FreeRaceScoring()
     raise ValueError(f"unsupported race mode: {mode}")
 
 

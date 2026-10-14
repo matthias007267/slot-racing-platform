@@ -370,7 +370,7 @@ class LaneCardBoard(QWidget):
         duration_minutes: int | None = None,
     ) -> None:
         self._ensure(lane_count)
-        by_lane = {row.lane: row for row in snapshot.rows}
+        by_lane = {row.lane: row for row in snapshot.rows if row.seated}
         paused = snapshot.status is RaceStatus.PAUSED
         ended = snapshot.status is RaceStatus.FINISHED
         free = self._translator.translate(_FREE)

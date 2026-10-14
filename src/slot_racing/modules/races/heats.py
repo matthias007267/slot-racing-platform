@@ -52,13 +52,26 @@ def list_heats(session: Session, race_id: int) -> list[HeatInfo]:
     return [_heat_info(session, heat) for heat in heats]
 
 
+def clear_plan(session: Session, race_id: int) -> None:
+    """Remove a plan that has not been driven. A free session does not use heats."""
+    if _running(session, race_id) is not None or has_completed(session, race_id):
+        raise ValidationError("error.race.not_editable")
+    _delete_planned(session, race_id)
+
+
 def replace_open_plan(session: Session, race: Race, lane_count: int) -> None:
     """Rebuild every heat that has not been driven. Completed heats stay as they are."""
     if _running(session, race.id) is not None:
         raise ValidationError("error.race.not_editable")
     participants = _participants(session, race.id)
     _delete_planned(session, race.id)
-    heats = _open_heats(participants, lane_count, _completed_pairs(session, race.id))
+    heats = _open_heats(
+        participants,
+        lane_count,
+        _completed_pairs(session, race.id),
+        repetitions=race.repetitions,
+        completed_heats=_completed_heat_seats(session, race.id),
+    )
     _insert_heats(session, race.id, heats)
 
 
@@ -71,10 +84,24 @@ def postpone(session: Session, race: Race, participant_id: int, lane_count: int)
         raise ValidationError("error.race.disqualified")
     participants = _participants(session, race.id)
     completed = _completed_pairs(session, race.id)
-    open_now = _open_heats(participants, lane_count, completed)
+    driven = _completed_heat_seats(session, race.id)
+    open_now = _open_heats(
+        participants,
+        lane_count,
+        completed,
+        repetitions=race.repetitions,
+        completed_heats=driven,
+    )
     if not any(driver == participant.id for heat in open_now for driver, _lane in heat):
         raise ValidationError("error.race.nothing_to_postpone")
-    heats = _open_heats(participants, lane_count, completed, deferred=frozenset({participant.id}))
+    heats = _open_heats(
+        participants,
+        lane_count,
+        completed,
+        deferred=frozenset({participant.id}),
+        repetitions=race.repetitions,
+        completed_heats=driven,
+    )
     _delete_planned(session, race.id)
     _insert_heats(session, race.id, heats)
 
@@ -89,7 +116,13 @@ def disqualify(session: Session, race: Race, participant_id: int, lane_count: in
     participant = _require_participant(session, race.id, participant_id)
     participant.disqualified = True
     participants = _participants(session, race.id)
-    heats = _open_heats(participants, lane_count, _completed_pairs(session, race.id))
+    heats = _open_heats(
+        participants,
+        lane_count,
+        _completed_pairs(session, race.id),
+        repetitions=race.repetitions,
+        completed_heats=_completed_heat_seats(session, race.id),
+    )
     _delete_planned(session, race.id)
     _insert_heats(session, race.id, heats)
     if heats or not has_completed(session, race.id):
@@ -138,8 +171,9 @@ def finish_heat(session: Session, race: Race, *, aborted: bool, lane_count: int 
     """Close the heat that is on track.
 
     Returns True when the race stays open for another heat. The caller's ranking then waits.
-    A normal finish with no planned heat left still stays open when a required lane visit was
-    never stored. Abort does not rebuild that plan.
+    A normal finish with no planned heat left still stays open when another repetition of the
+    rotation is stored, or when a required lane visit was never stored. Abort does not rebuild
+    that plan.
     """
     heat = _running(session, race.id)
     if heat is None:
@@ -152,6 +186,17 @@ def finish_heat(session: Session, race: Race, *, aborted: bool, lane_count: int 
         participant.laps_completed = len(laps)
         participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
     pending = has_pending(session, race.id)
+    if not aborted and not pending and lane_count > 0 and race.repetitions > 1:
+        repeated = _open_heats(
+            _participants(session, race.id),
+            lane_count,
+            _completed_pairs(session, race.id),
+            repetitions=race.repetitions,
+            completed_heats=_completed_heat_seats(session, race.id),
+        )
+        if repeated:
+            _insert_heats(session, race.id, repeated)
+            pending = True
     if not aborted and not pending and lane_count > 0:
         obligations = _obligations(
             _participants(session, race.id), lane_count, _completed_pairs(session, race.id)
@@ -269,14 +314,40 @@ def briefing(
     )
 
 
+def ranked_field(session: Session, race: Race) -> list[tuple[RaceParticipant, list[Lap]]]:
+    """Every participant of this race, in the order :func:`_rank` stores."""
+    return _ranked(session, race, missing_lane=0)
+
+
+def live_ranked(session: Session, race: Race) -> list[tuple[RaceParticipant, list[Lap]]]:
+    """Same scoring as :func:`ranked_field`, for the live table.
+
+    A driver who is waiting and has no stored lap sorts after drivers tied on the same
+    empty result. The stored result still breaks that tie by lane number, including an
+    empty lane. The live table keeps the drivers who are on track ahead of that tie.
+    """
+    return _ranked(session, race, missing_lane=_MISSING)
+
+
+def _ranked(
+    session: Session, race: Race, *, missing_lane: int
+) -> list[tuple[RaceParticipant, list[Lap]]]:
+    stored = [
+        (participant, _laps(session, participant.id))
+        for participant in _participants(session, race.id)
+    ]
+    if RaceMode(race.mode) is RaceMode.TIME_TRIAL:
+        return sorted(
+            stored, key=lambda item: _time_trial_key(item[0], item[1], missing_lane=missing_lane)
+        )
+    return sorted(
+        stored,
+        key=lambda item: _lap_key(item[0], item[1], race.target_laps, missing_lane=missing_lane),
+    )
+
+
 def _rank(session: Session, race: Race) -> None:
-    participants = _participants(session, race.id)
-    stored = [(participant, _laps(session, participant.id)) for participant in participants]
-    mode = RaceMode(race.mode)
-    if mode is RaceMode.TIME_TRIAL:
-        ranked = sorted(stored, key=lambda item: _time_trial_key(item[0], item[1]))
-    else:
-        ranked = sorted(stored, key=lambda item: _lap_key(item[0], item[1], race.target_laps))
+    ranked = ranked_field(session, race)
     for position, (participant, laps) in enumerate(ranked, start=1):
         participant.laps_completed = len(laps)
         participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
@@ -285,7 +356,11 @@ def _rank(session: Session, race: Race) -> None:
 
 
 def _lap_key(
-    participant: RaceParticipant, laps: list[Lap], target: int
+    participant: RaceParticipant,
+    laps: list[Lap],
+    target: int,
+    *,
+    missing_lane: int = 0,
 ) -> tuple[int, int, int, int]:
     """More completed laps first, then the smaller combined race time.
 
@@ -294,25 +369,31 @@ def _lap_key(
     """
     del target
     last = laps[-1].race_time_ns if laps else _MISSING
-    lane = _tie_lane(participant, laps)
+    lane = _tie_lane(participant, laps, missing=missing_lane)
     group = 1 if participant.disqualified else 0
     return (group, -len(laps), last, lane)
 
 
 def _time_trial_key(
-    participant: RaceParticipant, laps: list[Lap]
+    participant: RaceParticipant, laps: list[Lap], *, missing_lane: int = 0
 ) -> tuple[int, int, int, int, int]:
     best = min(laps, key=lambda lap: lap.lap_time_ns) if laps else None
-    lane = best.lane if best is not None and best.lane is not None else _tie_lane(participant, laps)
+    lane = (
+        best.lane
+        if best is not None and best.lane is not None
+        else _tie_lane(participant, laps, missing=missing_lane)
+    )
     key = time_trial_stored_key(None if best is None else best.lap_time_ns, lane)
     group = 1 if participant.disqualified else 0
     return (group, *key)
 
 
-def _tie_lane(participant: RaceParticipant, laps: list[Lap]) -> int:
+def _tie_lane(participant: RaceParticipant, laps: list[Lap], *, missing: int = 0) -> int:
     if laps and laps[-1].lane is not None:
         return laps[-1].lane
-    return participant.lane or 0
+    if participant.lane is not None:
+        return participant.lane
+    return missing
 
 
 def _open_heats(
@@ -321,8 +402,49 @@ def _open_heats(
     completed: set[tuple[int, int]],
     *,
     deferred: frozenset[int] = frozenset(),
+    repetitions: int = 1,
+    completed_heats: tuple[tuple[tuple[int, int], ...], ...] = (),
 ) -> tuple[tuple[tuple[int, int], ...], ...]:
-    """Open heats for the current roster.
+    """Open heats for the current roster, repeated for the stored repetition count.
+
+    One repetition is the existing rotation and nothing more. A higher count appends that
+    same plan again. The order and the lane seats inside one pass stay the ones the rotation
+    already produced.
+    """
+    once = _rotation_once(participants, lane_count, completed, deferred=deferred)
+    if repetitions <= 1:
+        return once
+    canonical = _rotation_once(participants, lane_count, set())
+    if not canonical:
+        return once
+    if not completed and not deferred:
+        return _repeat(canonical, repetitions)
+    visits: dict[tuple[int, int], int] = {}
+    for heat in completed_heats:
+        for seat in heat:
+            visits[seat] = visits.get(seat, 0) + 1
+    once_pairs = {seat for heat in once for seat in heat}
+    projected = [
+        visits.get(seat, 0) + (1 if seat in once_pairs else 0)
+        for heat in canonical
+        for seat in heat
+    ]
+    if not projected:
+        return once
+    extra = max(0, repetitions - max(projected))
+    if extra == 0:
+        return once
+    return once + _repeat(canonical, extra)
+
+
+def _rotation_once(
+    participants: list[RaceParticipant],
+    lane_count: int,
+    completed: set[tuple[int, int]],
+    *,
+    deferred: frozenset[int] = frozenset(),
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """One pass of the existing rotation.
 
     An untouched two-lane field keeps the pairwise cycle, including the lane swap for an even
     field. Once a heat has been driven, a driver sits out, or the roster changes, the remaining
@@ -338,6 +460,15 @@ def _open_heats(
     return build_rotation(active, lane_count)
 
 
+def _repeat(
+    heats: tuple[tuple[tuple[int, int], ...], ...], times: int
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """The same heats, in the same order, ``times`` times. One means the plan itself."""
+    if times <= 1 or not heats:
+        return heats
+    return tuple(heat for _copy in range(times) for heat in heats)
+
+
 def _obligations(
     participants: list[RaceParticipant],
     lane_count: int,
@@ -351,6 +482,21 @@ def _obligations(
             if (participant.id, lane) not in completed:
                 pairs.append((participant.id, lane))
     return pairs
+
+
+def _completed_heat_seats(
+    session: Session, race_id: int
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """Seats of finished heats, in driving order. Repeated assignments stay separate rows."""
+    finished = session.scalars(
+        select(RaceHeat)
+        .where(RaceHeat.race_id == race_id, RaceHeat.status == COMPLETED)
+        .order_by(RaceHeat.sequence)
+    )
+    return tuple(
+        tuple((entry.participant_id, entry.lane) for entry in _entries(session, heat.id))
+        for heat in finished
+    )
 
 
 def _completed_pairs(session: Session, race_id: int) -> set[tuple[int, int]]:

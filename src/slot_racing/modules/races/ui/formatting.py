@@ -14,17 +14,20 @@ from slot_racing.modules.races.time_trial_board import format_lap_seconds
 _MISSING_LAP = "-"
 
 
-def participant_status_key(*, finished: bool, paused: bool, ended: bool) -> str:
+def participant_status_key(
+    *, finished: bool, paused: bool, ended: bool, seated: bool = True
+) -> str:
     """Translation key for one participant.
 
     A participant who has completed the race stays finished even when the race was aborted.
     Everyone else on an ended race is retired. Pause only applies while the race is still open.
+    A driver who is waiting out the current heat is waiting, not racing.
     """
     if finished:
         return "race.participant.finished"
     if ended:
         return "race.participant.retired"
-    if paused:
+    if paused or not seated:
         return "race.participant.waiting"
     return "race.participant.racing"
 
@@ -178,14 +181,18 @@ def ranking_cells(
         row.driver_label,
         row.vehicle_label,
         start_number_text(row.start_number),
-        str(row.lane),
+        str(row.lane) if row.seated else _MISSING_LAP,
         str(row.laps_completed),
-        format_progress_cell(row.current_lap, snapshot.laps),
+        format_progress_cell(row.current_lap, snapshot.laps) if row.seated else _MISSING_LAP,
         format_lap_time(row.last_lap_ns),
         format_lap_time(row.best_lap_ns),
         format_duration(row.total_time_ns),
         format_progress_cell(row.laps_completed, snapshot.laps),
-        tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),
+        tr(
+            participant_status_key(
+                finished=row.finished, paused=paused, ended=ended, seated=row.seated
+            )
+        ),
     )
 
 

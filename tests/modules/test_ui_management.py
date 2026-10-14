@@ -528,9 +528,10 @@ def test_race_flow_through_the_ui(qtbot: QtBot, env: Env) -> None:
     assert runner.snapshot().track_name.endswith("Heimbahn")
     assert runner.snapshot().timing_provider == "simulation"
     assert live.lanes.cards[1].lap_label.text().endswith("2")
-    assert live.table.rowCount() == 2
+    assert live.table.rowCount() == 3
     assert column_text(live.table, 0, "Fahrer") == "Anna"
     assert column_text(live.table, 0, "Fahrzeug") == "Porsche 911"
+    assert {column_text(live.table, row, "Fahrer") for row in range(3)} == {"Anna", "Ben", "Chris"}
 
     for _ in range(80):
         if column_text(live.table, 0, "Runden") != "0":
@@ -645,9 +646,13 @@ def test_wizard_offers_lap_racing_and_a_time_trial(qtbot: QtBot, env: Env) -> No
     assert wizard.mode_combo.currentText() == "Rundenrennen"
     assert not wizard.laps_spin.isHidden()
     labels = [wizard.mode_combo.itemText(index) for index in range(wizard.mode_combo.count())]
-    assert labels == ["Rundenrennen", "Zeitrennen"]
+    assert labels == ["Rundenrennen", "Zeitrennen", "Freies Rennen"]
     wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("time_trial"))
     assert wizard.laps_spin.isHidden()
+    wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("free"))
+    assert wizard.laps_spin.isHidden()
+    assert wizard.duration_edit.isHidden()
+    assert wizard.repetitions_spin.isHidden()
     wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("laps"))
     assert not wizard.laps_spin.isHidden()
 

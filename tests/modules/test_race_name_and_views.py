@@ -36,7 +36,7 @@ from slot_racing.modules.races.hud import (
     coerce,
     field_shown,
 )
-from slot_racing.modules.races.naming import suggest_race_name
+from slot_racing.modules.races.naming import suggest_distinct_name, suggest_race_name
 from slot_racing.modules.races.ui.hud_editor import HudEditor
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.wizard import NAME, START, TRACK
@@ -53,6 +53,17 @@ def test_a_new_race_name_uses_the_local_minute_and_stays_unique() -> None:
     taken = ["2026-10-09 09:12", "2026-10-09 09:12 (2)"]
     assert suggest_race_name(taken, moment) == "2026-10-09 09:12 (3)"
     assert suggest_race_name([" 2026-10-09 09:12 "], moment) == "2026-10-09 09:12 (2)"
+
+
+def test_a_restart_name_is_based_on_the_source_and_never_the_same() -> None:
+    assert suggest_distinct_name("Finale", ["Finale"]) == "Finale (2)"
+    assert suggest_distinct_name("Finale", ["Finale", "Finale (2)"]) == "Finale (3)"
+    assert suggest_distinct_name("  Finale  ", []) == "Finale (2)"
+    long_name = "R" * 100
+    distinct = suggest_distinct_name(long_name, [long_name])
+    assert distinct != long_name
+    assert len(distinct) <= 100
+    assert distinct.endswith(" (2)")
 
 
 def test_a_new_wizard_race_is_prefilled_and_an_existing_name_stays(qtbot: QtBot, env: Env) -> None:

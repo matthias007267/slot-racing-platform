@@ -46,6 +46,9 @@ class RecordingOutput:
             raise self.error
         self.calls.append((tone, volume))
 
+    def release(self) -> None:
+        """Matches :class:`ToneOutput`. Playback tests do not ask for it."""
+
 
 def test_go_tone_is_higher_and_longer_than_the_lamp_tone() -> None:
     lamp = render_tone(LAMP_TONE)
@@ -132,7 +135,7 @@ def test_sink_state_reaches_the_tone_slot_without_a_qaudio_conversion_error(qtbo
     """
     pytest.importorskip("PySide6.QtMultimedia")
     from PySide6.QtCore import QBuffer, QIODevice, Qt
-    from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QtAudio
+    from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink
     from PySide6.QtWidgets import QApplication
 
     from slot_racing.modules.races.ui.qt_tone_output import QtToneOutput
@@ -151,18 +154,20 @@ def test_sink_state_reaches_the_tone_slot_without_a_qaudio_conversion_error(qtbo
     audio_format.setSampleRate(22050)
     audio_format.setChannelCount(1)
     audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-    sink = QAudioSink(audio_format, host)
-    buffer = QBuffer(host)
+    sink = QAudioSink(audio_format, output)
+    buffer = QBuffer(output)
     buffer.setData(b"\x00\x00" * 32)
     assert buffer.open(QIODevice.OpenModeFlag.ReadOnly)
     sink.stateChanged.connect(output._on_sink_state, Qt.ConnectionType.QueuedConnection)
     application = QApplication.instance()
     assert application is not None
-    for state in (QtAudio.State.IdleState, QAudio.State.StoppedState):
-        output._live.append((sink, buffer))
-        sink.stateChanged.emit(state)
-        application.processEvents()
-        assert (sink, buffer) not in output._live
+    output._live.append((sink, buffer))
+    sink.stateChanged.emit(QAudio.State.StoppedState)
+    application.processEvents()
+    _flush_deletes()
+    assert output.retained_count == 0
+    assert output.findChildren(QAudioSink) == []
+    assert output.findChildren(QBuffer) == []
 
 
 def test_playback_returns_immediately_with_or_without_qt(qtbot: QtBot) -> None:
@@ -310,6 +315,124 @@ def test_the_live_view_plays_tones_and_still_starts_on_lights_out(qtbot: QtBot, 
     live.advance_start_cue()
     assert _status(runner) is RaceStatus.RUNNING
     assert [tone for tone, _volume in output.calls] == [LAMP_TONE] * 5 + [GO_TONE]
+
+
+class CountingOutput:
+    """Counts plays and releases. ``held`` is how many tones were started and not released."""
+
+    def __init__(self) -> None:
+        self.plays: list[ToneSpec] = []
+        self.releases = 0
+        self.held = 0
+
+    def play(self, tone: ToneSpec, *, volume: int) -> None:
+        del volume
+        self.plays.append(tone)
+        self.held += 1
+
+    def release(self) -> None:
+        self.releases += 1
+        self.held = 0
+
+
+def test_start_sounds_play_once_and_do_not_accumulate(qtbot: QtBot, env: Env) -> None:
+    """Several races, including a finished start, an abort and a new start.
+
+    Each lamp and the start signal are played once per sequence. The previous
+    cue is deleted, and a release drops whatever the sequence still held.
+    """
+    from slot_racing.modules.races.ui.live_view import LiveRaceView
+    from slot_racing.modules.races.ui.start_cue import StartCue
+
+    live = LiveRaceView(env.runtime.translator, env.controller)
+    qtbot.addWidget(live)
+    output = CountingOutput()
+    live.audio = RaceAudio(output)
+
+    def finish_sequence() -> None:
+        start = len(output.plays)
+        live.begin_start_cue()
+        for _ in range(START_LIGHT_COUNT):
+            live.advance_start_cue()
+        live.advance_start_cue()
+        assert output.plays[start:] == [LAMP_TONE] * START_LIGHT_COUNT + [GO_TONE]
+        assert output.held == 0
+
+    def abort_sequence() -> None:
+        start = len(output.plays)
+        live.begin_start_cue()
+        live.advance_start_cue()
+        live._cancel_cue()
+        assert output.plays[start:] == [LAMP_TONE, LAMP_TONE]
+        assert output.held == 0
+        _flush_deletes()
+        assert live.findChildren(StartCue) == []
+
+    finish_sequence()
+    abort_sequence()
+    finish_sequence()
+    _flush_deletes()
+    assert len(live.findChildren(StartCue)) == 1
+    finish_sequence()
+    _flush_deletes()
+    assert len(live.findChildren(StartCue)) == 1
+    assert output.held == 0
+    assert output.releases >= 3
+    assert len(output.plays) == (START_LIGHT_COUNT + 1) * 3 + 2
+
+
+def test_repeated_playback_retains_at_most_one_sink(qtbot: QtBot) -> None:
+    """A new tone replaces the previous sink. Finishing a race drops that sink too."""
+    pytest.importorskip("PySide6.QtMultimedia")
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtMultimedia import QAudioFormat, QAudioSink
+    from PySide6.QtWidgets import QApplication
+
+    from slot_racing.modules.races.ui.qt_tone_output import QtToneOutput
+
+    host = QWidget()
+    qtbot.addWidget(host)
+    output = QtToneOutput(host)
+    application = QApplication.instance()
+    assert application is not None
+    for _ in range(12):
+        output.play(LAMP_TONE, volume=30)
+        output.play(GO_TONE, volume=30)
+        assert output.retained_count <= 1
+        application.processEvents()
+        assert len(output.findChildren(QAudioSink)) <= 1
+    output.release()
+    _flush_deletes()
+    assert output.retained_count == 0
+    assert output.findChildren(QAudioSink) == []
+    assert output.findChildren(QBuffer) == []
+
+    audio_format = QAudioFormat()
+    audio_format.setSampleRate(22050)
+    audio_format.setChannelCount(1)
+    audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    for _ in range(3):
+        sink = QAudioSink(audio_format, output)
+        buffer = QBuffer(output)
+        buffer.setData(b"\x00\x00" * 8)
+        assert buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        sink.stateChanged.connect(output._on_sink_state)
+        output._live.append((sink, buffer))
+    assert output.retained_count == 3
+    output.release()
+    _flush_deletes()
+    assert output.retained_count == 0
+    assert output.findChildren(QAudioSink) == []
+    assert output.findChildren(QBuffer) == []
+    output.release()
+    assert output.retained_count == 0
+
+
+def _flush_deletes() -> None:
+    """``deleteLater`` is not run by ``processEvents``. The real event loop does run it."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def _status(runner: RaceRunner) -> RaceStatus:

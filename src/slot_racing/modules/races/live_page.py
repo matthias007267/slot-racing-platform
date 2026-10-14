@@ -915,7 +915,7 @@ _HUD_HTML = """<!DOCTYPE html>
     var ordered = [];
     for (index = 0; index < rows.length; index += 1) {
       var row = rows[index];
-      var key = "row-" + String(row.lane);
+      var key = "row-" + String(row.participant_id || row.lane);
       keep[key] = true;
       var tr = ensure(body, key, "tr");
       tr.className = row.leader ? "leader" : "";

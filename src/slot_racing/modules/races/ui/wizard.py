@@ -31,7 +31,12 @@ from slot_racing.modules.races.hud import (
     ViewStyle,
 )
 from slot_racing.modules.races.naming import suggest_race_name
-from slot_racing.modules.races.service import MAX_LAPS, RaceService, parse_duration_minutes
+from slot_racing.modules.races.service import (
+    MAX_LAPS,
+    MAX_REPETITIONS,
+    RaceService,
+    parse_duration_minutes,
+)
 from slot_racing.modules.races.types import RaceInfo
 from slot_racing.modules.races.ui.race_briefing import (
     BriefingBoard,
@@ -114,6 +119,7 @@ class RaceWizard(QWidget):
         self.mode_combo.setObjectName("race-mode")
         self.mode_combo.addItem(tr("race.wizard.mode.laps"), RaceMode.LAPS.value)
         self.mode_combo.addItem(tr("race.wizard.mode.time_trial"), RaceMode.TIME_TRIAL.value)
+        self.mode_combo.addItem(tr("race.wizard.mode.free"), RaceMode.FREE.value)
         self.laps_caption = QLabel(tr("race.wizard.laps"))
         self.laps_caption.setObjectName("race-laps-label")
         self.laps_caption.setWordWrap(True)
@@ -136,6 +142,52 @@ class RaceWizard(QWidget):
         self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.one"), 1)
         self.active_lanes_combo.addItem(tr("race.wizard.active_lanes.two"), 2)
         self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
+        self.repetitions_caption = QLabel(tr("race.wizard.repetitions"))
+        self.repetitions_caption.setObjectName("race-repetitions-label")
+        self.repetitions_caption.setWordWrap(True)
+        self.repetitions_spin = QSpinBox()
+        self.repetitions_spin.setObjectName("race-repetitions")
+        self.repetitions_spin.setRange(1, MAX_REPETITIONS)
+        self.repetitions_spin.setValue(1)
+        self.repetitions_hint = QLabel(tr("race.wizard.repetitions.hint"))
+        self.repetitions_hint.setObjectName("race-repetitions-hint")
+        self.repetitions_hint.setWordWrap(True)
+        self.free_hint = QLabel(tr("race.wizard.free.hint"))
+        self.free_hint.setObjectName("race-free-hint")
+        self.free_hint.setWordWrap(True)
+        self.free_hint.hide()
+        self._roster_captions: list[QLabel] = []
+        self.free_seats = QWidget()
+        self.free_seats.setObjectName("race-free-seats")
+        self._free_drivers: dict[int, QComboBox] = {}
+        self._free_vehicles: dict[int, QComboBox] = {}
+        seats = QVBoxLayout(self.free_seats)
+        seats.setContentsMargins(0, 0, 0, 0)
+        seats.setSpacing(SPACE.sm)
+        for lane in (1, 2):
+            driver_combo = QComboBox()
+            driver_combo.setObjectName(f"free-driver-{lane}")
+            vehicle_combo = QComboBox()
+            vehicle_combo.setObjectName(f"free-vehicle-{lane}")
+            self._free_drivers[lane] = driver_combo
+            self._free_vehicles[lane] = vehicle_combo
+            driver_combo.currentIndexChanged.connect(
+                lambda _index, chosen=lane: self._reload_free_vehicles(chosen)
+            )
+            caption = QLabel(self.translator.format("race.wizard.free.lane", lane=lane))
+            caption.setObjectName(f"free-lane-{lane}")
+            row = QHBoxLayout()
+            for label_key, combo in (
+                ("race.wizard.driver", driver_combo),
+                ("race.wizard.vehicle", vehicle_combo),
+            ):
+                column = QVBoxLayout()
+                column.addWidget(_caption(tr(label_key)))
+                column.addWidget(combo)
+                row.addLayout(column, 1)
+            seats.addWidget(caption)
+            seats.addLayout(row)
+        self.free_seats.hide()
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("race-driver")
         self.vehicle_combo = QComboBox()
@@ -240,6 +292,7 @@ class RaceWizard(QWidget):
             self.laps_spin.setValue(5)
             self.duration_edit.setText("5")
             self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(2))
+            self.repetitions_spin.setValue(1)
         else:
             self.name_edit.setText(self._race.name)
             self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._race.mode.value)))
@@ -252,6 +305,7 @@ class RaceWizard(QWidget):
             self.track_combo.setCurrentIndex(max(0, self.track_combo.findData(self._race.track_id)))
             chosen = 1 if self._race.active_lanes == 1 else 2
             self.active_lanes_combo.setCurrentIndex(self.active_lanes_combo.findData(chosen))
+            self.repetitions_spin.setValue(self._race.repetitions)
         self._sync_lap_target()
         self._sync_active_lanes()
         self._cancel_participant_edit()
@@ -318,14 +372,21 @@ class RaceWizard(QWidget):
                 layout.addLayout(duration_row)
                 layout.addWidget(self.active_lanes_caption)
                 layout.addWidget(self.active_lanes_combo)
+                layout.addWidget(self.repetitions_caption)
+                layout.addWidget(self.repetitions_spin)
+                layout.addWidget(self.repetitions_hint)
+                layout.addWidget(self.free_hint)
             elif index == PARTICIPANTS:
                 row = QHBoxLayout()
+                self._roster_captions = []
                 for label, combo in (
                     ("race.wizard.driver", self.driver_combo),
                     ("race.wizard.vehicle", self.vehicle_combo),
                 ):
                     column = QVBoxLayout()
-                    column.addWidget(_caption(tr(label)))
+                    caption = _caption(tr(label))
+                    self._roster_captions.append(caption)
+                    column.addWidget(caption)
                     column.addWidget(combo)
                     row.addLayout(column, 1)
                 layout.addLayout(row)
@@ -336,6 +397,7 @@ class RaceWizard(QWidget):
                 actions.addStretch(1)
                 layout.addLayout(actions)
                 layout.addWidget(self.participant_table, 1)
+                layout.addWidget(self.free_seats)
             elif index == OVERVIEW:
                 layout.addWidget(_scroll(self.overview_board), 1)
             else:
@@ -440,7 +502,9 @@ class RaceWizard(QWidget):
         if step == TRACK:
             self._reload_providers()
         if step == MODE:
-            self._sync_active_lanes()
+            self._sync_lap_target()
+        if step == PARTICIPANTS:
+            self._sync_participant_form()
         if step == OVERVIEW:
             self.overview_label.setText(self._overview_text())
             self._apply_board_style(VIEW_PRESTART)
@@ -475,10 +539,13 @@ class RaceWizard(QWidget):
         elif step == PARTICIPANTS:
             if not self._drivers.list_drivers():
                 raise ValidationError("error.race.no_drivers")
-            if self._race is None or not self._race.participants:
-                raise ValidationError("error.race.no_participants")
-            self._service.plan_heats(self._race_id())
-            self._race = self._service.require_race(self._race_id())
+            if self._selected_mode() is RaceMode.FREE:
+                self._save_free_seats()
+            else:
+                if self._race is None or not self._race.participants:
+                    raise ValidationError("error.race.no_participants")
+                self._service.plan_heats(self._race_id())
+                self._race = self._service.require_race(self._race_id())
         elif step == OVERVIEW:
             self._race = self._service.validate_startable(self._race_id())
         self.status.clear_message()
@@ -496,12 +563,20 @@ class RaceWizard(QWidget):
         return RaceMode.LAPS if value is None else RaceMode(str(value))
 
     def _sync_lap_target(self) -> None:
-        show_laps = self._selected_mode() is RaceMode.LAPS
+        mode = self._selected_mode()
+        show_laps = mode is RaceMode.LAPS
+        show_duration = mode is RaceMode.TIME_TRIAL
+        show_repetitions = mode is not RaceMode.FREE
         self.laps_caption.setVisible(show_laps)
         self.laps_spin.setVisible(show_laps)
-        self.duration_caption.setVisible(not show_laps)
-        self.duration_edit.setVisible(not show_laps)
-        self.duration_unit.setVisible(not show_laps)
+        self.duration_caption.setVisible(show_duration)
+        self.duration_edit.setVisible(show_duration)
+        self.duration_unit.setVisible(show_duration)
+        self.repetitions_caption.setVisible(show_repetitions)
+        self.repetitions_spin.setVisible(show_repetitions)
+        self.repetitions_hint.setVisible(show_repetitions)
+        self.free_hint.setVisible(mode is RaceMode.FREE)
+        self._sync_active_lanes()
 
     def _physical_lanes(self) -> int:
         track_id = self.track_combo.currentData()
@@ -510,7 +585,7 @@ class RaceWizard(QWidget):
 
     def _sync_active_lanes(self) -> None:
         """Offer one or two lanes only when the chosen track has exactly two."""
-        offered = self._physical_lanes() == 2
+        offered = self._physical_lanes() == 2 and self._selected_mode() is not RaceMode.FREE
         locked = False
         if self._race is not None:
             started = any(
@@ -532,16 +607,31 @@ class RaceWizard(QWidget):
         provider = self._check_provider()
         mode = self._selected_mode()
         laps = self.laps_spin.value()
-        duration = (
-            None if mode is RaceMode.LAPS else parse_duration_minutes(self.duration_edit.text())
-        )
-        chosen_lanes = self._selected_active_lanes()
+        repetitions = self.repetitions_spin.value()
+        if mode is RaceMode.LAPS:
+            duration = None
+        elif mode is RaceMode.FREE:
+            duration = None
+            laps = 0
+        else:
+            duration = parse_duration_minutes(self.duration_edit.text())
+        if mode is RaceMode.FREE and self._physical_lanes() == 2:
+            chosen_lanes: int | None = 2
+        elif mode is RaceMode.FREE:
+            chosen_lanes = None
+        else:
+            chosen_lanes = self._selected_active_lanes()
         if self._race is None:
-            self._race = (
-                self._service.create_time_trial(name, track_id, provider, duration)
-                if mode is RaceMode.TIME_TRIAL
-                else self._service.create_race(name, track_id, laps, provider)
-            )
+            if mode is RaceMode.TIME_TRIAL:
+                self._race = self._service.create_time_trial(
+                    name, track_id, provider, duration, repetitions=repetitions
+                )
+            elif mode is RaceMode.FREE:
+                self._race = self._service.create_free_race(name, track_id, provider)
+            else:
+                self._race = self._service.create_race(
+                    name, track_id, laps, provider, repetitions=repetitions
+                )
         self._race = self._service.update_race(
             self._race.id,
             name,
@@ -553,8 +643,87 @@ class RaceWizard(QWidget):
             set_duration=True,
             active_lanes=chosen_lanes,
             set_active_lanes=True,
+            repetitions=repetitions,
+            set_repetitions=mode is not RaceMode.FREE,
         )
         self._refresh_participants()
+
+    def _sync_participant_form(self) -> None:
+        free = self._selected_mode() is RaceMode.FREE
+        self.free_seats.setVisible(free)
+        for lane, combo in self._free_drivers.items():
+            visible = free and lane <= max(self._physical_lanes(), 1)
+            combo.setVisible(visible)
+            self._free_vehicles[lane].setVisible(visible)
+            caption = self.free_seats.findChild(QLabel, f"free-lane-{lane}")
+            if caption is not None:
+                caption.setVisible(visible)
+        for caption in self._roster_captions:
+            caption.setVisible(not free)
+        self.driver_combo.setVisible(not free)
+        self.vehicle_combo.setVisible(not free)
+        self.add_participant_button.setVisible(not free)
+        self.edit_participant_button.setVisible(not free)
+        self.remove_participant_button.setVisible(not free)
+        self.participant_table.setVisible(not free)
+        if free:
+            self._fill_free_seats()
+
+    def _fill_free_seats(self) -> None:
+        blank = self.translator.translate("race.wizard.free.empty")
+        drivers = self._drivers.list_drivers(active_only=True)
+        assigned = {
+            participant.lane: participant
+            for participant in (() if self._race is None else self._race.participants)
+            if participant.lane is not None
+        }
+        for lane, combo in self._free_drivers.items():
+            current = assigned.get(lane)
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(blank, None)
+            for driver in drivers:
+                combo.addItem(driver.label, driver.id)
+            if current is not None:
+                combo.setCurrentIndex(max(0, combo.findData(current.driver_id)))
+            combo.blockSignals(False)
+            self._reload_free_vehicles(lane)
+            if current is not None and current.vehicle_id is not None:
+                vehicle_combo = self._free_vehicles[lane]
+                vehicle_combo.setCurrentIndex(max(0, vehicle_combo.findData(current.vehicle_id)))
+
+    def _reload_free_vehicles(self, lane: int) -> None:
+        blank = self.translator.translate("race.wizard.free.empty")
+        combo = self._free_vehicles[lane]
+        combo.clear()
+        combo.addItem(blank, None)
+        for vehicle in self._vehicles.list_vehicles(active_only=True):
+            combo.addItem(vehicle.label, vehicle.id)
+        driver_id = self._free_drivers[lane].currentData()
+        if driver_id is None:
+            return
+        owned = self._vehicles.list_vehicles(active_only=True, driver_id=DriverId(driver_id))
+        if not owned:
+            return
+        favorite = next((vehicle for vehicle in owned if vehicle.is_favorite), None)
+        chosen = owned[0] if favorite is None else favorite
+        combo.setCurrentIndex(max(0, combo.findData(chosen.id)))
+
+    def _save_free_seats(self) -> None:
+        seats: list[tuple[int, DriverId, VehicleId]] = []
+        for lane, driver_combo in self._free_drivers.items():
+            if lane > self._physical_lanes():
+                continue
+            driver_id = driver_combo.currentData()
+            vehicle_id = self._free_vehicles[lane].currentData()
+            if driver_id is None and vehicle_id is None:
+                continue
+            if driver_id is None or vehicle_id is None:
+                raise ValidationError("error.race.participant_required")
+            seats.append((lane, DriverId(driver_id), VehicleId(vehicle_id)))
+        self._race = self._service.set_free_assignments(self._race_id(), seats)
+        self._refresh_participants()
+        self.status.clear_message()
 
     def _add_participant(self) -> None:
         driver_id = self.driver_combo.currentData()
@@ -642,30 +811,44 @@ class RaceWizard(QWidget):
         race = self._race
         if race is None:
             return ""
+        if race.mode is RaceMode.FREE:
+            mode_line = fmt("race.overview.free")
+        elif race.mode is RaceMode.TIME_TRIAL:
+            mode_line = fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
+        else:
+            mode_line = fmt("race.overview.laps", laps=race.laps)
         lines = [
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
             fmt("race.overview.active_lanes", lanes=race.active_lanes),
-            (
-                fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
-                if race.mode is RaceMode.TIME_TRIAL
-                else fmt("race.overview.laps", laps=race.laps)
-            ),
+            mode_line,
             fmt(
                 "race.overview.provider",
                 provider=provider_label(self.translator, race.timing_provider),
             ),
-            "",
-            self.translator.translate("race.overview.participants"),
         ]
-        lines.extend(
-            fmt(
-                "race.overview.participant",
-                driver=p.driver_label,
-                vehicle=p.vehicle_label,
+        if race.mode is not RaceMode.FREE:
+            lines.append(fmt("race.overview.repetitions", count=race.repetitions))
+        lines.extend(["", self.translator.translate("race.overview.participants")])
+        if race.mode is RaceMode.FREE:
+            lines.extend(
+                fmt(
+                    "race.overview.free_participant",
+                    lane=p.lane or 0,
+                    driver=p.driver_label,
+                    vehicle=p.vehicle_label,
+                )
+                for p in sorted(race.participants, key=lambda person: person.lane or 0)
             )
-            for p in race.participants
-        )
+        else:
+            lines.extend(
+                fmt(
+                    "race.overview.participant",
+                    driver=p.driver_label,
+                    vehicle=p.vehicle_label,
+                )
+                for p in race.participants
+            )
         plan = self._service.heat_plan(race.id)
         if plan:
             lines.append("")
@@ -676,7 +859,14 @@ class RaceWizard(QWidget):
                     fmt("race.heat.seat", lane=lane, driver=names.get(participant_id, ""))
                     for participant_id, lane in heat.seats
                 )
-                lines.append(fmt("race.overview.heat", sequence=heat.sequence, seats=seated))
+                lines.append(
+                    fmt(
+                        "race.overview.heat",
+                        sequence=heat.sequence,
+                        total=len(plan),
+                        seats=seated,
+                    )
+                )
         return "\n".join(lines)
 
     def _show_overview_board(self) -> None:
@@ -696,6 +886,9 @@ class RaceWizard(QWidget):
         apply_text_size(self.duration_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
         apply_text_size(self.duration_unit, FONT_CAPTION, max(self.width(), 640), bold=False)
         apply_text_size(self.active_lanes_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.repetitions_caption, FONT_CAPTION, max(self.width(), 640), bold=True)
+        apply_text_size(self.repetitions_hint, FONT_CAPTION, max(self.width(), 640), bold=False)
+        apply_text_size(self.free_hint, FONT_CAPTION, max(self.width(), 640), bold=False)
         apply_text_size(self.provider_status, FONT_CAPTION, max(self.width(), 640), bold=False)
 
     def resizeEvent(self, event: object) -> None:  # noqa: N802
@@ -718,7 +911,10 @@ class RaceWizard(QWidget):
             return
         fmt = self.translator.format
         free = self.translator.translate("race.time_trial.free")
-        lines = [fmt("race.heat.title", sequence=briefing.sequence), ""]
+        lines = [
+            fmt("race.heat.title", sequence=briefing.sequence, total=briefing.heat_count),
+            "",
+        ]
         for seat in briefing.seats:
             lines.append(fmt("race.heat.seat", lane=seat.lane, driver=seat.driver_label or free))
         lines.extend(["", self.translator.translate("race.heat.ready_hint")])

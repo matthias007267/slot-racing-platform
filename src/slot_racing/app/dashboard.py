@@ -212,11 +212,12 @@ class DashboardPage(QWidget):
             translate(f"race.status.{summary.status.value}"),
             _RACE_TONE.get(summary.status, "info"),
         )
-        meta_key = (
-            "dashboard.race.meta_time_trial"
-            if summary.mode is RaceMode.TIME_TRIAL
-            else "dashboard.race.meta"
-        )
+        if summary.mode is RaceMode.TIME_TRIAL:
+            meta_key = "dashboard.race.meta_time_trial"
+        elif summary.mode is RaceMode.FREE:
+            meta_key = "dashboard.race.meta_free"
+        else:
+            meta_key = "dashboard.race.meta"
         meta = QLabel(
             self._runtime.translator.format(
                 meta_key,

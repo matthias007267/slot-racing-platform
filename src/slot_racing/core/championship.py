@@ -1,7 +1,8 @@
 """Championship points from stored race results.
 
 The functions read plain facts and return plain facts. A race that is not finished awards
-nothing. A disqualified driver receives no placement points and no fastest-lap bonus.
+nothing. A free session is not a championship round, even when it is finished and its laps
+are present. A disqualified driver receives no placement points and no fastest-lap bonus.
 One driver is scored once per race: the participant model already allows only one row, and a
 second row would still not add a second score. Dropped results stay visible. Nothing here
 invents a place or a point.
@@ -13,7 +14,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from slot_racing.core.domain.race import RaceStatus
-from slot_racing.core.statistics import HistoryParticipant, HistoryRace, scoring_lap_times
+from slot_racing.core.statistics import (
+    HistoryParticipant,
+    HistoryRace,
+    counts_for_standings,
+    scoring_lap_times,
+)
 
 DEFAULT_PLACE_POINTS: tuple[tuple[int, int], ...] = (
     (1, 25),
@@ -95,7 +101,11 @@ def score_championship(
     races: Sequence[HistoryRace],
     rule: PointsRule,
 ) -> tuple[DriverStanding, ...]:
-    """Driver table in championship order. ``races`` is the stored calendar order."""
+    """Driver table in championship order. ``races`` is the stored calendar order.
+
+    Free sessions are removed before scoring, so they add neither a round nor a point.
+    """
+    races = tuple(race for race in races if counts_for_standings(race.mode))
     scored = [_score_race(race, rule) for race in races]
     driver_ids = sorted({driver_id for race_scores in scored for driver_id in race_scores})
     labels = {
@@ -204,6 +214,8 @@ class _TeamMutable:
 
 
 def _score_race(race: HistoryRace, rule: PointsRule) -> dict[int, RaceScore]:
+    if not counts_for_standings(race.mode):
+        return {}
     official = race.status is RaceStatus.FINISHED
     chosen = _one_start_each(race.participants)
     fastest = _fastest_time(race, chosen) if official else None

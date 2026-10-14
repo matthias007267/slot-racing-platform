@@ -17,3 +17,24 @@ def suggest_race_name(taken: Iterable[str], moment: datetime | None = None) -> s
     while f"{base} ({number})" in used:
         number += 1
     return f"{base} ({number})"
+
+
+def suggest_distinct_name(source: str, taken: Iterable[str]) -> str:
+    """A name based on ``source`` that is never the source itself.
+
+    The first proposal is ``source (2)``. A name that is already stored uses the next number.
+    The result stays within the 100 characters a race name allows.
+    """
+    base = source.strip() or "Rennen"
+    used = {name.strip() for name in taken}
+    number = 2
+    while number < 10000:
+        suffix = f" ({number})"
+        stem = base
+        if len(stem) + len(suffix) > 100:
+            stem = stem[: 100 - len(suffix)].rstrip() or "Rennen"
+        candidate = f"{stem}{suffix}"
+        if candidate not in used:
+            return candidate
+        number += 1
+    return "Rennen (2)"

@@ -23,8 +23,10 @@ from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.races.types import RaceInfo
 from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.restart_dialog import RestartDialog
 from slot_racing.modules.races.ui.results_view import ResultsView
 from slot_racing.modules.races.ui.start_cue import uses_start_cue
 from slot_racing.modules.races.ui.wizard import RaceWizard
@@ -40,6 +42,14 @@ from slot_racing.uikit.theme import SPACE, configure_page, set_role
 from slot_racing.uikit.widgets import ID_ROLE, format_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _race_target(translate: Callable[[str], str], race: RaceInfo) -> str:
+    if race.mode is RaceMode.TIME_TRIAL:
+        return translate("race.wizard.mode.time_trial")
+    if race.mode is RaceMode.FREE:
+        return translate("race.wizard.mode.free")
+    return str(race.laps)
 
 
 class RacesPage(QWidget):
@@ -60,6 +70,9 @@ class RacesPage(QWidget):
         self.translator = translator
         self._service = service
         self._controller = controller
+        self._drivers = drivers
+        self._vehicles = vehicles
+        self.restart_dialog: RestartDialog | None = None
         self.confirm: Callable[[str], bool] = lambda text: (
             QMessageBox.question(self, translator.translate("common.confirm"), text)
             == QMessageBox.StandardButton.Yes
@@ -115,7 +128,16 @@ class RacesPage(QWidget):
                 enabled=config.live_broadcast_enabled,
                 port=config.live_broadcast_port,
             )
-        self.live = LiveRaceView(translator, controller, hud_store, service, config, broadcast)
+        self.live = LiveRaceView(
+            translator,
+            controller,
+            hud_store,
+            service,
+            config,
+            broadcast,
+            drivers=drivers,
+            vehicles=vehicles,
+        )
         self.results = ResultsView(translator, service, hud_store)
         self.stack = QStackedWidget()
         # The list's preferred width must not stop the live race from using a small window.
@@ -230,9 +252,17 @@ class RacesPage(QWidget):
         self.stack.setCurrentWidget(self.live)
 
     def _restart(self, race_id: RaceId) -> None:
-        created = self._service.restart_aborted(race_id)
+        preview = self._service.restart_preview(race_id)
+        dialog = RestartDialog(
+            self.translator, self._service, self._drivers, self._vehicles, preview
+        )
+        self.restart_dialog = dialog
+        dialog.created.connect(self._show_restarted)
+        dialog.open()
+
+    def _show_restarted(self, race_id: int) -> None:
         self._reload()
-        self._select(created.id)
+        self._select(RaceId(race_id))
         self.status.show_info(self.translator.translate("race.list.restarted"))
 
     def _select(self, race_id: RaceId) -> None:
@@ -259,11 +289,7 @@ class RacesPage(QWidget):
                     race.name,
                     race.track_name,
                     tr(f"race.status.{race.status.value}"),
-                    (
-                        tr("race.wizard.mode.time_trial")
-                        if race.mode is RaceMode.TIME_TRIAL
-                        else str(race.laps)
-                    ),
+                    _race_target(tr, race),
                     str(len(race.participants)),
                     format_datetime(race.created_at),
                 )
@@ -278,9 +304,12 @@ class RacesPage(QWidget):
         selected = None if race_id is None else self._service.get_race(RaceId(race_id))
         self.buttons["edit"].setEnabled(selected is not None and selected.is_editable)
         self.buttons["start"].setEnabled(selected is not None and selected.is_editable)
-        aborted = selected is not None and selected.status is RaceStatus.ABORTED
-        self.buttons["restart"].setVisible(aborted)
-        self.buttons["restart"].setEnabled(aborted)
+        restartable = selected is not None and selected.status in (
+            RaceStatus.FINISHED,
+            RaceStatus.ABORTED,
+        )
+        self.buttons["restart"].setVisible(restartable)
+        self.buttons["restart"].setEnabled(restartable)
         self.buttons["results"].setEnabled(selected is not None)
         self.buttons["delete"].setEnabled(selected is not None)
         self.buttons["live"].setEnabled(self._controller.active is not None)
