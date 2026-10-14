@@ -31,6 +31,7 @@ from slot_racing.modules.races.hud import (
     effective_px,
     normalize_between_ranking,
     project_ranking_cells,
+    ranking_column_pixels,
     visible_ranking_columns,
 )
 from slot_racing.modules.races.runner import RaceSnapshot
@@ -61,16 +62,18 @@ class ConfiguredRanking(QFrame):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setSortingEnabled(False)
         self.table.setWordWrap(False)
-        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         header.setStretchLastSection(False)
         header.setMinimumSectionSize(1)
+        self._column_ids: tuple[str, ...] = ()
+        self._widths: tuple[tuple[str, int], ...] = ()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
@@ -98,6 +101,7 @@ class ConfiguredRanking(QFrame):
         self.empty.setVisible(not column_ids)
         self.table.setVisible(bool(column_ids))
         if not column_ids:
+            self._column_ids = ()
             self.table.setRowCount(0)
             return
         ended = snapshot.status is RaceStatus.FINISHED
@@ -114,7 +118,29 @@ class ConfiguredRanking(QFrame):
             ],
             [row.participant_id or row.lane for row in ranking],
         )
-        self.table.resizeColumnsToContents()
+        self._column_ids = column_ids
+        self._widths = normalized.widths
+        self.apply_widths()
+
+    def resizeEvent(self, event: object) -> None:  # noqa: N802
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        self.apply_widths()
+
+    def apply_widths(self) -> None:
+        """Saved shares of this table. Content measurement does not change them."""
+        if not self._column_ids:
+            return
+        viewport = self.table.viewport().width()
+        if viewport <= 1:
+            viewport = max(self.table.width(), self.width())
+        if viewport <= 1:
+            return
+        pixels = dict(ranking_column_pixels(self._column_ids, self._widths, viewport))
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for index, column_id in enumerate(self._column_ids):
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(index, max(pixels[column_id], 1))
 
 
 class BetweenSurface(QWidget):

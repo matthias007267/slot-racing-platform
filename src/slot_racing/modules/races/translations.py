@@ -147,6 +147,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hud.group.shares": "Bereiche",
         "hud.group.lights": "Startampel",
         "hud.group.between_ranking": "Rangliste zwischen den Durchläufen",
+        "hud.group.ranking_widths": "Spaltenbreiten der Live-Rangliste",
+        "hud.ranking.reset_widths": "Spaltenbreiten zurücksetzen",
         "hud.ranking.visible": "Rangliste anzeigen",
         "hud.ranking.x": "Position X",
         "hud.ranking.y": "Position Y",

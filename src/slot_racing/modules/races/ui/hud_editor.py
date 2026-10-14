@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStyle,
+    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -59,7 +61,9 @@ from slot_racing.modules.races.hud import (
     LIGHT_ASPECT,
     MIN_SPAN,
     PANEL_RECORDS,
+    RANKING_COLUMN_IDS,
     RANKING_COLUMN_LABELS,
+    RANKING_WIDTH_MIN,
     REGION_IDS,
     SCALE_MAX,
     SCALE_MIN,
@@ -79,9 +83,11 @@ from slot_racing.modules.races.hud import (
     LightFrame,
     ViewStyle,
     add_layout,
+    assign_column_share,
     delete_layout,
     effective_light_scale,
     factory_layout,
+    factory_ranking_widths,
     light_frame,
     light_frame_from_box,
     light_pixels,
@@ -90,6 +96,7 @@ from slot_racing.modules.races.hud import (
     normalize_between_ranking,
     normalize_light,
     ranking_columns,
+    ranking_width_shares,
     region_frame,
     regions_ready,
     replace_layout,
@@ -99,7 +106,9 @@ from slot_racing.modules.races.hud import (
     snap_rect,
     snap_scale,
     snap_share,
+    split_ranking_boundary,
     to_document,
+    visible_ranking_columns,
     with_view,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
@@ -444,11 +453,19 @@ class HudGrid(QWidget):
         painter.end()
 
 
+_COLUMN_GRIP = 5
+
+
 class PlacementHandle(QWidget):
-    """One HUD element in the editor. A drag moves it; the corner changes its size."""
+    """One HUD element in the editor. A drag moves it; the corner changes its size.
+
+    A column border on a bound ranking table resizes that column. It does not
+    move the element.
+    """
 
     changed = Signal(float, float, float, float)
     selected = Signal(str)
+    boundary = Signal(str, str, int, int)
 
     def __init__(self, element_id: str, parent: QWidget) -> None:
         super().__init__(parent)
@@ -459,11 +476,22 @@ class PlacementHandle(QWidget):
             name = f"hud-region-{element_id}"
         self.setObjectName(name)
         self._drag: tuple[str, float, float, tuple[float, float, float, float]] | None = None
+        self._boundary: tuple[str, str, float, int, int] | None = None
         self._active = False
+        self._table_of: Callable[[], QTableWidget | None] | None = None
+        self._ids_of: Callable[[], tuple[str, ...]] | None = None
         self.setMouseTracking(True)
         self.setMinimumSize(0, 0)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def bind_columns(
+        self,
+        table_of: Callable[[], QTableWidget | None],
+        ids_of: Callable[[], tuple[str, ...]],
+    ) -> None:
+        self._table_of = table_of
+        self._ids_of = ids_of
 
     def set_active(self, active: bool) -> None:
         if self._active == active:
@@ -499,26 +527,43 @@ class PlacementHandle(QWidget):
         parent = self.parentWidget()
         if parent is None or parent.width() <= 1 or parent.height() <= 1:
             return
+        pos = event.position().toPoint()
+        border = self._column_border(pos)
+        if border is not None:
+            left_id, right_id, left_px, pair_px = border
+            self._boundary = (left_id, right_id, event.globalPosition().x(), left_px, pair_px)
+            self._drag = None
+            self.selected.emit(self.element_id)
+            event.accept()
+            return
         origin = (
             self.x() / parent.width(),
             self.y() / parent.height(),
             self.width() / parent.width(),
             self.height() / parent.height(),
         )
-        pos = event.position().toPoint()
         mode = "resize" if self._on_grip(pos) else "move"
         global_pos = event.globalPosition()
+        self._boundary = None
         self._drag = (mode, global_pos.x(), global_pos.y(), origin)
         self.selected.emit(self.element_id)
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._boundary is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            left_id, right_id, start_x, left_px, pair_px = self._boundary
+            moved = left_px + round(event.globalPosition().x() - start_x)
+            self.boundary.emit(left_id, right_id, moved, pair_px)
+            event.accept()
+            return
         if self._drag is None or not event.buttons() & Qt.MouseButton.LeftButton:
-            self.setCursor(
-                Qt.CursorShape.SizeFDiagCursor
-                if self._on_grip(event.position().toPoint())
-                else Qt.CursorShape.SizeAllCursor
-            )
+            pos = event.position().toPoint()
+            if self._column_border(pos) is not None:
+                self.setCursor(Qt.CursorShape.SplitHCursor)
+            elif self._on_grip(pos):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            else:
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
         parent = self.parentWidget()
         if parent is None:
@@ -535,7 +580,47 @@ class PlacementHandle(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._drag = None
+        self._boundary = None
         event.accept()
+
+    def _column_border(self, pos: QPoint) -> tuple[str, str, int, int] | None:
+        """The column ids and pixel widths on either side of a header grip."""
+        if self._table_of is None or self._ids_of is None:
+            return None
+        table = self._table_of()
+        parent = self.parentWidget()
+        if table is None or parent is None or not table.isVisible():
+            return None
+        header = table.horizontalHeader()
+        if not isinstance(header, QHeaderView):
+            return None
+        origin = header.mapTo(parent, QPoint(0, 0))
+        local = QPoint(self.x() + pos.x() - origin.x(), self.y() + pos.y() - origin.y())
+        if (
+            local.y() < 0
+            or local.y() > header.height()
+            or local.x() < 0
+            or local.x() > header.width()
+        ):
+            return None
+        ids = self._ids_of()
+        visible = [
+            index
+            for index in range(header.count())
+            if not header.isSectionHidden(index) and index < len(ids)
+        ]
+        for cursor, index in enumerate(visible[:-1]):
+            right = header.sectionViewportPosition(index) + header.sectionSize(index)
+            if abs(local.x() - right) > _COLUMN_GRIP:
+                continue
+            nxt = visible[cursor + 1]
+            return (
+                ids[index],
+                ids[nxt],
+                header.sectionSize(index),
+                header.sectionSize(index) + header.sectionSize(nxt),
+            )
+        return None
 
     def _on_grip(self, pos: QPoint) -> bool:
         return pos.x() >= self.width() - _HANDLE and pos.y() >= self.height() - _HANDLE
@@ -644,11 +729,23 @@ class HudEditor(QWidget):
         self._ranking_handle = PlacementHandle("between_ranking", self.between.surface)
         self._ranking_handle.changed.connect(self._on_ranking_drag)
         self._ranking_handle.selected.connect(self._select)
+        ranking_handle = self._region_handles["ranking"]
+        ranking_handle.bind_columns(lambda: self.stage.ranking.table, lambda: RANKING_COLUMN_IDS)
+        ranking_handle.boundary.connect(self._on_live_boundary)
+        self._ranking_handle.bind_columns(
+            lambda: self.between.ranking.table, self._between_column_ids
+        )
+        self._ranking_handle.boundary.connect(self._on_between_boundary)
         self.handle.picked.connect(lambda: self._select("start_lights"))
         bind_enter(self, self.save)
         self.stage.apply_layout(self.selected_layout())
         self._fill_form()
         self._show_sample()
+        self._filling = True
+        try:
+            self._fill_live_widths(self.selected_layout())
+        finally:
+            self._filling = False
         self._place_lights()
         self._place_editor_chrome()
 
@@ -782,6 +879,36 @@ class HudEditor(QWidget):
         columns[index], columns[target] = columns[target], columns[index]
         current = self.selected_layout().between_ranking
         self.set_between_ranking(replace(current, columns=tuple(columns)))
+
+    def set_live_column_width(self, column_id: str, percent: int) -> None:
+        layout = self.selected_layout()
+        widths = assign_column_share(
+            layout.ranking_widths, self._visible_live_ids(), column_id, percent
+        )
+        self._commit(replace(layout, ranking_widths=widths))
+
+    def set_between_column_width(self, column_id: str, percent: int) -> None:
+        current = self.selected_layout().between_ranking
+        widths = assign_column_share(current.widths, self._between_column_ids(), column_id, percent)
+        self.set_between_ranking(replace(current, widths=widths))
+
+    def reset_live_column_widths(self) -> None:
+        self._commit(replace(self.selected_layout(), ranking_widths=factory_ranking_widths()))
+
+    def reset_between_column_widths(self) -> None:
+        current = self.selected_layout().between_ranking
+        self.set_between_ranking(replace(current, widths=factory_ranking_widths()))
+
+    def _between_column_ids(self) -> tuple[str, ...]:
+        return visible_ranking_columns(self.selected_layout().between_ranking)
+
+    def _visible_live_ids(self) -> tuple[str, ...]:
+        table = self.stage.ranking.table
+        return tuple(
+            RANKING_COLUMN_IDS[index]
+            for index in range(min(table.columnCount(), len(RANKING_COLUMN_IDS)))
+            if not table.isColumnHidden(index)
+        )
 
     def reset_lights(self) -> None:
         self._commit(replace(self.selected_layout(), lights=LightFrame()))
@@ -1013,6 +1140,14 @@ class HudEditor(QWidget):
         ranking_form.addRow(_form_label(tr("hud.ranking.columns")), self._ranking_columns)
         self._ranking_order: list[str] = []
         self._ranking_checks: dict[str, QCheckBox] = {}
+        self._ranking_width_spins: dict[str, QSpinBox] = {}
+        ranking_form.addRow(
+            _button(
+                "hud-ranking-reset-widths",
+                tr("hud.ranking.reset_widths"),
+                self.reset_between_column_widths,
+            )
+        )
 
         alignment_form = self._add_group(column, tr("hud.group.alignment"), "hud-group-alignment")
         self._alignment = QComboBox()
@@ -1060,6 +1195,26 @@ class HudEditor(QWidget):
             self._shares[part] = spin
             share_form.addRow(_form_label(tr(f"hud.share.{part}")), spin)
         self._live_groups.append(self._groups["hud-group-shares"])
+
+        live_widths = self._add_group(
+            column, tr("hud.group.ranking_widths"), "hud-group-ranking-widths"
+        )
+        self._live_widths = QWidget()
+        self._live_widths.setObjectName("hud-live-widths")
+        self._live_width_layout = QVBoxLayout(self._live_widths)
+        self._live_width_layout.setContentsMargins(0, 0, 0, 0)
+        self._live_width_layout.setSpacing(SPACE.xs)
+        live_widths.addRow(self._live_widths)
+        self._live_width_spins: dict[str, QSpinBox] = {}
+        self._live_width_order: list[str] = []
+        live_widths.addRow(
+            _button(
+                "hud-live-reset-widths",
+                tr("hud.ranking.reset_widths"),
+                self.reset_live_column_widths,
+            )
+        )
+        self._live_groups.append(self._groups["hud-group-ranking-widths"])
 
         lights_form = self._add_group(column, tr("hud.group.lights"), "hud-group-lights")
         self._lights_visible = QCheckBox(tr("hud.lights.visible"))
@@ -1266,6 +1421,7 @@ class HudEditor(QWidget):
                 widget.setVisible(not live)
             self._groups["hud-group-between-ranking"].setVisible(self._surface == VIEW_BETWEEN)
             self._fill_ranking_columns(layout.between_ranking)
+            self._fill_live_widths(layout)
             self._lock_settings()
             view_index = self._views.findData(self._surface)
             self._views.setCurrentIndex(max(view_index, 0))
@@ -1307,18 +1463,27 @@ class HudEditor(QWidget):
     def _fill_ranking_columns(self, frame: BetweenRanking) -> None:
         columns = ranking_columns(frame)
         order = [column_id for column_id, _shown in columns]
+        shares = dict(ranking_width_shares(self._between_column_ids(), frame.widths))
         if order == self._ranking_order and self._ranking_checks:
             for column_id, shown in columns:
                 self._ranking_checks[column_id].setChecked(shown)
+                spin = self._ranking_width_spins.get(column_id)
+                if spin is None:
+                    continue
+                visible_count = sum(1 for _name, flag in columns if flag)
+                cap = 100 - RANKING_WIDTH_MIN * max(visible_count - 1, 0)
+                spin.setRange(RANKING_WIDTH_MIN, max(RANKING_WIDTH_MIN, cap))
+                spin.setVisible(shown)
+                if shown and column_id in shares:
+                    spin.setValue(round(shares[column_id] * 100))
             return
-        while self._ranking_column_layout.count():
-            item = self._ranking_column_layout.takeAt(0)
-            widget = None if item is None else item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        _drop_layout_widgets(self._ranking_column_layout)
         self._ranking_checks = {}
+        self._ranking_width_spins = {}
         self._ranking_order = order
         translate = self._translator.translate
+        visible_count = sum(1 for _column_id, shown in columns if shown)
+        cap = 100 - RANKING_WIDTH_MIN * max(visible_count - 1, 0)
         for index, (column_id, shown) in enumerate(columns):
             row = QWidget()
             row.setObjectName(f"hud-ranking-row-{column_id}")
@@ -1329,6 +1494,16 @@ class HudEditor(QWidget):
             check.setChecked(shown)
             check.toggled.connect(
                 lambda checked, name=column_id: self._on_ranking_column(name, checked)
+            )
+            width = QSpinBox()
+            width.setObjectName(f"hud-ranking-width-{column_id}")
+            width.setSuffix(" %")
+            width.setRange(RANKING_WIDTH_MIN, max(RANKING_WIDTH_MIN, cap))
+            if shown and column_id in shares:
+                width.setValue(round(shares[column_id] * 100))
+            width.setVisible(shown)
+            width.valueChanged.connect(
+                lambda value, name=column_id: self._on_between_width(name, value)
             )
             up = QPushButton(translate("hud.ranking.up"))
             up.setObjectName(f"hud-ranking-up-{column_id}")
@@ -1345,10 +1520,48 @@ class HudEditor(QWidget):
                 lambda _checked=False, name=column_id: self.move_ranking_column(name, 1)
             )
             line.addWidget(check, 1)
+            line.addWidget(width)
             line.addWidget(up)
             line.addWidget(down)
             self._ranking_checks[column_id] = check
+            self._ranking_width_spins[column_id] = width
             self._ranking_column_layout.addWidget(row)
+
+    def _fill_live_widths(self, layout: HudLayout) -> None:
+        visible = self._visible_live_ids()
+        shares = dict(ranking_width_shares(visible, layout.ranking_widths))
+        cap = 100 - RANKING_WIDTH_MIN * max(len(visible) - 1, 0)
+        if list(visible) == self._live_width_order and self._live_width_spins:
+            for column_id in visible:
+                spin = self._live_width_spins[column_id]
+                spin.setRange(RANKING_WIDTH_MIN, max(RANKING_WIDTH_MIN, cap))
+                if column_id in shares:
+                    spin.setValue(round(shares[column_id] * 100))
+            return
+        _drop_layout_widgets(self._live_width_layout)
+        self._live_width_spins = {}
+        self._live_width_order = list(visible)
+        translate = self._translator.translate
+        for column_id in visible:
+            row = QWidget()
+            row.setObjectName(f"hud-live-width-row-{column_id}")
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            label = QLabel(translate(RANKING_COLUMN_LABELS[column_id]))
+            label.setObjectName(f"hud-live-width-label-{column_id}")
+            spin = QSpinBox()
+            spin.setObjectName(f"hud-live-width-{column_id}")
+            spin.setSuffix(" %")
+            spin.setRange(RANKING_WIDTH_MIN, max(RANKING_WIDTH_MIN, cap))
+            if column_id in shares:
+                spin.setValue(round(shares[column_id] * 100))
+            spin.valueChanged.connect(
+                lambda value, name=column_id: self._on_live_width(name, value)
+            )
+            line.addWidget(label, 1)
+            line.addWidget(spin)
+            self._live_width_spins[column_id] = spin
+            self._live_width_layout.addWidget(row)
 
     def _sync_light_controls(self, frame: LightFrame) -> None:
         stage_w = self.stage.width()
@@ -1430,6 +1643,19 @@ class HudEditor(QWidget):
         self._place_lights()
         if self._surface == VIEW_LIVE:
             self._place_editor_chrome()
+            self._sync_live_width_fields()
+
+    def _sync_live_width_fields(self) -> None:
+        """The preview hides columns by width. The numeric fields follow that set."""
+        if self._filling or not hasattr(self, "_live_width_order"):
+            return
+        if list(self._visible_live_ids()) == self._live_width_order:
+            return
+        self._filling = True
+        try:
+            self._fill_live_widths(self.selected_layout())
+        finally:
+            self._filling = False
 
     def _select(self, element_id: str) -> None:
         self._selected_element = element_id
@@ -1659,6 +1885,47 @@ class HudEditor(QWidget):
             return
         self.set_ranking_column_visible(column_id, visible)
 
+    def _on_between_width(self, column_id: str, percent: int) -> None:
+        if self._filling:
+            return
+        frame = self.selected_layout().between_ranking
+        shares = dict(ranking_width_shares(self._between_column_ids(), frame.widths))
+        if round(shares.get(column_id, 0) * 100) == percent:
+            return
+        self.set_between_column_width(column_id, percent)
+
+    def _on_live_width(self, column_id: str, percent: int) -> None:
+        if self._filling:
+            return
+        shares = dict(
+            ranking_width_shares(self._visible_live_ids(), self.selected_layout().ranking_widths)
+        )
+        if round(shares.get(column_id, 0) * 100) == percent:
+            return
+        self.set_live_column_width(column_id, percent)
+
+    def _on_between_boundary(self, left_id: str, right_id: str, left_px: int, pair_px: int) -> None:
+        if self._filling:
+            return
+        current = self.selected_layout().between_ranking
+        widths = split_ranking_boundary(
+            current.widths, self._between_column_ids(), left_id, right_id, left_px, pair_px
+        )
+        if widths == current.widths:
+            return
+        self.set_between_ranking(replace(current, widths=widths))
+
+    def _on_live_boundary(self, left_id: str, right_id: str, left_px: int, pair_px: int) -> None:
+        if self._filling:
+            return
+        layout = self.selected_layout()
+        widths = split_ranking_boundary(
+            layout.ranking_widths, self._visible_live_ids(), left_id, right_id, left_px, pair_px
+        )
+        if widths == layout.ranking_widths:
+            return
+        self._commit(replace(layout, ranking_widths=widths))
+
     def _on_lights_visible(self, visible: bool) -> None:
         if self._filling or visible == self.selected_layout().lights.visible:
             return
@@ -1716,6 +1983,18 @@ def _scale_spin(object_name: str) -> QSpinBox:
     spin.setSingleStep(SCALE_STEP)
     spin.setSuffix(" %")
     return spin
+
+
+def _drop_layout_widgets(layout: QVBoxLayout) -> None:
+    """Remove rows now. ``deleteLater`` alone leaves them visible for one event-loop turn."""
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = None if item is None else item.widget()
+        if widget is None:
+            continue
+        widget.hide()
+        widget.setParent(None)
+        widget.deleteLater()
 
 
 def _button(object_name: str, text: str, slot: Callable[[], None]) -> QPushButton:
