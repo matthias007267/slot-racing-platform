@@ -23,6 +23,7 @@ from slot_racing.core.clock import format_duration
 from slot_racing.core.domain import RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.races.hud import (
+    BETWEEN_RANKING_FONT_BASE,
     BOTTOM_MIN_HEIGHT,
     CLOCK_MIN_HEIGHT,
     CLOCK_MIN_WIDTH,
@@ -43,9 +44,12 @@ from slot_racing.modules.races.hud import (
     LANES_MIN_HEIGHT,
     LIGHT_ASPECT,
     LIGHT_LAMP_COUNT,
+    RANKING_COLUMN_IDS,
+    RANKING_COLUMN_LABELS,
     RANKING_MIN_HEIGHT,
     RANKING_MIN_WIDTH,
     RECORDS_MIN_HEIGHT,
+    REGION_IDS,
     STAGE_GAP,
     TEXT_DRIVER,
     TEXT_HEADER,
@@ -55,6 +59,8 @@ from slot_racing.modules.races.hud import (
     VIEW_LIVE,
     VIEW_RESULTS,
     HudLayout,
+    HudWidgetConfig,
+    between_ranking_pixels,
     briefing_px,
     caption_px,
     effective_px,
@@ -62,7 +68,12 @@ from slot_racing.modules.races.hud import (
     lane_columns,
     light_gantry,
     light_pixels,
+    project_ranking_cells,
     records_shown,
+    region_frame,
+    regions_ready,
+    to_pixels,
+    visible_ranking_columns,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
 from slot_racing.modules.races.time_trial_board import TimeTrialBoard, format_lap_seconds
@@ -138,19 +149,23 @@ _CAPTION_KEYS = {
     FIELD_BEST_TIME: "hud.field.best_time",
     FIELD_TOTAL: "race.column.total_time",
 }
-_RANKING_COLUMNS: tuple[tuple[str, str, str, str, str], ...] = (
-    ("position", "race.column.position", "primary", "text", "always"),
-    ("driver", "race.column.driver", "primary", "text", "leader"),
-    ("vehicle", "race.column.vehicle", "optional", "text_secondary", "never"),
-    ("start_number", "race.column.start_number", "optional", "text", "never"),
-    ("lane", "race.column.lane", "optional", "text", "never"),
-    ("laps", "race.column.laps_done", "primary", "text", "never"),
-    ("current_lap", "race.column.current_lap", "optional", "text", "never"),
-    ("last_lap", "race.column.last_lap", "optional", "text", "never"),
-    ("best_lap", "race.column.best_lap", "preferred", "text", "never"),
-    ("total_time", "race.column.total_time", "optional", "text", "never"),
-    ("progress", "race.column.progress", "optional", "text", "never"),
-    ("status", "race.column.status", "optional", "text", "never"),
+_RANKING_STYLE: dict[str, tuple[str, str, str]] = {
+    "position": ("primary", "text", "always"),
+    "driver": ("primary", "text", "leader"),
+    "vehicle": ("optional", "text_secondary", "never"),
+    "start_number": ("optional", "text", "never"),
+    "lane": ("optional", "text", "never"),
+    "laps": ("primary", "text", "never"),
+    "current_lap": ("optional", "text", "never"),
+    "last_lap": ("optional", "text", "never"),
+    "best_lap": ("preferred", "text", "never"),
+    "total_time": ("optional", "text", "never"),
+    "progress": ("optional", "text", "never"),
+    "status": ("optional", "text", "never"),
+}
+_RANKING_COLUMNS: tuple[tuple[str, str, str, str, str], ...] = tuple(
+    (column_id, RANKING_COLUMN_LABELS[column_id], *_RANKING_STYLE[column_id])
+    for column_id in RANKING_COLUMN_IDS
 )
 # The PC measures these. The scene names them so a browser can do the same job.
 HOST_MEASUREMENTS: tuple[str, ...] = (
@@ -373,6 +388,11 @@ class HudRanking:
     best_reserve_px: int = RANKING_BEST_RESERVE
     width_floor_px: int = RANKING_WIDTH_FLOOR
     cell_pad_px: int = RANKING_CELL_PAD
+    font_px: int | None = None
+    scrolls: bool = False
+    """The panel scrolls instead of clipping rows or configured columns."""
+    fit_columns: bool = True
+    """Width fitting may hide a column. The between-heats ranking leaves that off."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,8 +575,22 @@ def build_hud_scene(
     cards: tuple[HudLaneCard, ...] = ()
     columns = 1
     rows = 0
+    between_ranking = None
     if show_briefing:
         panels.append(_box("briefing", 0, 0, width, height, share=1, minimum_height=0))
+        if layout.between_ranking.visible:
+            between_ranking = between_ranking_pixels(layout.between_ranking, width, height)
+            panels.append(
+                _box(
+                    "ranking",
+                    between_ranking.x,
+                    between_ranking.y,
+                    between_ranking.width,
+                    between_ranking.height,
+                    share=1,
+                    minimum_height=0,
+                )
+            )
     else:
         placed = _place_stage(layout, stage_box, lanes_count)
         panels.extend(placed.panels)
@@ -608,10 +642,14 @@ def build_hud_scene(
         lane_columns=columns,
         lane_rows=rows,
         lanes=cards,
-        ranking=_ranking(
-            translator,
-            snapshot,
-            next((item.width for item in panels if item.id == "ranking"), 0),
+        ranking=(
+            _configured_ranking(translator, snapshot, layout, between_ranking.height)
+            if between_ranking is not None
+            else _ranking(
+                translator,
+                snapshot,
+                next((item.width for item in panels if item.id == "ranking"), 0),
+            )
         ),
         message_caption=_caption(
             translate("hud.widget.race_message"),
@@ -705,6 +743,9 @@ def _surfaces(
 
 
 def _place_stage(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePlace:
+    custom = _place_regions(layout, stage, lane_count)
+    if custom is not None:
+        return custom
     content_h, columns, rows, canvas_w = _stage_need(layout, stage.width, lane_count)
     canvas_h = max(stage.height, content_h)
     top_h, mid_h, bot_h = _lengths(
@@ -785,6 +826,35 @@ def _place_stage(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePla
         horizontal=canvas_w > stage.width,
         limits=tuple(limits),
     )
+
+
+def _place_regions(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePlace | None:
+    """Stored rectangles, in the same fractions the PC stage uses. Shares stay untouched."""
+    if not regions_ready(layout) or stage.width <= 0 or stage.height <= 0:
+        return None
+    panels: list[HudBox] = []
+    for region_id in REGION_IDS:
+        frame = region_frame(layout, region_id)
+        if frame is None:
+            return None
+        rect = to_pixels(
+            HudWidgetConfig(frame.id, True, frame.x, frame.y, frame.width, frame.height),
+            stage.width,
+            stage.height,
+        )
+        panels.append(
+            _box(
+                region_id,
+                stage.x + rect.x,
+                stage.y + rect.y,
+                rect.width,
+                rect.height,
+                share=1,
+            )
+        )
+    lanes_box = panels[REGION_IDS.index("lanes")]
+    columns, rows = _lane_grid(lane_count, lanes_box.width)
+    return _StagePlace(tuple(panels), lanes_box, columns, rows, False, False, ())
 
 
 def _stage_need(layout: HudLayout, width: int, lane_count: int) -> tuple[int, int, int, int]:
@@ -973,6 +1043,63 @@ def _nominal_stack(fields: Sequence[HudField]) -> int:
         return LANE_CARD_MARGIN * 2
     body = sum(item.font_px + item.caption_px for item in shown)
     return body + LANE_LINE_GAP * (len(shown) - 1) + LANE_CARD_MARGIN * 2
+
+
+def _configured_ranking(
+    translator: Translator, snapshot: RaceSnapshot, layout: HudLayout, height: int
+) -> HudRanking:
+    """The between-heats ranking. Same rows as the live table, configured columns only.
+
+    ``height`` is the panel. The payload keeps every row and asks the host to scroll.
+    """
+    del height
+    frame = layout.between_ranking
+    ended = snapshot.status is RaceStatus.FINISHED
+    paused = snapshot.status is RaceStatus.PAUSED
+    column_ids = visible_ranking_columns(frame)
+    style = {column[0]: column for column in _RANKING_COLUMNS}
+    columns = tuple(
+        HudColumn(
+            column_id,
+            translator.translate(style[column_id][1]),
+            style[column_id][2],
+            style[column_id][3],
+            style[column_id][4],
+            True,
+        )
+        for column_id in column_ids
+    )
+    font_px = effective_px(BETWEEN_RANKING_FONT_BASE, frame.font_scale, 100)
+    row_px = max(RANKING_ROW_PX, font_px + 10)
+    rows: list[HudRankingRow] = []
+    for standing in snapshot.standings or snapshot.rows:
+        cells = ranking_cells(translator, snapshot, standing, ended=ended, paused=paused)
+        rows.append(
+            HudRankingRow(
+                position=standing.position,
+                lane=standing.lane,
+                cells=project_ranking_cells(cells, frame),
+                leader=standing.position == 1,
+                participant_id=standing.participant_id,
+            )
+        )
+    return HudRanking(
+        caption=translator.translate("hud.widget.live_ranking"),
+        columns=columns,
+        rows=tuple(rows),
+        row_px=row_px,
+        columns_are_complete=True,
+        primary_ids=tuple(
+            column_id for column_id in RANKING_PRIMARY_IDS if column_id in column_ids
+        ),
+        best_id=RANKING_BEST_ID if RANKING_BEST_ID in column_ids else "",
+        best_reserve_px=RANKING_BEST_RESERVE,
+        width_floor_px=RANKING_WIDTH_FLOOR,
+        cell_pad_px=RANKING_CELL_PAD,
+        font_px=font_px,
+        scrolls=True,
+        fit_columns=False,
+    )
 
 
 def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudRanking:

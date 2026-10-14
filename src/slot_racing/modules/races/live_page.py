@@ -883,6 +883,8 @@ _HUD_HTML = """<!DOCTYPE html>
   }
   function renderRanking(panel, ranking) {
     if (!ranking) return;
+    var scrolls = ranking.scrolls === true;
+    panel.style.overflow = scrolls ? "auto" : "hidden";
     var columns = [];
     var all = ranking.columns || [];
     var index;
@@ -909,6 +911,10 @@ _HUD_HTML = """<!DOCTYPE html>
       table.appendChild(document.createElement("tbody"));
       table.setAttribute("data-cols", signature);
     }
+    table.style.fontSize = ranking.font_px ? px(ranking.font_px) : "";
+    table.style.tableLayout = scrolls ? "auto" : "fixed";
+    table.style.width = scrolls ? "max-content" : "100%";
+    table.style.minWidth = scrolls ? "100%" : "0";
     var body = table.querySelector("tbody");
     var rows = ranking.rows || [];
     var keep = {};
@@ -939,7 +945,7 @@ _HUD_HTML = """<!DOCTYPE html>
         body.insertBefore(ordered[index], body.children[index] || null);
       }
     }
-    applyBestColumn(table, ranking);
+    if (ranking.fit_columns !== false) applyBestColumn(table, ranking);
   }
   function textPx(value, bold) {
     var probe = document.getElementById("text-probe");
@@ -1271,6 +1277,9 @@ _HUD_HTML = """<!DOCTYPE html>
     if (records && !records.hidden) renderRecords(records, scene.records);
     var briefing = stage.querySelector("[data-key='panel-briefing']");
     if (briefing && !briefing.hidden) renderBriefing(briefing, scene.briefing);
+    if (ranking && briefing && !ranking.hidden && !briefing.hidden && ranking.parentNode) {
+      ranking.parentNode.appendChild(ranking);
+    }
     paintLights(scene.lights);
   }
   function sameViewport(scene) {

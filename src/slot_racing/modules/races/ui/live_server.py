@@ -3,7 +3,8 @@
 One ``QTcpServer`` on its own thread accepts browsers. HTTP serves the live HUD,
 and ``/diagnostics`` keeps the diagnostic page. The same port upgrades to
 WebSocket and then only sends the mailbox. A viewport message recomposes that
-socket's scene. ``write`` queues bytes. Nothing here calls
+socket's scene. ``write`` queues bytes. An HTTP refusal reads the request and
+closes only after that reply has left the write buffer. Nothing here calls
 ``waitForBytesWritten`` or ``flush``, and nothing here holds a race controller.
 
 The listen address is one IPv4 address, never every interface. The session
@@ -18,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtNetwork import (
@@ -220,6 +222,7 @@ class _Worker(QObject):
         self._now_ns = now_ns
         self._server: QTcpServer | None = None
         self._clients: dict[int, _Client] = {}
+        self._refusals: dict[int, QTcpSocket] = {}
         self._closed = False
         self._rewriting = False
         self._scene_cache: dict[tuple[int, tuple[int, int] | None], str] = {}
@@ -266,6 +269,9 @@ class _Worker(QObject):
                 self._closed = True
                 for client in list(self._clients.values()):
                     self._release(client, abort=True)
+                for socket in list(self._refusals.values()):
+                    socket.abort()
+                self._refusals.clear()
                 server = self._server
                 self._server = None
                 if server is not None:
@@ -304,8 +310,7 @@ class _Worker(QObject):
                 continue
             socket.setParent(server)
             if len(self._clients) >= MAX_CLIENTS:
-                _send_http(socket, 503, "Zu viele Verbindungen", b"Zu viele Verbindungen")
-                socket.disconnected.connect(socket.deleteLater)
+                self._refuse(socket)
                 continue
             socket.setSocketOption(QAbstractSocket.SocketOption.LowDelayOption, 1)
             socket.setReadBufferSize(MAX_INBOUND_BYTES)
@@ -318,6 +323,25 @@ class _Worker(QObject):
             self._stats.set_clients(len(self._clients))
             if socket.bytesAvailable():
                 self._read(client)
+
+    def _refuse(self, socket: QTcpSocket) -> None:
+        """503 for one extra browser. It is never added to ``_clients``."""
+        self._refusals[id(socket)] = socket
+        socket.setReadBufferSize(MAX_HEADER_BYTES)
+        socket.disconnected.connect(self._on_refusal_done)
+        _send_http(
+            socket,
+            503,
+            "Zu viele Verbindungen",
+            b"Zu viele Verbindungen",
+            await_request=True,
+        )
+
+    def _on_refusal_done(self) -> None:
+        source = self.sender()
+        if isinstance(source, QTcpSocket):
+            self._refusals.pop(id(source), None)
+            source.deleteLater()
 
     def _on_ready(self) -> None:
         client = self._client_from_sender()
@@ -836,9 +860,95 @@ def _http_reason(status: int) -> str:
     return "Bad Request"
 
 
-def _send_http(socket: QTcpSocket, status: int, reason: str, body: bytes) -> None:
-    socket.write(http_response(status, reason, body, _PLAIN))
-    socket.disconnectFromHost()
+def _send_http(
+    socket: QTcpSocket,
+    status: int,
+    reason: str,
+    body: bytes,
+    *,
+    await_request: bool = False,
+) -> None:
+    _HttpReply(socket, status, reason, body, await_request=await_request)
+
+
+class _HttpReply(QObject):
+    """One HTTP response, then a graceful close.
+
+    ``await_request`` reads the headers before the reply. Closing while those
+    bytes are still queued makes Windows reset the socket (WinError 10054)
+    and the client never sees the status line. ``disconnectFromHost`` runs
+    only after the reply's write buffer is empty. The call does not block.
+    """
+
+    _pinned: ClassVar[dict[int, _HttpReply]] = {}
+
+    def __init__(
+        self,
+        socket: QTcpSocket,
+        status: int,
+        reason: str,
+        body: bytes,
+        *,
+        await_request: bool,
+    ) -> None:
+        super().__init__(socket)
+        self._socket = socket
+        self._payload = http_response(status, reason, body, _PLAIN)
+        self._await_request = await_request
+        self._seen = bytearray()
+        self._queued = False
+        self._closing = False
+        _HttpReply._pinned[id(socket)] = self
+        socket.readyRead.connect(self._on_ready)
+        socket.bytesWritten.connect(self._on_written)
+        socket.disconnected.connect(self._unpin)
+        if await_request:
+            self._on_ready()
+        else:
+            self._queue()
+
+    def _unpin(self) -> None:
+        _HttpReply._pinned.pop(id(self._socket), None)
+
+    def _on_ready(self) -> None:
+        if self._closing:
+            self._socket.readAll()
+            return
+        data = self._socket.readAll().data()
+        if self._await_request and not self._queued:
+            if data:
+                room = MAX_HEADER_BYTES - len(self._seen)
+                if room > 0:
+                    self._seen.extend(data[:room])
+            if b"\r\n\r\n" in self._seen or len(self._seen) >= MAX_HEADER_BYTES:
+                self._queue()
+            return
+        self._close_if_flushed()
+
+    def _on_written(self, _count: int) -> None:
+        self._close_if_flushed()
+
+    def _queue(self) -> None:
+        if self._queued:
+            return
+        self._queued = True
+        if self._socket.write(self._payload) < 0:
+            self._socket.abort()
+            return
+        self._close_if_flushed()
+
+    def _close_if_flushed(self) -> None:
+        if self._closing or not self._queued or self._socket.bytesToWrite() != 0:
+            return
+        self._closing = True
+        if self._socket.bytesAvailable():
+            self._socket.readAll()
+        state = self._socket.state()
+        if state not in {
+            QAbstractSocket.SocketState.UnconnectedState,
+            QAbstractSocket.SocketState.ClosingState,
+        }:
+            self._socket.disconnectFromHost()
 
 
 def _disconnect(signal: object, slot: object) -> None:

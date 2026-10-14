@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud import BetweenRanking
+from slot_racing.modules.races.runner import RaceSnapshot
 from slot_racing.modules.races.types import HeatBriefing
-from slot_racing.modules.races.ui.race_briefing import BriefingBoard
+from slot_racing.modules.races.ui.between_ranking import BetweenSurface
 from slot_racing.uikit.theme import SPACE, set_role
 
 
@@ -28,7 +30,9 @@ class HeatGate(QWidget):
         self.body_label.setObjectName("heat-body")
         self.body_label.setWordWrap(True)
         self.body_label.hide()
-        self.board = BriefingBoard()
+        self.surface = BetweenSurface(translator)
+        self.board = self.surface.board
+        self.ranking = self.surface.ranking
         self.driver_combo = QComboBox()
         self.driver_combo.setObjectName("heat-driver")
         self.postpone_button = QPushButton(tr("race.heat.postpone"))
@@ -40,17 +44,12 @@ class HeatGate(QWidget):
         set_role(self.start_button, "primary")
         set_role(self.postpone_button, "secondary")
         set_role(self.disqualify_button, "danger")
-        scroll = QScrollArea()
-        scroll.setObjectName("heat-briefing-scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setWidget(self.board)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE.md)
         layout.addWidget(self.title_label)
         layout.addWidget(self.body_label)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self.surface, 1)
         layout.addWidget(self.driver_combo)
         layout.addWidget(self.postpone_button)
         layout.addWidget(self.disqualify_button)
@@ -98,6 +97,10 @@ class HeatGate(QWidget):
             if index >= 0:
                 self.driver_combo.setCurrentIndex(index)
         self.show()
+
+    def show_standings(self, snapshot: RaceSnapshot, frame: BetweenRanking) -> None:
+        """Show the race ranking. A later briefing does not clear these rows."""
+        self.surface.show_standings(snapshot, frame)
 
     def _postpone(self) -> None:
         participant_id = self.driver_combo.currentData()

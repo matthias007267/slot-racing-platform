@@ -1197,9 +1197,15 @@ def test_several_browsers_sample_without_blocking_the_start(
 
 
 def test_a_seventeenth_browser_is_refused(display: LiveBroadcast) -> None:
+    """The 17th browser receives HTTP 503 and is not registered.
+
+    A browser that is already connected still gets scenes. After one of those
+    sockets closes, the freed slot accepts a new handshake.
+    """
     host, port, token = _endpoint(display)
     clients = [_Client.connect(host, port, token) for _ in range(16)]
     extra: socket.socket | None = None
+    admitted: _Client | None = None
     try:
         extra = socket.create_connection((host, port), timeout=2)
         extra.sendall(
@@ -1219,12 +1225,27 @@ def test_a_seventeenth_browser_is_refused(display: LiveBroadcast) -> None:
             if not chunk:
                 break
             data += chunk
-        status = data.split(b" ", 2)[1]
+        status_line = data.split(b"\r\n", 1)[0]
+        status = status_line.split(b" ", 2)[1]
         assert status == b"503"
+        assert b"101" not in status_line
         assert display.diagnostics().client_count == 16
+        display.publish_scene(_scene_payload(name_marker=17))
+        kept = clients[0].wait_for(lambda item: item.get("type") == "scene")
+        assert _payload(kept)["marker"] == 17
+        assert display.diagnostics().client_count == 16
+        clients[0].close()
+        _wait(lambda: display.diagnostics().client_count == 15)
+        admitted = _Client.connect(host, port, token)
+        assert admitted.status == 101
+        _wait(lambda: display.diagnostics().client_count == 16)
+        hello = admitted.wait_for(lambda item: item.get("type") == "hello")
+        assert hello["type"] == "hello"
     finally:
         if extra is not None:
             extra.close()
+        if admitted is not None:
+            admitted.close()
         for client in clients:
             client.close()
 

@@ -9,6 +9,8 @@ import pytest
 
 from slot_racing.core.storage import Database, Setting
 from slot_racing.modules.races.hud import (
+    GRID_X,
+    GRID_Y,
     HUD_CONFIGURATION_KEY,
     HUD_VERSION,
     HUD_WINDOW_KEY,
@@ -16,6 +18,7 @@ from slot_racing.modules.races.hud import (
     LIGHT_SCALE_MIN,
     LIGHT_STANDARD_WIDTH,
     MIN_SPAN,
+    REGION_IDS,
     STANDARD_LAYOUT_ID,
     FieldStyle,
     HudConfiguration,
@@ -30,13 +33,17 @@ from slot_racing.modules.races.hud import (
     delete_layout,
     effective_light_scale,
     effective_px,
+    factory_between_ranking,
     factory_layout,
     light_frame,
     light_frame_from_box,
     light_pixels,
     light_scale_limits,
     mark_default,
+    ranking_columns,
     replace_layout,
+    snap_axis,
+    snap_rect,
     snap_scale,
     to_document,
     to_pixels,
@@ -59,6 +66,7 @@ def test_the_factory_layout_is_selected_and_the_default() -> None:
     assert (layout.clock_share, layout.status_share) == (1, 1)
     assert (layout.lanes_share, layout.ranking_share) == (3, 1)
     assert layout.lights == LightFrame()
+    assert layout.between_ranking == factory_between_ranking()
 
 
 def test_effective_type_keeps_the_hierarchy_inside_the_scale_range() -> None:
@@ -341,6 +349,74 @@ def test_a_broken_editor_window_falls_back_to_the_default_placement() -> None:
     with database.session() as session:
         session.add(Setting(key=HUD_WINDOW_KEY, value=["nope"]))
     assert store.load_window() == HudWindowPlacement()
+
+
+def test_the_editor_grid_is_the_old_128_by_72_lattice() -> None:
+    assert GRID_X == 128
+    assert GRID_Y == 72
+    assert snap_axis(0.12, GRID_X) == pytest.approx(15 / 128)
+    assert snap_axis(0.12, GRID_Y) == pytest.approx(9 / 72)
+    assert snap_rect(0.12, 0.12, 0.62, 0.14) == pytest.approx((15 / 128, 9 / 72, 79 / 128, 10 / 72))
+
+
+def test_placed_regions_round_trip_and_a_missing_list_keeps_the_shares() -> None:
+    regions = tuple(
+        (region_id, 0.02 * index, 0.04, 0.20, 0.30) for index, region_id in enumerate(REGION_IDS)
+    )
+    layout = replace(factory_layout(), regions=regions, clock_share=3)
+    document = replace(
+        default_hud_configuration(),
+        layouts=(layout,),
+        selected_id=layout.id,
+        default_id=layout.id,
+    )
+    restored = coerce(to_document(document)).default_layout()
+    assert restored.clock_share == 3
+    assert restored.regions == regions
+    untouched = coerce(to_document(default_hud_configuration())).default_layout()
+    assert untouched.regions == ()
+    assert "regions" not in to_document(default_hud_configuration())["layouts"][0]
+
+
+def test_an_older_layout_gains_the_between_ranking_without_losing_its_settings() -> None:
+    payload = to_document(default_hud_configuration())
+    layout = payload["layouts"][0]
+    del layout["between_ranking"]
+    layout["font_scale"] = 120
+    layout["ranking_share"] = 4
+    loaded = coerce(payload)
+    kept = loaded.default_layout()
+    assert kept.font_scale == 120
+    assert kept.ranking_share == 4
+    assert kept.between_ranking == factory_between_ranking()
+
+    partial = to_document(default_hud_configuration())
+    partial["layouts"][0]["between_ranking"] = {
+        "visible": True,
+        "x": 0.10,
+        "y": 0.20,
+        "width": 0.30,
+        "height": 0.40,
+        "font_scale": 73,
+        "columns": [{"id": "driver", "visible": True}, {"id": "unknown", "visible": True}],
+    }
+    restored = coerce(partial).default_layout().between_ranking
+    assert restored.font_scale == 75
+    assert restored.x == pytest.approx(0.10)
+    assert restored.width == pytest.approx(0.30)
+    columns = ranking_columns(restored)
+    assert columns[0] == ("driver", True)
+    assert [column_id for column_id, _shown in columns] == [
+        "driver",
+        *[
+            column_id
+            for column_id, _shown in factory_between_ranking().columns
+            if column_id != "driver"
+        ],
+    ]
+    assert columns[1] == ("position", True)
+    again = coerce(to_document(loaded))
+    assert again.default_layout().between_ranking == kept.between_ranking
 
 
 def _database() -> Database:
