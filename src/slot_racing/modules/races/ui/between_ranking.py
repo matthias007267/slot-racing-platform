@@ -157,3 +157,13 @@ class BetweenSurface(QWidget):
         self.ranking.setVisible(self._frame.visible and rect.width > 1 and rect.height > 1)
         if self.ranking.isVisible():
             self.ranking.raise_()
+        # Editor chrome is a sibling. The live gate has neither, so this is a no-op there.
+        grid = self.findChild(QWidget, "hud-grid")
+        if grid is not None and grid.parentWidget() is self:
+            grid.setGeometry(0, 0, max(self.width(), 0), max(self.height(), 0))
+            grid.lower()
+        handle = self.findChild(QWidget, "hud-ranking-handle")
+        if handle is not None and handle.parentWidget() is self:
+            handle.setGeometry(self.ranking.geometry())
+            handle.setVisible(self.ranking.isVisible())
+            handle.raise_()

@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QScrollBar,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -52,10 +54,13 @@ from slot_racing.modules.races.hud import (
     DISPLAY_HIDE,
     DISPLAY_MODES,
     FIELD_IDS,
+    GRID_X,
+    GRID_Y,
     LIGHT_ASPECT,
     MIN_SPAN,
     PANEL_RECORDS,
     RANKING_COLUMN_LABELS,
+    REGION_IDS,
     SCALE_MAX,
     SCALE_MIN,
     SCALE_STEP,
@@ -85,9 +90,13 @@ from slot_racing.modules.races.hud import (
     normalize_between_ranking,
     normalize_light,
     ranking_columns,
+    region_frame,
+    regions_ready,
     replace_layout,
     snap_alignment,
+    snap_axis,
     snap_display,
+    snap_rect,
     snap_scale,
     snap_share,
     to_document,
@@ -120,6 +129,7 @@ _DIALOG_TEXT_SPARE = 12
 _BUTTON_CHROME = 14 * 2 + 2
 
 _HANDLE = 14
+_GRID_MAJOR = 8
 _PREVIEW_STATUSES: tuple[tuple[str, str], ...] = (
     ("running", "race.status.running"),
     ("paused", "race.status.paused"),
@@ -330,6 +340,7 @@ class LightHandle(QWidget):
     """Editor chrome for the start gantry. The gantry itself does not take mouse clicks."""
 
     moved = Signal(int, int, int, int)
+    picked = Signal()
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -357,6 +368,7 @@ class LightHandle(QWidget):
         pos = event.position().toPoint()
         mode = "resize" if self._on_grip(pos) else "move"
         self._drag = (mode, event.globalPosition().toPoint(), QRect(self.geometry()))
+        self.picked.emit()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -381,6 +393,149 @@ class LightHandle(QWidget):
             self._drag = None
             self.moved.emit(rect.x(), rect.y(), rect.width(), rect.height())
         super().mouseReleaseEvent(event)
+
+    def _on_grip(self, pos: QPoint) -> bool:
+        return pos.x() >= self.width() - _HANDLE and pos.y() >= self.height() - _HANDLE
+
+
+def _paint_grid(
+    painter: QPainter,
+    canvas_width: int,
+    canvas_height: int,
+    origin_x: int,
+    origin_y: int,
+    view_width: int,
+    view_height: int,
+) -> None:
+    """Draw the 128 by 72 canvas grid. ``origin`` is the rectangle's top left on that canvas."""
+    if canvas_width <= 1 or canvas_height <= 1 or view_width <= 0 or view_height <= 0:
+        return
+    minor = QPen(QColor(255, 255, 255, 55))
+    major = QPen(QColor(255, 196, 64, 220))
+    for index in range(GRID_X + 1):
+        x = round(index * canvas_width / GRID_X) - origin_x
+        if 0 <= x <= view_width:
+            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
+            painter.drawLine(x, 0, x, view_height)
+    for index in range(GRID_Y + 1):
+        y = round(index * canvas_height / GRID_Y) - origin_y
+        if 0 <= y <= view_height:
+            painter.setPen(major if index % _GRID_MAJOR == 0 else minor)
+            painter.drawLine(0, y, view_width, y)
+
+
+class HudGrid(QWidget):
+    """Alignment grid. Mouse events pass through to the elements underneath."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("hud-grid")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
+        painter = QPainter(self)
+        parent = self.parentWidget()
+        canvas_width = parent.width() if parent is not None else self.width()
+        canvas_height = parent.height() if parent is not None else self.height()
+        _paint_grid(
+            painter, canvas_width, canvas_height, self.x(), self.y(), self.width(), self.height()
+        )
+        painter.end()
+
+
+class PlacementHandle(QWidget):
+    """One HUD element in the editor. A drag moves it; the corner changes its size."""
+
+    changed = Signal(float, float, float, float)
+    selected = Signal(str)
+
+    def __init__(self, element_id: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.element_id = element_id
+        if element_id == "between_ranking":
+            name = "hud-ranking-handle"
+        else:
+            name = f"hud-region-{element_id}"
+        self.setObjectName(name)
+        self._drag: tuple[str, float, float, tuple[float, float, float, float]] | None = None
+        self._active = False
+        self.setMouseTracking(True)
+        self.setMinimumSize(0, 0)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def set_active(self, active: bool) -> None:
+        if self._active == active:
+            return
+        self._active = active
+        self.update()
+
+    def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
+        painter = QPainter(self)
+        parent = self.parentWidget()
+        if parent is not None:
+            _paint_grid(
+                painter,
+                parent.width(),
+                parent.height(),
+                self.x(),
+                self.y(),
+                self.width(),
+                self.height(),
+            )
+        color = QColor(255, 196, 64) if self._active else QColor(255, 196, 64, 170)
+        painter.setPen(QPen(color, 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+        grip = QRect(self.width() - _HANDLE, self.height() - _HANDLE, _HANDLE - 1, _HANDLE - 1)
+        painter.setBrush(color)
+        painter.drawRect(grip)
+        painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        parent = self.parentWidget()
+        if parent is None or parent.width() <= 1 or parent.height() <= 1:
+            return
+        origin = (
+            self.x() / parent.width(),
+            self.y() / parent.height(),
+            self.width() / parent.width(),
+            self.height() / parent.height(),
+        )
+        pos = event.position().toPoint()
+        mode = "resize" if self._on_grip(pos) else "move"
+        global_pos = event.globalPosition()
+        self._drag = (mode, global_pos.x(), global_pos.y(), origin)
+        self.selected.emit(self.element_id)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag is None or not event.buttons() & Qt.MouseButton.LeftButton:
+            self.setCursor(
+                Qt.CursorShape.SizeFDiagCursor
+                if self._on_grip(event.position().toPoint())
+                else Qt.CursorShape.SizeAllCursor
+            )
+            return
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        mode, start_x, start_y, origin = self._drag
+        dx = (event.globalPosition().x() - start_x) / max(1, parent.width())
+        dy = (event.globalPosition().y() - start_y) / max(1, parent.height())
+        x, y, width, height = origin
+        if mode == "resize":
+            self.changed.emit(x, y, width + dx, height + dy)
+        else:
+            self.changed.emit(x + dx, y + dy, width, height)
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._drag = None
+        event.accept()
 
     def _on_grip(self, pos: QPoint) -> bool:
         return pos.x() >= self.width() - _HANDLE and pos.y() >= self.height() - _HANDLE
@@ -468,22 +623,47 @@ class HudEditor(QWidget):
         self._preview_mode = RaceMode.LAPS
         self._locking = False
         self._splitter_placed = False
-        self.preview = HudPreviewHost(translator, self._place_lights, self._on_handle)
+        self.preview = HudPreviewHost(translator, self._on_preview_resized, self._on_handle)
         self.stage = self.preview.stage
         self.lights = self.preview.lights
         self.handle = self.preview.handle
+        self._selected_element: str | None = None
         self._build()
+        self._live_grid = HudGrid(self.stage.canvas)
+        self._between_grid = HudGrid(self.between.surface)
+        self._region_handles = {
+            region_id: PlacementHandle(region_id, self.stage.canvas) for region_id in REGION_IDS
+        }
+        for region_id, handle in self._region_handles.items():
+            handle.changed.connect(
+                lambda x, y, width, height, region=region_id: self._on_region(
+                    region, x, y, width, height
+                )
+            )
+            handle.selected.connect(self._select)
+        self._ranking_handle = PlacementHandle("between_ranking", self.between.surface)
+        self._ranking_handle.changed.connect(self._on_ranking_drag)
+        self._ranking_handle.selected.connect(self._select)
+        self.handle.picked.connect(lambda: self._select("start_lights"))
         bind_enter(self, self.save)
         self.stage.apply_layout(self.selected_layout())
         self._fill_form()
         self._show_sample()
         self._place_lights()
+        self._place_editor_chrome()
 
     def configuration(self) -> HudConfiguration:
         return self._config
 
     def selected_layout(self) -> HudLayout:
         return self._config.selected()
+
+    def selected_element(self) -> str | None:
+        """The HUD element last pressed in the preview."""
+        return self._selected_element
+
+    def region_handle(self, region_id: str) -> PlacementHandle:
+        return self._region_handles[region_id]
 
     def select_layout(self, layout_id: str) -> None:
         if self._config.layout(layout_id) is None:
@@ -566,10 +746,14 @@ class HudEditor(QWidget):
     def set_share(self, part: str, value: int) -> None:
         layout = self.selected_layout()
         shares = {
-            "clock": replace(layout, clock_share=snap_share(value, layout.clock_share)),
-            "status": replace(layout, status_share=snap_share(value, layout.status_share)),
-            "lanes": replace(layout, lanes_share=snap_share(value, layout.lanes_share)),
-            "ranking": replace(layout, ranking_share=snap_share(value, layout.ranking_share)),
+            "clock": replace(layout, clock_share=snap_share(value, layout.clock_share), regions=()),
+            "status": replace(
+                layout, status_share=snap_share(value, layout.status_share), regions=()
+            ),
+            "lanes": replace(layout, lanes_share=snap_share(value, layout.lanes_share), regions=()),
+            "ranking": replace(
+                layout, ranking_share=snap_share(value, layout.ranking_share), regions=()
+            ),
         }
         updated = shares.get(part)
         if updated is not None:
@@ -1024,15 +1208,18 @@ class HudEditor(QWidget):
             self.lights.hide()
             self.handle.hide()
             self._show_between()
+            self._place_editor_chrome()
             return
         if not live:
             self.lights.hide()
             self.handle.hide()
             self.sample.show_style(self.selected_layout().view(self._surface), self._translator)
+            self._place_editor_chrome()
             return
         self.stage.apply_layout(self.selected_layout())
         self._show_sample()
         self._place_lights()
+        self._place_editor_chrome()
 
     def _show_between(self) -> None:
         briefing, snapshot = _between_sample()
@@ -1223,7 +1410,7 @@ class HudEditor(QWidget):
         stage = self.stage
         origin = stage.mapTo(self.preview, QPoint(0, 0))
         current = self.selected_layout().lights
-        return light_frame_from_box(
+        frame = light_frame_from_box(
             x - origin.x(),
             y - origin.y(),
             width,
@@ -1232,6 +1419,98 @@ class HudEditor(QWidget):
             max(stage.height(), 1),
             visible=current.visible,
         )
+        return light_frame(
+            visible=frame.visible,
+            x=snap_axis(frame.x, GRID_X),
+            y=snap_axis(frame.y, GRID_Y),
+            scale=frame.scale,
+        )
+
+    def _on_preview_resized(self) -> None:
+        self._place_lights()
+        if self._surface == VIEW_LIVE:
+            self._place_editor_chrome()
+
+    def _select(self, element_id: str) -> None:
+        self._selected_element = element_id
+        for region_id, handle in self._region_handles.items():
+            handle.set_active(region_id == element_id)
+        self._ranking_handle.set_active(element_id == "between_ranking")
+
+    def _on_region(self, region_id: str, x: float, y: float, width: float, height: float) -> None:
+        fractions = self._region_fractions()
+        fractions[region_id] = snap_rect(x, y, width, height)
+        ordered = tuple((key, *fractions[key]) for key in REGION_IDS)
+        self._commit(replace(self.selected_layout(), regions=ordered))
+
+    def _on_ranking_drag(self, x: float, y: float, width: float, height: float) -> None:
+        snapped_x, snapped_y, snapped_width, snapped_height = snap_rect(x, y, width, height)
+        current = self.selected_layout().between_ranking
+        self.set_between_ranking(
+            replace(
+                current,
+                x=snapped_x,
+                y=snapped_y,
+                width=snapped_width,
+                height=snapped_height,
+            )
+        )
+
+    def _region_fractions(self) -> dict[str, tuple[float, float, float, float]]:
+        layout = self.selected_layout()
+        if regions_ready(layout):
+            stored: dict[str, tuple[float, float, float, float]] = {}
+            for region_id in REGION_IDS:
+                frame = region_frame(layout, region_id)
+                if frame is None:
+                    stored = {}
+                    break
+                stored[region_id] = (frame.x, frame.y, frame.width, frame.height)
+            if stored:
+                return stored
+        canvas = self.stage.canvas
+        width = max(canvas.width(), 1)
+        height = max(canvas.height(), 1)
+        return {
+            region_id: (
+                widget.x() / width,
+                widget.y() / height,
+                widget.width() / width,
+                widget.height() / height,
+            )
+            for region_id, widget in self.stage.panels().items()
+        }
+
+    def _place_editor_chrome(self) -> None:
+        """Keep selection handles on the elements. Embedded widgets do not take the drag."""
+        live = self._surface == VIEW_LIVE
+        between = self._surface == VIEW_BETWEEN
+        self._live_grid.setVisible(live)
+        for handle in self._region_handles.values():
+            handle.setVisible(live)
+        self._ranking_handle.setVisible(between and not self.between.ranking.isHidden())
+        if live:
+            canvas = self.stage.canvas
+            self._live_grid.setGeometry(0, 0, max(canvas.width(), 0), max(canvas.height(), 0))
+            self._live_grid.lower()
+            for region_id, widget in self.stage.panels().items():
+                handle = self._region_handles[region_id]
+                handle.setGeometry(widget.geometry())
+                handle.show()
+                handle.raise_()
+            chosen = self._region_handles.get(self._selected_element or "")
+            if chosen is not None and chosen.isVisible():
+                chosen.raise_()
+            self._shield_embedded(canvas)
+        if between:
+            self._shield_embedded(self.between.ranking)
+            self._ranking_handle.raise_()
+
+    def _shield_embedded(self, root: QWidget) -> None:
+        """Tables, sliders and buttons inside an edited element must not eat the drag."""
+        for child in root.findChildren(QWidget):
+            if isinstance(child, QAbstractItemView | QScrollBar | QPushButton):
+                child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def _on_handle(self, x: int, y: int, width: int, height: int) -> None:
         frame = self._frame_from_handle(x, y, width, height)

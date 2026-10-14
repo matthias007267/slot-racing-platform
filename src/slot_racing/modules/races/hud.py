@@ -2,8 +2,9 @@
 
 The document lives in the global settings table under :data:`HUD_CONFIGURATION_KEY`.
 A missing or broken document becomes the factory layout instead of crashing.
-A version-1 free-form document is kept as the factory layout; its old rectangles
-are ignored because the live view no longer places panels by hand.
+A version-1 free-form document is kept as the factory layout; those old rectangles
+are ignored. The current document can still store a placement for each live area.
+Without that placement the areas keep the share layout.
 """
 
 from __future__ import annotations
@@ -27,6 +28,18 @@ HUD_VERSION = 3
 """Version 2 is the live layout without per-view text. It still loads."""
 MIN_SPAN = 0.06
 """Smallest width or height, as a fraction of the display, so a frame stays usable."""
+GRID_X = 16 * 8
+GRID_Y = 9 * 8
+"""Fine editor grid: 128 columns and 72 rows on the 16:9 canvas, eight cells per major line."""
+REGION_IDS: tuple[str, ...] = (
+    "clock",
+    "status",
+    "lanes",
+    "ranking",
+    "messages",
+    "controls",
+)
+"""Live areas the editor can place by hand. An empty list keeps the share layout."""
 
 SCALE_MIN = 70
 SCALE_MAX = 150
@@ -324,6 +337,7 @@ class HudLayout:
     lights: LightFrame = LightFrame()
     views: tuple[tuple[str, ViewStyle], ...] = ()
     between_ranking: BetweenRanking = BetweenRanking()
+    regions: tuple[tuple[str, float, float, float, float], ...] = ()
 
     def field(self, field_id: str) -> FieldStyle:
         for key, style in self.fields:
@@ -553,6 +567,42 @@ def clamp_widget(widget: HudWidgetConfig) -> HudWidgetConfig:
         width=width,
         height=height,
     )
+
+
+def snap_axis(value: float, parts: int) -> float:
+    """Nearest grid line. ``parts`` is the number of cells along that axis."""
+    if parts <= 0 or not math.isfinite(value):
+        return 0.0
+    return round(value * parts) / parts
+
+
+def snap_rect(x: float, y: float, width: float, height: float) -> tuple[float, float, float, float]:
+    """Snap a rectangle to the editor grid, then keep it on the surface."""
+    snapped = clamp_widget(
+        HudWidgetConfig(
+            "region",
+            True,
+            snap_axis(x, GRID_X),
+            snap_axis(y, GRID_Y),
+            snap_axis(width, GRID_X),
+            snap_axis(height, GRID_Y),
+        )
+    )
+    return snapped.x, snapped.y, snapped.width, snapped.height
+
+
+def regions_ready(layout: HudLayout) -> bool:
+    """True when every live area has a stored rectangle."""
+    found = {item[0] for item in layout.regions}
+    return all(region_id in found for region_id in REGION_IDS)
+
+
+def region_frame(layout: HudLayout, region_id: str) -> HudWidgetConfig | None:
+    """One stored live area, or none when this layout still uses shares."""
+    for stored_id, x, y, width, height in layout.regions:
+        if stored_id == region_id:
+            return clamp_widget(HudWidgetConfig(region_id, True, x, y, width, height))
+    return None
 
 
 def snap_light_scale(value: object) -> int:
@@ -898,7 +948,7 @@ class HudConfigurationStore:
 
 def _layout_document(layout: HudLayout) -> dict[str, Any]:
     lights = layout.lights
-    return {
+    document: dict[str, Any] = {
         "id": layout.id,
         "name": layout.name,
         "builtin": layout.builtin,
@@ -928,6 +978,12 @@ def _layout_document(layout: HudLayout) -> dict[str, Any]:
         },
         "between_ranking": _between_ranking_document(layout.between_ranking),
     }
+    if layout.regions:
+        document["regions"] = [
+            {"id": region_id, "x": x, "y": y, "width": width, "height": height}
+            for region_id, x, y, width, height in _ordered_regions(layout.regions)
+        ]
+    return document
 
 
 def _layout(value: object) -> HudLayout | None:
@@ -955,6 +1011,7 @@ def _layout(value: object) -> HudLayout | None:
         lights=_lights(value.get("lights")),
         views=_views(value.get("views")),
         between_ranking=_between_ranking(value.get("between_ranking")),
+        regions=_regions(value.get("regions")),
     )
 
 
@@ -1082,6 +1139,38 @@ def _kept(layout_id: str, layouts: tuple[HudLayout, ...], fallback: str) -> str:
     if any(item.id == layout_id for item in layouts):
         return layout_id
     return fallback
+
+
+def _ordered_regions(
+    regions: tuple[tuple[str, float, float, float, float], ...],
+) -> tuple[tuple[str, float, float, float, float], ...]:
+    by_id = {item[0]: item for item in regions}
+    return tuple(by_id[region_id] for region_id in REGION_IDS if region_id in by_id)
+
+
+def _regions(value: object) -> tuple[tuple[str, float, float, float, float], ...]:
+    """Drop unknown areas. A missing list means the share layout."""
+    if not isinstance(value, list):
+        return ()
+    found: list[tuple[str, float, float, float, float]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        region_id = item.get("id")
+        if not isinstance(region_id, str) or region_id not in REGION_IDS or region_id in seen:
+            continue
+        found.append(
+            (
+                region_id,
+                _number(item.get("x"), 0.0),
+                _number(item.get("y"), 0.0),
+                _number(item.get("width"), MIN_SPAN),
+                _number(item.get("height"), MIN_SPAN),
+            )
+        )
+        seen.add(region_id)
+    return _ordered_regions(tuple(found))
 
 
 def _between_ranking_document(frame: BetweenRanking) -> dict[str, Any]:

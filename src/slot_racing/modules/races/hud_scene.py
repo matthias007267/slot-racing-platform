@@ -49,6 +49,7 @@ from slot_racing.modules.races.hud import (
     RANKING_MIN_HEIGHT,
     RANKING_MIN_WIDTH,
     RECORDS_MIN_HEIGHT,
+    REGION_IDS,
     STAGE_GAP,
     TEXT_DRIVER,
     TEXT_HEADER,
@@ -58,6 +59,7 @@ from slot_racing.modules.races.hud import (
     VIEW_LIVE,
     VIEW_RESULTS,
     HudLayout,
+    HudWidgetConfig,
     between_ranking_pixels,
     briefing_px,
     caption_px,
@@ -68,6 +70,9 @@ from slot_racing.modules.races.hud import (
     light_pixels,
     project_ranking_cells,
     records_shown,
+    region_frame,
+    regions_ready,
+    to_pixels,
     visible_ranking_columns,
 )
 from slot_racing.modules.races.runner import LiveRow, RaceSnapshot
@@ -738,6 +743,9 @@ def _surfaces(
 
 
 def _place_stage(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePlace:
+    custom = _place_regions(layout, stage, lane_count)
+    if custom is not None:
+        return custom
     content_h, columns, rows, canvas_w = _stage_need(layout, stage.width, lane_count)
     canvas_h = max(stage.height, content_h)
     top_h, mid_h, bot_h = _lengths(
@@ -818,6 +826,35 @@ def _place_stage(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePla
         horizontal=canvas_w > stage.width,
         limits=tuple(limits),
     )
+
+
+def _place_regions(layout: HudLayout, stage: HudBox, lane_count: int) -> _StagePlace | None:
+    """Stored rectangles, in the same fractions the PC stage uses. Shares stay untouched."""
+    if not regions_ready(layout) or stage.width <= 0 or stage.height <= 0:
+        return None
+    panels: list[HudBox] = []
+    for region_id in REGION_IDS:
+        frame = region_frame(layout, region_id)
+        if frame is None:
+            return None
+        rect = to_pixels(
+            HudWidgetConfig(frame.id, True, frame.x, frame.y, frame.width, frame.height),
+            stage.width,
+            stage.height,
+        )
+        panels.append(
+            _box(
+                region_id,
+                stage.x + rect.x,
+                stage.y + rect.y,
+                rect.width,
+                rect.height,
+                share=1,
+            )
+        )
+    lanes_box = panels[REGION_IDS.index("lanes")]
+    columns, rows = _lane_grid(lane_count, lanes_box.width)
+    return _StagePlace(tuple(panels), lanes_box, columns, rows, False, False, ())
 
 
 def _stage_need(layout: HudLayout, width: int, lane_count: int) -> tuple[int, int, int, int]:

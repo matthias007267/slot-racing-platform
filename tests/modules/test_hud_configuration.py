@@ -9,6 +9,8 @@ import pytest
 
 from slot_racing.core.storage import Database, Setting
 from slot_racing.modules.races.hud import (
+    GRID_X,
+    GRID_Y,
     HUD_CONFIGURATION_KEY,
     HUD_VERSION,
     HUD_WINDOW_KEY,
@@ -16,6 +18,7 @@ from slot_racing.modules.races.hud import (
     LIGHT_SCALE_MIN,
     LIGHT_STANDARD_WIDTH,
     MIN_SPAN,
+    REGION_IDS,
     STANDARD_LAYOUT_ID,
     FieldStyle,
     HudConfiguration,
@@ -39,6 +42,8 @@ from slot_racing.modules.races.hud import (
     mark_default,
     ranking_columns,
     replace_layout,
+    snap_axis,
+    snap_rect,
     snap_scale,
     to_document,
     to_pixels,
@@ -344,6 +349,33 @@ def test_a_broken_editor_window_falls_back_to_the_default_placement() -> None:
     with database.session() as session:
         session.add(Setting(key=HUD_WINDOW_KEY, value=["nope"]))
     assert store.load_window() == HudWindowPlacement()
+
+
+def test_the_editor_grid_is_the_old_128_by_72_lattice() -> None:
+    assert GRID_X == 128
+    assert GRID_Y == 72
+    assert snap_axis(0.12, GRID_X) == pytest.approx(15 / 128)
+    assert snap_axis(0.12, GRID_Y) == pytest.approx(9 / 72)
+    assert snap_rect(0.12, 0.12, 0.62, 0.14) == pytest.approx((15 / 128, 9 / 72, 79 / 128, 10 / 72))
+
+
+def test_placed_regions_round_trip_and_a_missing_list_keeps_the_shares() -> None:
+    regions = tuple(
+        (region_id, 0.02 * index, 0.04, 0.20, 0.30) for index, region_id in enumerate(REGION_IDS)
+    )
+    layout = replace(factory_layout(), regions=regions, clock_share=3)
+    document = replace(
+        default_hud_configuration(),
+        layouts=(layout,),
+        selected_id=layout.id,
+        default_id=layout.id,
+    )
+    restored = coerce(to_document(document)).default_layout()
+    assert restored.clock_share == 3
+    assert restored.regions == regions
+    untouched = coerce(to_document(default_hud_configuration())).default_layout()
+    assert untouched.regions == ()
+    assert "regions" not in to_document(default_hud_configuration())["layouts"][0]
 
 
 def test_an_older_layout_gains_the_between_ranking_without_losing_its_settings() -> None:
