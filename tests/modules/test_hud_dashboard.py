@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication, QWidget
@@ -9,6 +10,11 @@ from pytestqt.qtbot import QtBot
 
 from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
 from slot_racing.core.domain import RaceStatus
+from slot_racing.modules.races.hud import (
+    RANKING_COLUMN_IDS,
+    factory_ranking_widths,
+    ranking_column_pixels,
+)
 from slot_racing.modules.races.time_trial_board import format_lap_seconds
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
 from slot_racing.modules.races.ui.hud_widgets import (
@@ -220,7 +226,16 @@ def _assert_names_and_lap_counts_fit(ranking: LiveRankingWidget, names: list[str
         assert item is not None
         lap_need = max(lap_need, table.fontMetrics().horizontalAdvance(item.text()))
     assert table.columnWidth(COLUMN_LAPS) >= lap_need + 16
-    assert table.isColumnHidden(COLUMN_BEST) or table.columnWidth(COLUMN_BEST) >= 64
+    visible = tuple(
+        RANKING_COLUMN_IDS[column]
+        for column in range(table.columnCount())
+        if not table.isColumnHidden(column)
+    )
+    expected = dict(
+        ranking_column_pixels(visible, factory_ranking_widths(), table.viewport().width())
+    )
+    assert not table.isColumnHidden(COLUMN_BEST)
+    assert table.columnWidth(COLUMN_BEST) == pytest.approx(expected["best_lap"], abs=2)
 
 
 def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:

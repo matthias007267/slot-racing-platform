@@ -131,6 +131,7 @@ class LiveHudStage(QScrollArea):
         else:
             self._place_flow(layout)
         self.lanes.apply_style(layout)
+        self.ranking.set_column_widths(layout.ranking_widths)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -243,6 +244,7 @@ class LiveHudStage(QScrollArea):
         self.time_label.setText(format_duration(snapshot.elapsed_ns))
         ended = snapshot.status is RaceStatus.FINISHED
         paused = snapshot.status is RaceStatus.PAUSED
+        self.ranking.set_column_widths(self._layout_spec.ranking_widths)
         ranking = snapshot.standings or snapshot.rows
         fill_table(
             self.table,

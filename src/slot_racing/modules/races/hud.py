@@ -175,6 +175,27 @@ BETWEEN_RANKING_DEFAULT_SHOWN: frozenset[str] = frozenset(
     {"position", "driver", "laps", "last_lap", "best_lap", "total_time", "status"}
 )
 BETWEEN_RANKING_FONT_BASE = 16
+RANKING_WIDTH_MIN = 4
+"""Smallest share of the visible table, in percent, so a column stays usable."""
+# Relative weights. Time columns are wider than a place number: the content fit used to
+# leave Bestzeit and Gesamtzeit only as wide as the digits.
+RANKING_DEFAULT_WEIGHTS: dict[str, int] = {
+    "position": 50,
+    "driver": 180,
+    "vehicle": 140,
+    "start_number": 55,
+    "lane": 50,
+    "laps": 55,
+    "current_lap": 70,
+    "last_lap": 100,
+    "best_lap": 110,
+    "total_time": 120,
+    "progress": 40,
+    "status": 30,
+}
+_FACTORY_RANKING_WIDTHS: tuple[tuple[str, int], ...] = tuple(
+    (column_id, RANKING_DEFAULT_WEIGHTS[column_id]) for column_id in RANKING_COLUMN_IDS
+)
 _FACTORY_BETWEEN_COLUMNS: tuple[tuple[str, bool], ...] = tuple(
     (column_id, column_id in BETWEEN_RANKING_DEFAULT_SHOWN) for column_id in RANKING_COLUMN_IDS
 )
@@ -287,6 +308,7 @@ class BetweenRanking:
     height: float = 0.96
     font_scale: int = 100
     columns: tuple[tuple[str, bool], ...] = _FACTORY_BETWEEN_COLUMNS
+    widths: tuple[tuple[str, int], ...] = _FACTORY_RANKING_WIDTHS
 
     def as_config(self) -> HudWidgetConfig:
         return HudWidgetConfig(
@@ -338,6 +360,7 @@ class HudLayout:
     views: tuple[tuple[str, ViewStyle], ...] = ()
     between_ranking: BetweenRanking = BetweenRanking()
     regions: tuple[tuple[str, float, float, float, float], ...] = ()
+    ranking_widths: tuple[tuple[str, int], ...] = _FACTORY_RANKING_WIDTHS
 
     def field(self, field_id: str) -> FieldStyle:
         for key, style in self.fields:
@@ -402,6 +425,7 @@ def normalize_between_ranking(frame: BetweenRanking) -> BetweenRanking:
         height=widget.height,
         font_scale=snap_scale(frame.font_scale),
         columns=_ranking_columns(frame.columns),
+        widths=normalize_ranking_widths(frame.widths),
     )
 
 
@@ -409,6 +433,118 @@ def between_ranking_pixels(frame: BetweenRanking, width: int, height: int) -> Pi
     """The ranking rectangle on a between-heats surface of this size."""
     normalized = normalize_between_ranking(frame)
     return to_pixels(normalized.as_config(), width, height)
+
+
+def factory_ranking_widths() -> tuple[tuple[str, int], ...]:
+    """Balanced default. Bestzeit and Gesamtzeit are wider than a place or a lap count."""
+    return _FACTORY_RANKING_WIDTHS
+
+
+def normalize_ranking_widths(value: object) -> tuple[tuple[str, int], ...]:
+    """Weights keyed by column id. Unknown ids drop out. A missing id keeps the default."""
+    found: dict[str, int] = {}
+    raw: object = value
+    if isinstance(raw, dict):
+        raw = list(raw.items())
+    if not isinstance(raw, list | tuple):
+        raw = ()
+    for item in raw:
+        column_id, weight = _width_entry(item)
+        if column_id is None or column_id in found:
+            continue
+        found[column_id] = weight
+    return tuple(
+        (column_id, found.get(column_id, RANKING_DEFAULT_WEIGHTS[column_id]))
+        for column_id in RANKING_COLUMN_IDS
+    )
+
+
+def ranking_width_shares(
+    column_ids: tuple[str, ...] | list[str],
+    widths: tuple[tuple[str, int], ...] | object,
+) -> tuple[tuple[str, float], ...]:
+    """Shares of the columns that are shown. Hidden columns are left out and take no space."""
+    ids = tuple(column_ids)
+    if not ids:
+        return ()
+    weights = dict(normalize_ranking_widths(widths))
+    raw = [max(weights[column_id], 1) for column_id in ids]
+    total = float(sum(raw))
+    shares = [weight / total for weight in raw]
+    minimum = RANKING_WIDTH_MIN / 100
+    if len(ids) * minimum < 1:
+        shares = _raise_share_floor(shares, minimum)
+    return tuple(zip(ids, shares, strict=True))
+
+
+def ranking_column_pixels(
+    column_ids: tuple[str, ...] | list[str],
+    widths: tuple[tuple[str, int], ...] | object,
+    viewport: int,
+) -> tuple[tuple[str, int], ...]:
+    """Integer widths that sum to ``viewport``. The same shares scale with the panel."""
+    shares = ranking_width_shares(column_ids, widths)
+    if not shares or viewport <= 0:
+        return tuple((column_id, 0) for column_id, _share in shares)
+    raw = [share * viewport for _column_id, share in shares]
+    floors = [math.floor(value) for value in raw]
+    leftover = viewport - sum(floors)
+    order = sorted(range(len(shares)), key=lambda index: raw[index] - floors[index], reverse=True)
+    for index in order[: max(leftover, 0)]:
+        floors[index] += 1
+    return tuple((shares[index][0], floors[index]) for index in range(len(shares)))
+
+
+def assign_column_share(
+    widths: tuple[tuple[str, int], ...] | object,
+    visible_ids: tuple[str, ...] | list[str],
+    column_id: str,
+    percent: int,
+) -> tuple[tuple[str, int], ...]:
+    """Set one visible column to ``percent`` of the table. The others keep their ratios."""
+    visible = tuple(visible_ids)
+    current = normalize_ranking_widths(widths)
+    if column_id not in visible:
+        return current
+    if len(visible) == 1:
+        return current
+    cap = 100 - RANKING_WIDTH_MIN * (len(visible) - 1)
+    chosen = min(max(int(percent), RANKING_WIDTH_MIN), cap)
+    shares = dict(ranking_width_shares(visible, current))
+    others = [item for item in visible if item != column_id]
+    other_parts = [shares[item] for item in others]
+    other_weights = _share_integers(other_parts, (100 - chosen) * 100)
+    updated = dict(current)
+    updated[column_id] = chosen * 100
+    for item, weight in zip(others, other_weights, strict=True):
+        updated[item] = max(1, weight)
+    return normalize_ranking_widths(tuple(updated.items()))
+
+
+def split_ranking_boundary(
+    widths: tuple[tuple[str, int], ...] | object,
+    visible_ids: tuple[str, ...] | list[str],
+    left_id: str,
+    right_id: str,
+    left_px: int,
+    pair_px: int,
+) -> tuple[tuple[str, int], ...]:
+    """Move the border between two visible columns. Every other weight stays put."""
+    visible = tuple(visible_ids)
+    current = normalize_ranking_widths(widths)
+    if left_id not in visible or right_id not in visible or pair_px <= 0:
+        return current
+    stored = dict(current)
+    pair_weight = stored[left_id] + stored[right_id]
+    visible_total = sum(stored[column_id] for column_id in visible)
+    floor = max(1, math.ceil(visible_total * RANKING_WIDTH_MIN / 100))
+    if pair_weight <= floor * 2:
+        return current
+    left_weight = round(pair_weight * (left_px / pair_px))
+    left_weight = min(max(left_weight, floor), pair_weight - floor)
+    stored[left_id] = left_weight
+    stored[right_id] = pair_weight - left_weight
+    return normalize_ranking_widths(tuple(stored.items()))
 
 
 def project_ranking_cells(cells: tuple[str, ...], frame: BetweenRanking) -> tuple[str, ...]:
@@ -977,6 +1113,7 @@ def _layout_document(layout: HudLayout) -> dict[str, Any]:
             "height": lights.height,
         },
         "between_ranking": _between_ranking_document(layout.between_ranking),
+        "ranking_widths": _width_document(layout.ranking_widths),
     }
     if layout.regions:
         document["regions"] = [
@@ -1012,6 +1149,11 @@ def _layout(value: object) -> HudLayout | None:
         views=_views(value.get("views")),
         between_ranking=_between_ranking(value.get("between_ranking")),
         regions=_regions(value.get("regions")),
+        ranking_widths=(
+            normalize_ranking_widths(value["ranking_widths"])
+            if "ranking_widths" in value
+            else factory_ranking_widths()
+        ),
     )
 
 
@@ -1185,6 +1327,7 @@ def _between_ranking_document(frame: BetweenRanking) -> dict[str, Any]:
         "columns": [
             {"id": column_id, "visible": visible} for column_id, visible in normalized.columns
         ],
+        "widths": _width_document(normalized.widths),
     }
 
 
@@ -1203,6 +1346,7 @@ def _between_ranking(value: object) -> BetweenRanking:
         height=_number(value.get("height"), base.height),
         font_scale=snap_scale(value.get("font_scale", base.font_scale)),
         columns=_ranking_columns(value["columns"]) if "columns" in value else base.columns,
+        widths=normalize_ranking_widths(value["widths"]) if "widths" in value else base.widths,
     )
     return normalize_between_ranking(draft)
 
@@ -1223,6 +1367,65 @@ def _ranking_columns(value: object) -> tuple[tuple[str, bool], ...]:
         if column_id not in seen:
             found.append((column_id, column_id in BETWEEN_RANKING_DEFAULT_SHOWN))
     return tuple(found)
+
+
+def _width_document(widths: tuple[tuple[str, int], ...]) -> list[dict[str, int | str]]:
+    normalized = normalize_ranking_widths(widths)
+    return [{"id": column_id, "width": weight} for column_id, weight in normalized]
+
+
+def _width_entry(item: object) -> tuple[str | None, int]:
+    column_id: object
+    weight: object
+    if isinstance(item, dict):
+        column_id = item.get("id")
+        weight = item.get("width", item.get("weight"))
+    elif isinstance(item, tuple) and len(item) == 2:
+        column_id, weight = item
+    else:
+        return None, 0
+    if not isinstance(column_id, str) or column_id not in RANKING_COLUMN_IDS:
+        return None, 0
+    if isinstance(weight, bool) or not isinstance(weight, int | float) or not math.isfinite(weight):
+        return column_id, RANKING_DEFAULT_WEIGHTS[column_id]
+    return column_id, max(1, round(weight))
+
+
+def _raise_share_floor(shares: list[float], minimum: float) -> list[float]:
+    guarded = [max(share, minimum) for share in shares]
+    for _attempt in range(6):
+        overflow = sum(guarded) - 1.0
+        if overflow <= 1e-9:
+            break
+        donors = [index for index, share in enumerate(guarded) if share > minimum + 1e-9]
+        capacity = sum(guarded[index] - minimum for index in donors)
+        if capacity <= 1e-9:
+            break
+        for index in donors:
+            room = guarded[index] - minimum
+            guarded[index] -= min(room, overflow * (room / capacity))
+    total = sum(guarded)
+    if total <= 0:
+        return shares
+    return [share / total for share in guarded]
+
+
+def _share_integers(parts: list[float], total: int) -> list[int]:
+    if not parts:
+        return []
+    if total <= 0:
+        return [0 for _part in parts]
+    whole = sum(parts)
+    if whole <= 0:
+        raw = [total / len(parts) for _part in parts]
+    else:
+        raw = [total * (part / whole) for part in parts]
+    floors = [math.floor(value) for value in raw]
+    leftover = total - sum(floors)
+    order = sorted(range(len(parts)), key=lambda index: raw[index] - floors[index], reverse=True)
+    for index in order[: max(leftover, 0)]:
+        floors[index] += 1
+    return [max(weight, 1) for weight in floors]
 
 
 def _column_entry(item: object) -> tuple[str | None, bool]:

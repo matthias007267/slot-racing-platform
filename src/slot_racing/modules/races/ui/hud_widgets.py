@@ -34,10 +34,15 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.races.hud import (
+    RANKING_COLUMN_IDS,
+    factory_ranking_widths,
+    normalize_ranking_widths,
+    ranking_column_pixels,
+)
 from slot_racing.modules.races.hud_scene import (
     RANKING_BEST_RESERVE,
     RANKING_CELL_PAD,
-    ranking_best_fits,
     ranking_width_hidden,
 )
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
@@ -388,7 +393,12 @@ class LiveRankingWidget(HudWidget):
         self.table.setItemDelegate(RankingDelegate(self.table))
         self.table.verticalHeader().setDefaultSectionSize(32)
         self._fitting = False
+        self._widths = factory_ranking_widths()
         self.body.addWidget(self.table, 1)
+
+    def set_column_widths(self, widths: tuple[tuple[str, int], ...]) -> None:
+        """Relative weights. ``present`` applies them and does not measure the text instead."""
+        self._widths = normalize_ranking_widths(widths)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -421,8 +431,8 @@ class LiveRankingWidget(HudWidget):
             self._base_font = QFont(self.table.font())
         if self._column_budget() < 40:
             return
-        # Prefer a size that also keeps the best-lap column. Only when that cannot
-        # fit does the column disappear, and the names and lap counts stay whole.
+        # Prefer a size that also leaves room for the best-lap text. The saved
+        # column shares still decide the widths; this only chooses the font.
         if not self._apply_fitting_font(keep_best=True):
             self._apply_fitting_font(keep_best=False)
 
@@ -487,87 +497,36 @@ class LiveRankingWidget(HudWidget):
         self.table.updateGeometries()
 
     def _apply_columns(self) -> None:
-        """Hide columns with the shared width rule, then fit the text that remains."""
+        """Hide columns with the shared width rule, then apply the saved shares."""
         width = self._column_budget()
         hidden = ranking_width_hidden(width)
         if hidden is None:
             return
         for column in range(self.table.columnCount()):
             self.table.setColumnHidden(column, column in hidden)
-        self._assign_widths(width)
-
-    def _assign_widths(self, viewport: int) -> None:
-        """Keep place, driver and lap count whole. Drop the best lap when it no longer fits."""
         visible = [
             column
             for column in range(self.table.columnCount())
             if not self.table.isColumnHidden(column)
         ]
-        floors = {
-            column: self._cell_need(column) for column in visible if column in _PRIMARY_COLUMNS
-        }
-        remaining = viewport - sum(floors.values())
-        secondary = [column for column in visible if column not in _PRIMARY_COLUMNS]
-        if COLUMN_BEST in secondary and not ranking_best_fits(viewport, sum(floors.values())):
-            self.table.setColumnHidden(COLUMN_BEST, True)
-            secondary = [column for column in secondary if column != COLUMN_BEST]
-            visible = [column for column in visible if column != COLUMN_BEST]
-        chosen: dict[int, int] = dict(floors)
-        if COLUMN_BEST in secondary:
-            chosen[COLUMN_BEST] = RANKING_BEST_RESERVE
-            remaining -= RANKING_BEST_RESERVE
-        for column in secondary:
-            if column == COLUMN_BEST:
-                continue
-            need = self._cell_need(column)
-            take = need if need <= max(remaining, 0) else max(remaining, 1)
-            chosen[column] = take
-            remaining -= take
-        if remaining > 0 and COLUMN_DRIVER in chosen:
-            if COLUMN_VEHICLE in chosen:
-                half = remaining // 2
-                chosen[COLUMN_VEHICLE] += half
-                chosen[COLUMN_DRIVER] += remaining - half
-            else:
-                chosen[COLUMN_DRIVER] += remaining
-        overflow = sum(chosen.values()) - viewport
-        if overflow > 0:
-            for column in reversed(secondary):
-                if column == COLUMN_BEST or column not in chosen:
-                    continue
-                cut = min(max(0, chosen[column] - 1), overflow)
-                chosen[column] -= cut
-                overflow -= cut
-            if overflow > 0 and COLUMN_BEST in chosen:
-                self.table.setColumnHidden(COLUMN_BEST, True)
-                del chosen[COLUMN_BEST]
-        self._lock_columns(chosen, floors)
-
-    def _lock_columns(self, chosen: dict[int, int], floors: dict[int, int]) -> None:
-        """Fixed widths so a stretch section cannot steal pixels from the lap count."""
+        ids = tuple(RANKING_COLUMN_IDS[column] for column in visible)
+        pixels = dict(ranking_column_pixels(ids, self._widths, width))
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(1)
-        for column, width in chosen.items():
+        header.setStretchLastSection(False)
+        for column in visible:
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-            self.table.setColumnWidth(column, max(width, 1))
+            self.table.setColumnWidth(column, max(pixels[RANKING_COLUMN_IDS[column]], 1))
         self.table.updateGeometries()
         overflow = self.table.horizontalScrollBar().maximum()
         guard = 0
-        while overflow > 0 and guard < 8:
+        while overflow > 0 and guard < 8 and visible:
             guard += 1
-            donor = None
-            for column in (COLUMN_DRIVER, COLUMN_VEHICLE, *chosen):
-                if column not in chosen:
-                    continue
-                floor = floors.get(column, 1)
-                if chosen[column] > floor:
-                    donor = column
-                    break
-            if donor is None:
+            donor = max(visible, key=self.table.columnWidth)
+            current = self.table.columnWidth(donor)
+            if current <= 1:
                 break
-            cut = min(chosen[donor] - floors.get(donor, 1), overflow)
-            chosen[donor] -= max(cut, 1)
-            self.table.setColumnWidth(donor, chosen[donor])
+            self.table.setColumnWidth(donor, current - min(current - 1, overflow))
             self.table.updateGeometries()
             overflow = self.table.horizontalScrollBar().maximum()
 

@@ -912,9 +912,27 @@ _HUD_HTML = """<!DOCTYPE html>
       table.setAttribute("data-cols", signature);
     }
     table.style.fontSize = ranking.font_px ? px(ranking.font_px) : "";
-    table.style.tableLayout = scrolls ? "auto" : "fixed";
-    table.style.width = scrolls ? "max-content" : "100%";
-    table.style.minWidth = scrolls ? "100%" : "0";
+    var usesShares = false;
+    for (index = 0; index < columns.length; index += 1) {
+      var share = columns[index].column.share;
+      if (typeof share === "number" && share > 0) usesShares = true;
+    }
+    if (usesShares) {
+      table.style.tableLayout = "fixed";
+      table.style.width = "100%";
+      table.style.minWidth = "0";
+    } else {
+      table.style.tableLayout = scrolls ? "auto" : "fixed";
+      table.style.width = scrolls ? "max-content" : "100%";
+      table.style.minWidth = scrolls ? "100%" : "0";
+    }
+    var headCells = table.querySelectorAll("thead th");
+    for (index = 0; index < columns.length && index < headCells.length; index += 1) {
+      var columnShare = columns[index].column.share;
+      if (typeof columnShare === "number" && columnShare > 0) {
+        headCells[index].style.width = (columnShare * 100) + "%";
+      }
+    }
     var body = table.querySelector("tbody");
     var rows = ranking.rows || [];
     var keep = {};

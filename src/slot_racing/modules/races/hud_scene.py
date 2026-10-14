@@ -69,6 +69,7 @@ from slot_racing.modules.races.hud import (
     light_gantry,
     light_pixels,
     project_ranking_cells,
+    ranking_width_shares,
     records_shown,
     region_frame,
     regions_ready,
@@ -365,6 +366,7 @@ class HudColumn:
     color_role: str
     bold: str
     visible: bool = True
+    share: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,6 +650,7 @@ def build_hud_scene(
             else _ranking(
                 translator,
                 snapshot,
+                layout,
                 next((item.width for item in panels if item.id == "ranking"), 0),
             )
         ),
@@ -1057,6 +1060,7 @@ def _configured_ranking(
     ended = snapshot.status is RaceStatus.FINISHED
     paused = snapshot.status is RaceStatus.PAUSED
     column_ids = visible_ranking_columns(frame)
+    shares = dict(ranking_width_shares(column_ids, frame.widths))
     style = {column[0]: column for column in _RANKING_COLUMNS}
     columns = tuple(
         HudColumn(
@@ -1066,6 +1070,7 @@ def _configured_ranking(
             style[column_id][3],
             style[column_id][4],
             True,
+            shares.get(column_id, 0.0),
         )
         for column_id in column_ids
     )
@@ -1102,7 +1107,9 @@ def _configured_ranking(
     )
 
 
-def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudRanking:
+def _ranking(
+    translator: Translator, snapshot: RaceSnapshot, layout: HudLayout, width: int
+) -> HudRanking:
     ended = snapshot.status is RaceStatus.FINISHED
     paused = snapshot.status is RaceStatus.PAUSED
     rows = []
@@ -1117,6 +1124,12 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
                 participant_id=standing.participant_id,
             )
         )
+    visible_ids = tuple(
+        column_id
+        for column_id, _key, _priority, _role, _bold in _RANKING_COLUMNS
+        if ranking_column_visible(column_id, width)
+    )
+    shares = dict(ranking_width_shares(visible_ids, layout.ranking_widths))
     columns = tuple(
         HudColumn(
             column_id,
@@ -1125,6 +1138,7 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
             role,
             bold,
             ranking_column_visible(column_id, width),
+            shares.get(column_id, 0.0),
         )
         for column_id, key, priority, role, bold in _RANKING_COLUMNS
     )
@@ -1139,6 +1153,7 @@ def _ranking(translator: Translator, snapshot: RaceSnapshot, width: int) -> HudR
         best_reserve_px=RANKING_BEST_RESERVE,
         width_floor_px=RANKING_WIDTH_FLOOR,
         cell_pad_px=RANKING_CELL_PAD,
+        fit_columns=False,
     )
 
 
