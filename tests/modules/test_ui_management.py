@@ -645,9 +645,13 @@ def test_wizard_offers_lap_racing_and_a_time_trial(qtbot: QtBot, env: Env) -> No
     assert wizard.mode_combo.currentText() == "Rundenrennen"
     assert not wizard.laps_spin.isHidden()
     labels = [wizard.mode_combo.itemText(index) for index in range(wizard.mode_combo.count())]
-    assert labels == ["Rundenrennen", "Zeitrennen"]
+    assert labels == ["Rundenrennen", "Zeitrennen", "Freies Rennen"]
     wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("time_trial"))
     assert wizard.laps_spin.isHidden()
+    wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("free"))
+    assert wizard.laps_spin.isHidden()
+    assert wizard.duration_edit.isHidden()
+    assert wizard.repetitions_spin.isHidden()
     wizard.mode_combo.setCurrentIndex(wizard.mode_combo.findData("laps"))
     assert not wizard.laps_spin.isHidden()
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from slot_racing.core.clock import Clock
 from slot_racing.core.diagnostics import record
 from slot_racing.core.domain import (
+    DriverId,
     Participant,
     ParticipantResult,
     RaceId,
@@ -22,6 +23,7 @@ from slot_racing.core.domain import (
     TimingPosition,
     TimingSetup,
     TrackId,
+    VehicleId,
     default_timing_setup,
 )
 from slot_racing.core.errors import ValidationError
@@ -125,6 +127,24 @@ class RaceRunner:
     def stop(self) -> None:
         """End the race early. The standings so far are final."""
         self._engine.stop()
+
+    def reassign_lane(self, info: ParticipantInfo, *, at_ns: int) -> None:
+        """Replace one lane in a free session and clear that lane's live laps.
+
+        ``at_ns`` is the clock reading of the change. Crossings taken earlier stay on the
+        previous assignment and cannot complete a lap for the new one.
+        """
+        lane = info.lane
+        if lane is None:
+            raise ValidationError("error.race.lane_missing")
+        self._engine.reassign_lane(
+            Participant(driver_id=info.driver_id, lane=lane, vehicle_id=info.vehicle_id),
+            at_ns=at_ns,
+        )
+        self._participants[lane] = info
+        self._lap_times_ns.pop(lane, None)
+        kept = tuple(person for person in self.race.participants if person.lane != lane)
+        self.race = replace(self.race, participants=(*kept, info))
 
     def tick(self) -> None:
         self._engine.poll_sources()
@@ -255,6 +275,21 @@ class RaceController:
             self.active.close()
         self.active = runner
         return runner
+
+    def switch_lane(self, lane: int, driver_id: DriverId, vehicle_id: VehicleId) -> bool:
+        """Change one lane of the running free session.
+
+        The same driver and vehicle change nothing. A real change resets only that lane,
+        including a lap that had already started. The other lane keeps running.
+        """
+        runner = self.active
+        if runner is None or not runner.is_active or runner.race.mode is not RaceMode.FREE:
+            raise ValidationError("error.race.not_switchable")
+        changed, info = self._service.switch_free_lane(runner.race.id, lane, driver_id, vehicle_id)
+        if not changed:
+            return False
+        runner.reassign_lane(info, at_ns=self._clock.now_ns())
+        return True
 
     def start_prepared(self) -> None:
         """Start the race that :meth:`prepare_race` left waiting."""

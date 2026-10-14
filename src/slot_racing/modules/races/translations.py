@@ -47,6 +47,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.wizard.active_lanes.two": "Zwei Spuren",
         "race.wizard.mode.laps": "Rundenrennen",
         "race.wizard.mode.time_trial": "Zeitrennen",
+        "race.wizard.mode.free": "Freies Rennen",
+        "race.wizard.free.hint": (
+            "Fahrer und Fahrzeug werden je Spur gewählt. Die Sitzung läuft, bis sie beendet wird."
+        ),
+        "race.wizard.free.lane": "Spur {lane}",
+        "race.wizard.free.empty": "—",
         "race.wizard.laps": "Anzahl Runden",
         "race.wizard.repetitions": "Wiederholungen",
         "race.wizard.repetitions.hint": (
@@ -70,8 +76,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.overview.repetitions": "Wiederholungen: {count}",
         "race.overview.time_trial": "Modus: Zeitrennen, ohne Rundenlimit",
         "race.overview.time_trial_duration": "Modus: Zeitrennen über {minutes} Minuten",
+        "race.overview.free": "Modus: Freies Rennen, bis zum Beenden",
         "race.overview.participants": "Teilnehmer:",
         "race.overview.participant": "{driver} mit {vehicle}",
+        "race.overview.free_participant": "Spur {lane}: {driver} mit {vehicle}",
         "race.overview.heats": "Durchläufe:",
         "race.overview.heat": "Durchlauf {sequence}: {seats}",
         "race.heat.title": "Durchlauf {sequence}",
@@ -106,6 +114,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.live.confirm_stop_time_trial": (
             "Die Zeitmessung beenden und die gemessenen Zeiten speichern?"
         ),
+        "race.live.confirm_stop_free": "Das freie Rennen beenden und die Zeitmessung stoppen?",
+        "race.live.switch_lane": "Fahrer/Auto wechseln – Spur {lane}",  # noqa: RUF001
+        "race.live.switch.title": "Fahrer und Fahrzeug – Spur {lane}",  # noqa: RUF001
+        "race.live.switch.confirm": "Übernehmen",
+        "race.live.switch.required": "Bitte Fahrer und Fahrzeug für diese Spur wählen.",
         "race.live.warning": "Warnung: {detail}",
         "race.live.no_race": "Es läuft kein Rennen.",
         "race.live.broadcast_failed": (
@@ -317,6 +330,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "error.race.not_restartable": (
             "Nur ein abgeschlossenes oder abgebrochenes Rennen kann neu gestartet werden."
+        ),
+        "error.race.not_switchable": (
+            "Fahrer und Fahrzeug können nur während eines freien Rennens gewechselt werden."
         ),
         "error.race.restart_name": "Der Name muss sich vom ursprünglichen Rennen unterscheiden.",
         "error.race.restart_incomplete": (

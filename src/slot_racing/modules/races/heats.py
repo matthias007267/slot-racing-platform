@@ -52,6 +52,13 @@ def list_heats(session: Session, race_id: int) -> list[HeatInfo]:
     return [_heat_info(session, heat) for heat in heats]
 
 
+def clear_plan(session: Session, race_id: int) -> None:
+    """Remove a plan that has not been driven. A free session does not use heats."""
+    if _running(session, race_id) is not None or has_completed(session, race_id):
+        raise ValidationError("error.race.not_editable")
+    _delete_planned(session, race_id)
+
+
 def replace_open_plan(session: Session, race: Race, lane_count: int) -> None:
     """Rebuild every heat that has not been driven. Completed heats stay as they are."""
     if _running(session, race.id) is not None:

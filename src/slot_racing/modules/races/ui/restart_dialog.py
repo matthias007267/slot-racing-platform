@@ -99,23 +99,24 @@ class RestartDialog(QDialog):
     def _summary(self) -> str:
         fmt = self.translator.format
         race = self.preview
-        mode = (
-            fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
-            if race.mode is RaceMode.TIME_TRIAL
-            else fmt("race.overview.laps", laps=race.laps)
-        )
-        return "\n".join(
-            (
-                fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
-                fmt("race.overview.active_lanes", lanes=race.active_lanes),
-                mode,
-                fmt(
-                    "race.overview.provider",
-                    provider=provider_label(self.translator, race.timing_provider),
-                ),
-                fmt("race.overview.repetitions", count=race.repetitions),
-            )
-        )
+        if race.mode is RaceMode.FREE:
+            mode = fmt("race.overview.free")
+        elif race.mode is RaceMode.TIME_TRIAL:
+            mode = fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
+        else:
+            mode = fmt("race.overview.laps", laps=race.laps)
+        lines = [
+            fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
+            fmt("race.overview.active_lanes", lanes=race.active_lanes),
+            mode,
+            fmt(
+                "race.overview.provider",
+                provider=provider_label(self.translator, race.timing_provider),
+            ),
+        ]
+        if race.mode is not RaceMode.FREE:
+            lines.append(fmt("race.overview.repetitions", count=race.repetitions))
+        return "\n".join(lines)
 
     def _seat_block(self, index: int, seat: RestartSeat) -> QWidget:
         text = f"{seat.driver_label} — {seat.vehicle_label}"

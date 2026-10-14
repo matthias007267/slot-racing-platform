@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from slot_racing.core.catalog import (
@@ -257,6 +257,36 @@ class RaceService(RaceHistoryCatalog):
             session.flush()
             return self._race_info(session, race)
 
+    def create_free_race(
+        self,
+        name: str,
+        track_id: TrackId,
+        timing_provider: str | None = None,
+    ) -> RaceInfo:
+        """A free session keeps the track and the timing layout and adds no race target.
+
+        Each lane later receives a driver and a vehicle. Lap count, duration and repetitions
+        are not part of this mode. The session runs until it is stopped.
+        """
+        clean_name = self._validate_name(name)
+        provider = self._validate_provider(timing_provider or self.default_provider_id())
+        self._require_active_track(track_id)
+        with self._database.session() as session:
+            race = Race(
+                name=clean_name,
+                track_id=track_id,
+                track_layout_id=self._tracks.current_layout_id(track_id),
+                target_laps=0,
+                mode=RaceMode.FREE.value,
+                timing_provider=provider,
+                duration_minutes=None,
+                repetitions=1,
+                status=RaceStatus.CREATED.value,
+            )
+            session.add(race)
+            session.flush()
+            return self._race_info(session, race)
+
     def update_race(
         self,
         race_id: RaceId,
@@ -322,7 +352,9 @@ class RaceService(RaceHistoryCatalog):
             else:
                 self._keep_active_lanes(race, physical)
             session.flush()
-            if (
+            if chosen is RaceMode.FREE:
+                heats.clear_plan(session, race.id)
+            elif (
                 physical > 0
                 and heats.uses_heats(session, race.id)
                 and not heats.has_completed(session, race.id)
@@ -439,10 +471,145 @@ class RaceService(RaceHistoryCatalog):
             session.flush()
             return self._participant_info(participant)
 
+    def set_free_assignments(
+        self,
+        race_id: RaceId,
+        seats: Sequence[tuple[int, DriverId, VehicleId]],
+    ) -> RaceInfo:
+        """Replace the roster of a free session with one driver and vehicle per occupied lane.
+
+        A lane that is left out stays empty. One occupied lane is enough to drive the other.
+        Heat plans are removed: this mode does not rotate drivers.
+        """
+        if not seats:
+            raise ValidationError("error.race.no_participants")
+        checked: list[tuple[int, DriverId, VehicleId]] = []
+        seen_drivers: set[int] = set()
+        seen_lanes: set[int] = set()
+        for lane, driver_id, vehicle_id in seats:
+            driver = self._drivers.get_driver(driver_id)
+            if driver is None:
+                raise ValidationError("error.race.driver_unknown")
+            if not driver.is_active:
+                raise ValidationError("error.race.driver_inactive", driver=driver.label)
+            vehicle = self._vehicles.get_vehicle(vehicle_id)
+            if vehicle is None:
+                raise ValidationError("error.race.vehicle_unknown")
+            if not vehicle.is_active:
+                raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+            if int(driver_id) in seen_drivers:
+                raise ValidationError("error.race.driver_duplicate", driver=driver.label)
+            if lane in seen_lanes:
+                raise ValidationError("error.race.lane_taken", lane=lane)
+            seen_drivers.add(int(driver_id))
+            seen_lanes.add(lane)
+            checked.append((lane, driver_id, vehicle_id))
+        with self._database.session() as session:
+            race = self._load_editable(session, race_id)
+            if RaceMode(race.mode) is not RaceMode.FREE:
+                raise ValidationError("error.race.mode_unknown")
+            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+            if track is None:
+                raise ValidationError("error.race.no_track")
+            for lane, _driver_id, _vehicle_id in checked:
+                if not 1 <= lane <= track.lane_count:
+                    raise ValidationError("error.race.lane_invalid", maximum=track.lane_count)
+            heats.clear_plan(session, race.id)
+            existing = list(
+                session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
+            )
+            for participant in existing:
+                session.delete(participant)
+            session.flush()
+            for lane, driver_id, vehicle_id in checked:
+                session.add(
+                    RaceParticipant(
+                        race_id=race.id,
+                        driver_id=driver_id,
+                        vehicle_id=vehicle_id,
+                        lane=lane,
+                    )
+                )
+            session.flush()
+            self._update_readiness(session, race)
+            return self._race_info(session, race)
+
+    def switch_free_lane(
+        self,
+        race_id: RaceId,
+        lane: int,
+        driver_id: DriverId,
+        vehicle_id: VehicleId,
+    ) -> tuple[bool, ParticipantInfo]:
+        """Change one lane of a running free session.
+
+        The same driver and vehicle return ``False`` and leave every counter untouched.
+        A different driver or vehicle, including a return to an earlier pair, replaces the
+        assignment and drops that lane's stored laps. The other lane is not written.
+        """
+        driver = self._drivers.get_driver(driver_id)
+        if driver is None:
+            raise ValidationError("error.race.driver_unknown")
+        if not driver.is_active:
+            raise ValidationError("error.race.driver_inactive", driver=driver.label)
+        vehicle = self._vehicles.get_vehicle(vehicle_id)
+        if vehicle is None:
+            raise ValidationError("error.race.vehicle_unknown")
+        if not vehicle.is_active:
+            raise ValidationError("error.race.vehicle_inactive", vehicle=vehicle.label)
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if RaceMode(race.mode) is not RaceMode.FREE:
+                raise ValidationError("error.race.not_switchable")
+            if RaceStatus(race.status) not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
+                raise ValidationError("error.race.not_switchable")
+            track = self._tracks.get_track(TrackId(race.track_id)) if race.track_id else None
+            if track is None:
+                raise ValidationError("error.race.no_track")
+            if not 1 <= lane <= track.lane_count:
+                raise ValidationError("error.race.lane_invalid", maximum=track.lane_count)
+            seated = list(
+                session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
+            )
+            current = next((person for person in seated if person.lane == lane), None)
+            others = [person for person in seated if person is not current]
+            if any(person.driver_id == driver_id for person in others):
+                raise ValidationError("error.race.driver_duplicate", driver=driver.label)
+            if (
+                current is not None
+                and current.driver_id == driver_id
+                and current.vehicle_id == vehicle_id
+            ):
+                return False, self._participant_info(current)
+            if current is None:
+                current = RaceParticipant(
+                    race_id=race.id,
+                    driver_id=driver_id,
+                    vehicle_id=vehicle_id,
+                    lane=lane,
+                )
+                session.add(current)
+                session.flush()
+            else:
+                self._clear_participant_laps(session, current.id)
+                current.driver_id = driver_id
+                current.vehicle_id = vehicle_id
+                current.lane = lane
+                current.laps_completed = 0
+                current.best_lap_ns = None
+                current.total_time_ns = None
+                current.final_position = None
+                current.finished = False
+                session.flush()
+            return True, self._participant_info(current)
+
     def plan_heats(self, race_id: RaceId) -> list[HeatInfo]:
         """Build or rebuild the open heats from the drivers and the lanes this race uses."""
         with self._database.session() as session:
             race = self._load_editable(session, race_id)
+            if RaceMode(race.mode) is RaceMode.FREE:
+                heats.clear_plan(session, race.id)
+                return []
             if self._physical_lanes(race) < 1:
                 raise ValidationError("error.race.no_track")
             heats.replace_open_plan(session, race, self._planning_lanes(race))
@@ -862,6 +1029,9 @@ class RaceService(RaceHistoryCatalog):
         sector_times_ns: dict[int, int],
     ) -> None:
         with self._database.session() as session:
+            race = self._load(session, race_id)
+            if race.mode == RaceMode.FREE.value:
+                return
             participant = session.scalar(
                 select(RaceParticipant).where(
                     RaceParticipant.race_id == race_id, RaceParticipant.lane == lane
@@ -891,7 +1061,6 @@ class RaceService(RaceHistoryCatalog):
             participant.laps_completed = stored_number
             if participant.best_lap_ns is None or lap_time_ns < participant.best_lap_ns:
                 participant.best_lap_ns = lap_time_ns
-            race = self._load(session, race_id)
             if race.mode == RaceMode.TIME_TRIAL.value:
                 session.add(
                     TimeMeasurement(
@@ -912,6 +1081,10 @@ class RaceService(RaceHistoryCatalog):
     ) -> None:
         with self._database.session() as session:
             race = self._load(session, race_id)
+            if race.mode == RaceMode.FREE.value:
+                race.status = (RaceStatus.ABORTED if aborted else RaceStatus.FINISHED).value
+                race.finished_at = utc_now()
+                return
             if heats.uses_heats(session, race.id):
                 for result in results:
                     heats.accumulate_heat_time(session, race.id, result.lane, result.total_time_ns)
@@ -1211,6 +1384,8 @@ class RaceService(RaceHistoryCatalog):
 
     @staticmethod
     def _apply_stored_standings(session: Session, race: Race) -> None:
+        if RaceMode(race.mode) is RaceMode.FREE:
+            return
         participants = list(
             session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
         )
@@ -1254,7 +1429,7 @@ class RaceService(RaceHistoryCatalog):
     @staticmethod
     def _validate_mode(mode: RaceMode) -> RaceMode:
         chosen = RaceMode(mode)
-        if chosen not in (RaceMode.LAPS, RaceMode.TIME_TRIAL):
+        if chosen not in (RaceMode.LAPS, RaceMode.TIME_TRIAL, RaceMode.FREE):
             raise ValidationError("error.race.mode_unknown")
         return chosen
 
@@ -1378,6 +1553,16 @@ class RaceService(RaceHistoryCatalog):
         return list(
             session.scalars(select(RaceParticipant.lane).where(RaceParticipant.race_id == race_id))
         )
+
+    @staticmethod
+    def _clear_participant_laps(session: Session, participant_id: int) -> None:
+        """Drop one lane's stored laps. A free-session change must not keep the old stint."""
+        lap_ids = list(session.scalars(select(Lap.id).where(Lap.participant_id == participant_id)))
+        if not lap_ids:
+            return
+        session.execute(delete(Sector).where(Sector.lap_id.in_(lap_ids)))
+        session.execute(delete(TimeMeasurement).where(TimeMeasurement.lap_id.in_(lap_ids)))
+        session.execute(delete(Lap).where(Lap.id.in_(lap_ids)))
 
     @staticmethod
     def _update_readiness(session: Session, race: Race) -> None:

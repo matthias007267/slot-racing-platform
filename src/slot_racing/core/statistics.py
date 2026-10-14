@@ -4,8 +4,9 @@ The functions read plain facts and return plain facts. They do not open the data
 do not draw. A stored lap is one completed lap: the pass that only starts a lap is not a row.
 A non-positive time is ignored. An outlier stays in every average; it is only marked.
 A lap marked ``excluded`` stays stored and still belongs to the race result, but career
-figures and record lists leave it out. Missing comparisons stay ``None``. Nothing here
-invents a time, a place or a length.
+figures and record lists leave it out. A free session is a different mode: its races and
+laps are left out of career figures, records and race reports entirely, without using that
+mark. Missing comparisons stay ``None``. Nothing here invents a time, a place or a length.
 """
 
 from __future__ import annotations
@@ -256,12 +257,24 @@ def outlier_lap_numbers(laps: Sequence[HistoryLap], participant_id: int) -> tupl
     )
 
 
+def counts_for_standings(mode: RaceMode) -> bool:
+    """Whether this mode feeds records, rankings, championships and race results.
+
+    A free session is stored as its own mode. Leaving it out here is the separation. A lap flag
+    is not used, because that flag only drops one time from an otherwise official race.
+    """
+    return mode is not RaceMode.FREE
+
+
 def race_report(race: HistoryRace) -> RaceReport:
     """Standings, gaps and series for one ended race.
 
     A lap race compares total time only when both drivers finished the same number of valid laps.
     A time trial compares the best valid lap. An aborted race is reported, but it is not official.
+    A free session has no report: it is not a result.
     """
+    if not counts_for_standings(race.mode):
+        return RaceReport(official=False, mode=race.mode, lines=(), series=())
     official = race.status is RaceStatus.FINISHED
     leader = _leader(race)
     leader_times = () if leader is None else valid_lap_times(race.laps, leader.participant_id)
@@ -327,6 +340,8 @@ def career_summary(
     lap_total = 0
     pooled: list[int] = []
     for race in sorted(chosen, key=_race_order):
+        if not counts_for_standings(race.mode):
+            continue
         people = _matching(
             race,
             driver_id=subject_driver,
@@ -394,7 +409,7 @@ def track_records(
         return ()
     lines: list[RecordLine] = []
     for race in races:
-        if not _in_scope(race, scope):
+        if not counts_for_standings(race.mode) or not _in_scope(race, scope):
             continue
         people = {
             person.participant_id: person

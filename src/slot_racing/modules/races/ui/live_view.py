@@ -7,11 +7,19 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QHideEvent, QResizeEvent
-from PySide6.QtWidgets import QMessageBox, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
+from slot_racing.core.catalog import DriverCatalog, VehicleCatalog
 from slot_racing.core.config import AppConfig
 from slot_racing.core.diagnostics import record
-from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
+from slot_racing.core.domain import DriverId, RaceId, RaceMode, RaceStatus, VehicleId
 from slot_racing.core.events import (
     Event,
     LapCompleted,
@@ -50,6 +58,7 @@ from slot_racing.modules.races.time_trial_board import TimeTrialBoard, build_tim
 from slot_racing.modules.races.types import HeatBriefing
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, status_message
 from slot_racing.modules.races.ui.heat_gate import HeatGate
+from slot_racing.modules.races.ui.lane_switch_dialog import LaneSwitchDialog
 from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_stage import LiveHudStage
 from slot_racing.modules.races.ui.race_audio import RaceAudio
@@ -96,12 +105,17 @@ class LiveRaceView(QWidget):
         service: RaceService | None = None,
         config: AppConfig | None = None,
         broadcast: LiveBroadcast | None = None,
+        drivers: DriverCatalog | None = None,
+        vehicles: VehicleCatalog | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
         self._controller = controller
         self._store = store
         self._service = service
+        self._drivers = drivers
+        self._vehicles = vehicles
+        self.lane_switch_dialogs: dict[int, LaneSwitchDialog] = {}
         self._runner: RaceRunner | None = None
         self._snapshot: RaceSnapshot | None = None
         self._announced_end = False
@@ -155,8 +169,24 @@ class LiveRaceView(QWidget):
         layout = QVBoxLayout(self)
         configure_page(layout)
         layout.setSpacing(0)
+        self._switch_row = QWidget()
+        self._switch_row.setObjectName("live-switch-row")
+        switch_layout = QHBoxLayout(self._switch_row)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        self.switch_buttons: dict[int, QPushButton] = {}
+        for lane in (1, 2):
+            button = QPushButton(translator.format("race.live.switch_lane", lane=lane))
+            button.setObjectName(f"live-switch-lane-{lane}")
+            button.clicked.connect(
+                lambda _checked=False, chosen=lane: self.open_lane_switch(chosen)
+            )
+            self.switch_buttons[lane] = button
+            switch_layout.addWidget(button)
+        self._switch_row.hide()
+
         layout.addWidget(self.heat_gate, 1)
         layout.addWidget(self.stage, 1)
+        layout.addWidget(self._switch_row)
         layout.addWidget(self.board, 1)
 
         self._timer = QTimer(self)
@@ -454,15 +484,49 @@ class LiveRaceView(QWidget):
         elif runner.status is RaceStatus.RUNNING:
             self.pause_race()
 
+    def open_lane_switch(self, lane: int) -> None:
+        """Open the assignment for one lane. The race clock keeps running."""
+        runner = self._runner
+        drivers = self._drivers
+        vehicles = self._vehicles
+        if runner is None or drivers is None or vehicles is None or not runner.is_active:
+            return
+        existing = self.lane_switch_dialogs.get(lane)
+        if existing is not None and not existing.isHidden():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        current = next((person for person in runner.race.participants if person.lane == lane), None)
+
+        def apply(driver_id: DriverId, vehicle_id: VehicleId, chosen: int = lane) -> None:
+            self._apply_lane_switch(chosen, driver_id, vehicle_id)
+
+        dialog = LaneSwitchDialog(
+            self.translator,
+            drivers,
+            vehicles,
+            lane,
+            driver_id=None if current is None else current.driver_id,
+            vehicle_id=None if current is None else current.vehicle_id,
+            apply=apply,
+        )
+        self.lane_switch_dialogs[lane] = dialog
+        dialog.open()
+
+    def _apply_lane_switch(self, lane: int, driver_id: DriverId, vehicle_id: VehicleId) -> None:
+        self._controller.switch_lane(lane, driver_id, vehicle_id)
+        self.refresh()
+
     def stop_race(self) -> None:
         runner = self._runner
         if runner is None or not runner.is_active:
             return
-        confirm_key = (
-            "race.live.confirm_stop_time_trial"
-            if runner.race.mode is RaceMode.TIME_TRIAL
-            else "race.live.confirm_stop"
-        )
+        if runner.race.mode is RaceMode.FREE:
+            confirm_key = "race.live.confirm_stop_free"
+        elif runner.race.mode is RaceMode.TIME_TRIAL:
+            confirm_key = "race.live.confirm_stop_time_trial"
+        else:
+            confirm_key = "race.live.confirm_stop"
         if self.confirm(self.translator.translate(confirm_key)):
             self._guard(runner.stop)
             self.refresh()
@@ -566,6 +630,8 @@ class LiveRaceView(QWidget):
             return
         self.heat_gate.hide()
         self._briefing = None
+        if runner.race.mode is RaceMode.FREE:
+            return
         if not self._announced_end:
             self._announced_end = True
             self.race_over.emit(snapshot.race_id)
@@ -630,12 +696,20 @@ class LiveRaceView(QWidget):
         paused = status is RaceStatus.PAUSED
         active = runner is not None and runner.is_active
         finished = runner is not None and runner.is_finished
+        free = runner is not None and runner.race.mode is RaceMode.FREE
         self.pause_button.setEnabled(running)
         self.resume_button.setEnabled(paused)
         self.stop_button.setEnabled(active)
-        self.results_button.setEnabled(finished)
+        self.results_button.setEnabled(finished and not free)
         self.back_button.setEnabled(True)
-        self.board.set_controls(pause=running, resume=paused, stop=active, results=finished)
+        self._switch_row.setVisible(free)
+        shown = 0 if runner is None else self._shown_lanes(runner)
+        for lane, button in self.switch_buttons.items():
+            button.setEnabled(active)
+            button.setVisible(free and lane <= shown)
+        self.board.set_controls(
+            pause=running, resume=paused, stop=active, results=finished and not free
+        )
 
     def _stored_race_is_over(self, race_id: RaceId) -> bool:
         if self._service is None:

@@ -20,6 +20,10 @@ Race rules implemented here:
 * Time trials use :class:`~slot_racing.core.domain.scoring.TimeTrialScoring`: a completed lap is
   a measured time and does not finish the participant. The session ends only when it is stopped,
   and that stop is a normal finish. Standings follow the best time on that participant's lane.
+* A free session uses :class:`~slot_racing.core.domain.scoring.FreeRaceScoring`. Laps are counted
+  with the same crossing rules, but the session has no winner and no classified result. Replacing
+  the driver or vehicle on one lane drops that lane's open lap and its completed times. A crossing
+  timestamped before the replacement does not start the new assignment's lap.
 * Events arriving while the race is paused are ignored. An event whose timestamp falls inside a
   pause is ignored even when it is delivered after ``resume``. Paused time is excluded from
   race time.
@@ -40,7 +44,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from slot_racing.core.clock import Clock
 from slot_racing.core.diagnostics import record
@@ -116,6 +120,8 @@ class _ParticipantState:
     lap_times_ns: list[int] = field(default_factory=list)
     last_lap_end_ns: int | None = None
     finish_order: int | None = None
+    # Crossings taken before a lane change belong to the previous assignment.
+    accept_after_ns: int = 0
 
     @property
     def finished(self) -> bool:
@@ -214,6 +220,33 @@ class RaceEngine:
         if self._status not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
             raise RaceStateError(f"cannot stop a race that is {self._status}")
         self._finish(self._clock.now_ns(), aborted=self._scoring.stop_is_abort)
+
+    def reassign_lane(self, participant: Participant, *, at_ns: int) -> None:
+        """Replace one lane and drop that lane's open lap and completed times.
+
+        Events timestamped before ``at_ns`` are ignored on this lane, so a crossing that
+        already belonged to the previous driver cannot finish a lap for the new one. The next
+        accepted crossing only starts a lap. Every other lane keeps its clock and its laps.
+        """
+        if self._config.mode is not RaceMode.FREE:
+            raise RaceStateError("only a free session can change a lane")
+        if self._status not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
+            raise RaceStateError(f"cannot change a lane while the race is {self._status}")
+        lane = participant.lane
+        for state in self._states.values():
+            if state.participant.lane == lane:
+                continue
+            if state.participant.driver_id == participant.driver_id:
+                raise RaceStateError("each driver can only participate once")
+        self._states[lane] = _ParticipantState(participant, accept_after_ns=at_ns)
+        self._last_accepted_ns = {
+            key: stamp for key, stamp in self._last_accepted_ns.items() if key[0] != lane
+        }
+        kept = tuple(person for person in self._config.participants if person.lane != lane)
+        self._config = replace(
+            self._config,
+            participants=tuple(sorted((*kept, participant), key=lambda person: person.lane)),
+        )
 
     def close(self) -> None:
         """Detach from the bus and stop timing sources without publishing anything."""
@@ -314,7 +347,15 @@ class RaceEngine:
                 position=event.position_id,
             )
             return
-        point = self._sequence[state.next_point]
+        if event.timestamp_ns < state.accept_after_ns:
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "stale_assignment",
+                lane=event.lane,
+                position=event.position_id,
+            )
+            return
+        point = self._sequence[0 if not state.clock_started else state.next_point]
         if event.position_id != point.id:
             logger.debug(
                 "Ignoring unexpected position %s on lane %s", event.position_id, event.lane
@@ -338,10 +379,12 @@ class RaceEngine:
         self._last_accepted_ns[(event.lane, event.position_id)] = event.timestamp_ns
 
         race_time = self._race_time(event.timestamp_ns)
-        if self._single_point and not state.clock_started:
+        if not state.clock_started:
             state.clock_started = True
             state.lap_start_ns = race_time
             state.sector_start_ns = race_time
+            if not self._single_point:
+                state.next_point = 1 % len(self._sequence)
             self._note_timing(
                 "LAP_TIMING_STARTED",
                 "started",
@@ -452,7 +495,12 @@ class RaceEngine:
         self._status = RaceStatus.FINISHED
         self._release()
         results = self._ranking()
-        if not self._winner_determined and results and results[0].laps_completed > 0:
+        if (
+            self._scoring.determines_winner
+            and not self._winner_determined
+            and results
+            and results[0].laps_completed > 0
+        ):
             leader = self._states[results[0].lane]
             self._publish_winner(leader, timestamp_ns)
         self._bus.publish(

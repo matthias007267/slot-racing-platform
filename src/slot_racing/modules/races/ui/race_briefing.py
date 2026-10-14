@@ -197,35 +197,44 @@ class OverviewBoard(QWidget):
     ) -> None:
         fmt = translator.format
         _clear(self._layout)
-        mode = (
-            fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
-            if race.mode is RaceMode.TIME_TRIAL
-            else fmt("race.overview.laps", laps=race.laps)
-        )
-        facts = (
+        if race.mode is RaceMode.FREE:
+            mode = fmt("race.overview.free")
+        elif race.mode is RaceMode.TIME_TRIAL:
+            mode = fmt("race.overview.time_trial_duration", minutes=race.duration_minutes or 0)
+        else:
+            mode = fmt("race.overview.laps", laps=race.laps)
+        facts = [
             fmt("race.overview.race", name=race.name),
             fmt("race.overview.track", track=race.track_name, lanes=race.lane_count),
             fmt("race.overview.active_lanes", lanes=race.active_lanes),
             mode,
             fmt("race.overview.provider", provider=provider),
-            fmt("race.overview.repetitions", count=race.repetitions),
-        )
+        ]
+        if race.mode is not RaceMode.FREE:
+            facts.append(fmt("race.overview.repetitions", count=race.repetitions))
         for text in facts:
             self._layout.addWidget(_wrapped(text, "wizard-value"))
         self._layout.addWidget(
             _wrapped(translator.translate("race.overview.participants"), "wizard-caption")
         )
-        for participant in race.participants:
-            self._layout.addWidget(
-                _wrapped(
-                    fmt(
-                        "race.overview.participant",
-                        driver=participant.driver_label,
-                        vehicle=participant.vehicle_label,
-                    ),
-                    "lane-name",
+        seated = race.participants
+        if race.mode is RaceMode.FREE:
+            seated = tuple(sorted(seated, key=lambda person: person.lane or 0))
+        for participant in seated:
+            if race.mode is RaceMode.FREE:
+                text = fmt(
+                    "race.overview.free_participant",
+                    lane=participant.lane or 0,
+                    driver=participant.driver_label,
+                    vehicle=participant.vehicle_label,
                 )
-            )
+            else:
+                text = fmt(
+                    "race.overview.participant",
+                    driver=participant.driver_label,
+                    vehicle=participant.vehicle_label,
+                )
+            self._layout.addWidget(_wrapped(text, "lane-name"))
         if heats:
             self._layout.addWidget(
                 _wrapped(translator.translate("race.overview.heats"), "wizard-caption")

@@ -23,6 +23,7 @@ from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
 from slot_racing.modules.races.service import RaceService
+from slot_racing.modules.races.types import RaceInfo
 from slot_racing.modules.races.ui.live_server import LiveBroadcast
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.restart_dialog import RestartDialog
@@ -41,6 +42,14 @@ from slot_racing.uikit.theme import SPACE, configure_page, set_role
 from slot_racing.uikit.widgets import ID_ROLE, format_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _race_target(translate: Callable[[str], str], race: RaceInfo) -> str:
+    if race.mode is RaceMode.TIME_TRIAL:
+        return translate("race.wizard.mode.time_trial")
+    if race.mode is RaceMode.FREE:
+        return translate("race.wizard.mode.free")
+    return str(race.laps)
 
 
 class RacesPage(QWidget):
@@ -119,7 +128,16 @@ class RacesPage(QWidget):
                 enabled=config.live_broadcast_enabled,
                 port=config.live_broadcast_port,
             )
-        self.live = LiveRaceView(translator, controller, hud_store, service, config, broadcast)
+        self.live = LiveRaceView(
+            translator,
+            controller,
+            hud_store,
+            service,
+            config,
+            broadcast,
+            drivers=drivers,
+            vehicles=vehicles,
+        )
         self.results = ResultsView(translator, service, hud_store)
         self.stack = QStackedWidget()
         # The list's preferred width must not stop the live race from using a small window.
@@ -271,11 +289,7 @@ class RacesPage(QWidget):
                     race.name,
                     race.track_name,
                     tr(f"race.status.{race.status.value}"),
-                    (
-                        tr("race.wizard.mode.time_trial")
-                        if race.mode is RaceMode.TIME_TRIAL
-                        else str(race.laps)
-                    ),
+                    _race_target(tr, race),
                     str(len(race.participants)),
                     format_datetime(race.created_at),
                 )
