@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QLabel, QPushButton
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from pytestqt.qtbot import QtBot
 from sqlalchemy import select
 
@@ -45,6 +46,30 @@ def _click(qtbot: QtBot, dialog: PartDialog, x_mm: float, y_mm: float) -> None:
     qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=pos)  # type: ignore[no-untyped-call]
 
 
+def _move(dialog: PartDialog, x_mm: float, y_mm: float) -> None:
+    """Hover the canvas. QTest moves the cursor, which Windows offscreen does not deliver."""
+    canvas = dialog.plate.canvas
+    pos = canvas.widget_point(x_mm, y_mm)
+    assert canvas.rect().contains(pos)
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(pos),
+        QPointF(canvas.mapToGlobal(pos)),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert QApplication.sendEvent(canvas, event)
+
+
+def test_a_dirty_dialog_closes_when_the_test_ends(qtbot: QtBot, env: Env) -> None:
+    """Teardown must not ask. A modal discard question blocks a worker forever."""
+    dialog = _editor(qtbot, env)
+    dialog.name.setText("Nicht gespeichert")
+    assert dialog._dirty()
+    assert not dialog._dismissed
+
+
 def test_four_clicks_close_the_floor_plate(qtbot: QtBot, env: Env) -> None:
     dialog = _editor(qtbot, env)
     dialog.plate.floor_button.click()
@@ -65,8 +90,7 @@ def test_the_mouse_preview_is_not_part_of_the_plate(qtbot: QtBot, env: Env) -> N
     dialog = _editor(qtbot, env)
     dialog.plate.floor_button.click()
     _click(qtbot, dialog, 0.0, 0.0)
-    canvas = dialog.plate.canvas
-    qtbot.mouseMove(canvas, canvas.widget_point(120.0, 40.0))  # type: ignore[no-untyped-call]
+    _move(dialog, 120.0, 40.0)
     assert dialog.plate.session.hover is not None
     assert dialog.plate.session.hover == pytest.approx((120.0, 40.0), abs=1.5)
     assert len(dialog.plate.session.points) == 1
@@ -334,5 +358,5 @@ def test_the_planner_palette_hides_the_draft(qtbot: QtBot, env: Env) -> None:
     assert any(row.part_id == dialog.saved.id for row in visible)
     manager_text.append("shown")
     assert manager_text == ["shown"]
-    lane = dialog.findChild(QPushButton, "plate-lane")
-    assert lane is not None and not lane.isEnabled()
+    center = dialog.findChild(QPushButton, "plate-center")
+    assert center is not None and not center.isEnabled()

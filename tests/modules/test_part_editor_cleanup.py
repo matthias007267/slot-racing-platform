@@ -67,7 +67,9 @@ def test_the_part_dialog_is_parametric_and_has_no_drawing_tab(qtbot: QtBot, env:
     assert dialog.findChild(QPushButton, "plate-floor") is not None
     assert dialog.findChild(QPushButton, "plate-lane") is not None
     lane = dialog.findChild(QPushButton, "plate-lane")
-    assert lane is not None and not lane.isEnabled()
+    assert lane is not None and lane.isEnabled()
+    center = dialog.findChild(QPushButton, "plate-center")
+    assert center is not None and not center.isEnabled()
     dialog._dismissed = True
     dialog.close()
 

@@ -57,7 +57,7 @@ def test_hover_is_not_stored() -> None:
     session.set_hover((40.0, 15.0))
     assert session.hover == (40.0, 15.0)
     assert session.points == ((0.0, 0.0),)
-    assert session.geometry_token() == ((((0.0, 0.0),), False))
+    assert session.geometry_token() == ((((0.0, 0.0),), False, ()))
     session.set_hover(None)
     assert session.hover is None
     assert session.points == ((0.0, 0.0),)
