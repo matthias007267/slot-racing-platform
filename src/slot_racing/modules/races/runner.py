@@ -164,6 +164,7 @@ class RaceRunner:
     def _row(self, result: ParticipantResult) -> LiveRow:
         info: ParticipantInfo = self._participants[result.lane]
         lap_times = tuple(self._lap_times_ns.get(result.lane, ()))
+        valid_times = tuple(time for time in lap_times if time > 0)
         if self.race.mode is RaceMode.LAPS:
             current_lap = min(result.laps_completed + 1, self.race.laps)
         elif self.is_active or result.laps_completed == 0:
@@ -178,9 +179,9 @@ class RaceRunner:
             start_number=info.start_number,
             current_lap=current_lap,
             laps_completed=result.laps_completed,
-            last_lap_ns=lap_times[-1] if lap_times else None,
+            last_lap_ns=valid_times[-1] if valid_times else None,
             total_time_ns=result.total_time_ns,
-            best_lap_ns=result.best_lap_ns,
+            best_lap_ns=min(valid_times) if valid_times else None,
             finished=result.finished,
             lap_times_ns=lap_times,
         )

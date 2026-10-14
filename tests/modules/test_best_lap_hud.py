@@ -30,6 +30,9 @@ _FASTER = 2_400_000_000
 def test_the_first_fastest_lap_wins_and_a_later_best_replaces_it() -> None:
     assert fastest_completed_lap(()) is None
     assert best_lap_display(()) == ("-", "-")
+    assert fastest_completed_lap((0, -1)) is None
+    assert best_lap_display((0,)) == ("-", "-")
+    assert fastest_completed_lap((0, _SLOW)) == (2, _SLOW)
     assert fastest_completed_lap((_SLOW,)) == (1, _SLOW)
     assert fastest_completed_lap((_SLOW, _TIED, _TIED)) == (2, _TIED)
     assert best_lap_display((_SLOW, _TIED, _TIED)) == ("2", "3,026 s")

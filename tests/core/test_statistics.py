@@ -231,6 +231,40 @@ def test_a_date_filter_ignores_a_race_without_a_finish_time() -> None:
     assert dated.history[0].best_lap_ns == 8_000
 
 
+def test_an_excluded_lap_leaves_the_race_result_and_drops_out_of_the_figures() -> None:
+    race = _race(
+        RaceMode.LAPS,
+        (_person(1, total=18_000),),
+        (
+            HistoryLap(1, 1, 8_000, 1, lap_id=11, excluded=True),
+            HistoryLap(1, 2, 10_000, 1, lap_id=12),
+        ),
+    )
+    report = race_report(race)
+    assert report.lines[0].position == 1
+    assert report.lines[0].lap_count == 2
+    assert report.lines[0].best_lap_ns == 8_000
+    assert report.lines[0].total_time_ns == 18_000
+    summary = career_summary((race,), _scope(), driver_id=1)
+    assert summary.wins == 1
+    assert summary.laps == 1
+    assert summary.best_lap_ns == 10_000
+    assert summary.average_lap_ns == 10_000
+    assert [line.lap_id for line in track_records((race,), _scope())] == [12]
+    assert [line.lap_id for line in track_records((race,), _scope(), excluded=True)] == [11]
+    cleared = _race(
+        RaceMode.LAPS,
+        (_person(1, total=8_000),),
+        (HistoryLap(1, 1, 8_000, 1, lap_id=11, excluded=True),),
+    )
+    empty = career_summary((cleared,), _scope(), driver_id=1)
+    assert empty.races == 1
+    assert empty.laps == 0
+    assert empty.best_lap_ns is None
+    assert empty.average_lap_ns is None
+    assert track_records((cleared,), _scope()) == ()
+
+
 def test_an_empty_history_has_no_invented_figures() -> None:
     summary = career_summary((), _scope(), driver_id=1)
     assert summary.races == 0

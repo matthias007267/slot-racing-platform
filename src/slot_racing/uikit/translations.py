@@ -109,5 +109,14 @@ UIKIT_TRANSLATIONS: dict[str, dict[str, str]] = {
         "records.column.race": "Rennen",
         "records.column.lap": "Runde",
         "records.detail": "Rennergebnis",
+        "records.exclude": "Aus der Wertung nehmen",
+        "records.restore": "Wieder werten",
+        "records.excluded.heading": "Aus der Wertung",
+        "records.exclude.confirm": (
+            "{driver} mit {vehicle}, Zeit {time}: aus der statistischen Wertung nehmen?"
+        ),
+        "records.restore.confirm": (
+            "{driver} mit {vehicle}, Zeit {time}: wieder in die statistische Wertung aufnehmen?"
+        ),
     }
 }

@@ -27,6 +27,7 @@ class StoredTimeMeasurements(TimeMeasurementCatalog):
                 vehicle_label=row.vehicle_label,
                 time_ns=row.time_ns,
                 recorded_at=row.recorded_at,
+                excluded=row.excluded,
             )
             for row in self._service.list_time_measurements(track_id=track_id)
         ]

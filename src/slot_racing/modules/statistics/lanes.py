@@ -36,7 +36,7 @@ def statistics_for_track(
     lanes = _lanes_of(track.lane_count)
     grouped: dict[int, list[TimeMeasurementView]] = {lane: [] for lane in lanes}
     for row in measurements:
-        if row.track_id != track.id:
+        if row.track_id != track.id or row.excluded or row.time_ns <= 0:
             continue
         bucket = grouped.get(row.lane)
         if bucket is not None:

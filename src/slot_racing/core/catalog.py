@@ -162,6 +162,8 @@ class TimeMeasurementView:
     vehicle_label: str
     time_ns: int
     recorded_at: datetime | None
+    excluded: bool = False
+    """Left out of lane statistics. The measurement row is still the one that was stored."""
 
 
 class TimeMeasurementCatalog(ABC):
@@ -200,3 +202,11 @@ class RaceHistoryCatalog(ABC):
     @abstractmethod
     def list_index(self) -> tuple[RaceIndexEntry, ...]:
         """Every stored race, oldest id first. A race that is still open is included."""
+
+    def set_lap_excluded(self, lap_id: int, *, excluded: bool) -> None:
+        """Mark or restore one stored lap for statistics.
+
+        The lap time, the race position and the lap counter stay as they were stored.
+        A catalog that only reads history does not implement this.
+        """
+        raise NotImplementedError

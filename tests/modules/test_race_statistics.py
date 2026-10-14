@@ -121,7 +121,42 @@ def test_migration_adds_an_empty_layout_column() -> None:
         info = list(connection.exec_driver_sql("PRAGMA table_info(time_measurements)"))
     column = next(row for row in info if row[1] == "track_layout_id")
     assert column[3] == 0
-    assert database.schema_revision() == "0020"
+    assert database.schema_revision() == "0021"
+    database.dispose()
+
+
+def test_an_existing_lap_stays_counted_when_the_exclusion_column_arrives() -> None:
+    database = Database.in_memory()
+    database.migrate("0020")
+    with database.engine.begin() as connection:
+        driver = connection.exec_driver_sql(
+            "INSERT INTO drivers (name, is_active) VALUES ('Anna', 1)"
+        )
+        race = connection.exec_driver_sql(
+            "INSERT INTO races (name, status, mode, target_laps, timing_provider) "
+            "VALUES ('Alt', 'finished', 'laps', 2, 'simulation')"
+        )
+        participant = connection.exec_driver_sql(
+            "INSERT INTO race_participants (race_id, driver_id, lane, laps_completed) "
+            "VALUES (:race_id, :driver_id, 1, 1)",
+            {"race_id": race.lastrowid, "driver_id": driver.lastrowid},
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO laps (race_id, participant_id, lap_number, lap_time_ns, race_time_ns) "
+            "VALUES (:race_id, :participant_id, 1, 8000000000, 8000000000)",
+            {"race_id": race.lastrowid, "participant_id": participant.lastrowid},
+        )
+    database.migrate()
+    with database.engine.connect() as connection:
+        stored = connection.exec_driver_sql(
+            "SELECT lap_time_ns, statistics_excluded FROM laps"
+        ).one()
+        measurements = connection.exec_driver_sql("PRAGMA table_info(time_measurements)")
+        names = {row[1] for row in measurements}
+    assert stored[0] == 8_000_000_000
+    assert stored[1] == 0
+    assert {"statistics_excluded", "lap_id"} <= names
+    assert database.schema_revision() == "0021"
     database.dispose()
 
 

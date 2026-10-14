@@ -83,16 +83,30 @@ def _gap_time(row: LiveRow, *, by_best_lap: bool) -> int | None:
     return row.best_lap_ns if by_best_lap else row.total_time_ns
 
 
-def fastest_completed_lap(times: Sequence[int]) -> tuple[int, int] | None:
-    """1-based lap number and time of the fastest completed lap.
+def positive_lap_times(times: Sequence[int]) -> tuple[int, ...]:
+    """Completed lap times the timing rules already accept. Zero is not a lap time."""
+    return tuple(time for time in times if time > 0)
 
-    Equal times keep the earlier lap. An empty sequence means no valid lap.
-    The race engine still owns ``best_lap_ns``; this only reads the lap list.
+
+def format_lap_time(duration_ns: int | None) -> str:
+    """A completed lap as ``m:ss.mmm``. Missing and non-positive times stay ``-``."""
+    if duration_ns is None or duration_ns <= 0:
+        return _MISSING_LAP
+    return format_duration(duration_ns)
+
+
+def fastest_completed_lap(times: Sequence[int]) -> tuple[int, int] | None:
+    """1-based lap number and time of the fastest positive lap.
+
+    Equal times keep the earlier lap. A non-positive time is not a candidate.
+    An empty result means no valid lap. The race engine still owns the stored
+    result; this only reads the lap list.
     """
-    if not times:
+    valid = [(index, time) for index, time in enumerate(times) if time > 0]
+    if not valid:
         return None
-    fastest = min(times)
-    return times.index(fastest) + 1, fastest
+    index, time_ns = min(valid, key=lambda item: (item[1], item[0]))
+    return index + 1, time_ns
 
 
 def best_lap_display(times: Sequence[int]) -> tuple[str, str]:
@@ -167,8 +181,8 @@ def ranking_cells(
         str(row.lane),
         str(row.laps_completed),
         format_progress_cell(row.current_lap, snapshot.laps),
-        format_duration(row.last_lap_ns),
-        format_duration(row.best_lap_ns),
+        format_lap_time(row.last_lap_ns),
+        format_lap_time(row.best_lap_ns),
         format_duration(row.total_time_ns),
         format_progress_cell(row.laps_completed, snapshot.laps),
         tr(participant_status_key(finished=row.finished, paused=paused, ended=ended)),

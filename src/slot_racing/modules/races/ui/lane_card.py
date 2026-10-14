@@ -49,6 +49,7 @@ from slot_racing.modules.races.ui.formatting import (
     EMPTY_DISPLAY,
     best_lap_display,
     format_lap_progress,
+    format_lap_time,
     participant_status_key,
     remaining_laps,
     remaining_time,
@@ -216,7 +217,7 @@ class LaneCard(QFrame):
         self.lap_label.setText(format_lap_progress(row.current_lap, laps))
         self.remaining_laps_label.setText(self._remaining_laps or EMPTY_DISPLAY)
         self.remaining_time_label.setText(self._remaining_time or EMPTY_DISPLAY)
-        self.last_label.setText(format_duration(row.last_lap_ns))
+        self.last_label.setText(format_lap_time(row.last_lap_ns))
         number, best_time = best_lap_display(row.lap_times_ns)
         self.best_label.setText(number)
         self.best_time_label.setText(best_time)

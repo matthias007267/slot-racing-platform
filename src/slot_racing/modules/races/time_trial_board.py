@@ -140,10 +140,15 @@ def build_time_trial_board(
 
 
 def _best(rows: Sequence[TimeMeasurementInfo]) -> TimeMeasurementInfo | None:
-    """Fastest time. An equal time keeps the earlier measurement."""
-    if not rows:
+    """Fastest time that still counts. An equal time keeps the earlier measurement.
+
+    A non-positive time is not a lap, and a measurement marked out of the statistics
+    does not become the session best or the lane record. The row itself is unchanged.
+    """
+    counting = [row for row in rows if row.time_ns > 0 and not row.excluded]
+    if not counting:
         return None
-    return min(rows, key=lambda row: (row.time_ns, _stamp(row.recorded_at), row.id))
+    return min(counting, key=lambda row: (row.time_ns, _stamp(row.recorded_at), row.id))
 
 
 def _chronological(row: TimeMeasurementInfo) -> tuple[tuple[int, float], int]:
