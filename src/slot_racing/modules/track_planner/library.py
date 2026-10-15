@@ -183,6 +183,42 @@ class PartLibrary:
         with self._database.session() as session:
             return self._reconcile(session, update_existing=True, import_missing=True)
 
+    def reset_collection_quantities(self) -> int:
+        """Set every personal part and package quantity to zero.
+
+        One transaction, and only rows that are not already zero. Hidden,
+        filtered and retired owners are included because the write does not
+        look at the dialog. Definitions, package contents and plans stay.
+        The catalogue is not reconciled. A second call changes nothing.
+        """
+        with self._database.session() as session:
+            part_ids = tuple(
+                session.scalars(select(TrackPartStock.part_id).where(TrackPartStock.quantity != 0))
+            )
+            package_ids = tuple(
+                session.scalars(
+                    select(TrackPartPackageStock.package_id).where(
+                        TrackPartPackageStock.quantity != 0
+                    )
+                )
+            )
+            if part_ids:
+                session.execute(
+                    update(TrackPartStock)
+                    .where(TrackPartStock.part_id.in_(part_ids))
+                    .values(quantity=0)
+                )
+            if package_ids:
+                session.execute(
+                    update(TrackPartPackageStock)
+                    .where(TrackPartPackageStock.package_id.in_(package_ids))
+                    .values(quantity=0)
+                )
+            changed = len(part_ids) + len(package_ids)
+        if changed:
+            trace("COLLECTION_QUANTITIES_RESET", result="reset", rows=changed)
+        return changed
+
     def import_carrera_library(self) -> LibraryDraft:
         """Insert source parts that are not stored yet. A second call adds nothing."""
         with self._database.session() as session:

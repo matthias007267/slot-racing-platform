@@ -152,6 +152,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.stock.reset.accept": "Zurücksetzen",
         "planner.stock.reset.cancel": "Abbrechen",
         "planner.stock.reset.done": "Die Bibliothek wurde auf den mitgelieferten Katalog gesetzt.",
+        "planner.stock.reset_quantities": "Meine Bauteilesammlung zurücksetzen",
+        "planner.stock.reset_quantities.title": "Bestandsmengen zurücksetzen?",
+        "planner.stock.reset_quantities.confirm": (
+            "Alle Bestandsmengen deiner Bauteilesammlung auf 0 zurücksetzen?"
+        ),
+        "planner.stock.reset_quantities.done": "Alle Bestandsmengen wurden auf 0 gesetzt.",
         "planner.stock.remaining": "Noch {count}",
         "planner.stock.short": "Fehlt {count}",
         "planner.stock.show_all": "Alle Bauteile anzeigen",
