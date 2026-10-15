@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from slot_racing.core.i18n import Translator
+from slot_racing.modules.track_planner.catalog_import import source_ids_hidden_from_collection
 from slot_racing.modules.track_planner.inventory import PhysicalStock
 from slot_racing.modules.track_planner.library import CatalogReconcileReport
 from slot_racing.modules.track_planner.packages import PackageContentView, PackageView
@@ -110,8 +111,16 @@ class CollectionDialog(QDialog):
     def _fill(self) -> None:
         self._clear_rows()
         breakdown = {line.part_id: line for line in self._planner.stock_breakdown().values()}
+        hidden = source_ids_hidden_from_collection()
         records = tuple(
-            sorted(self._planner.list_parts(), key=lambda record: record.spec.name.casefold())
+            sorted(
+                (
+                    record
+                    for record in self._planner.list_parts()
+                    if record.spec.source_id not in hidden
+                ),
+                key=lambda record: record.spec.name.casefold(),
+            )
         )
         packages = self._planner.list_packages()
         if packages:
