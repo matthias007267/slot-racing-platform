@@ -223,15 +223,13 @@ Index(
     func.trim(TrackPartDefinition.article_number),
     func.trim(TrackPartDefinition.piece_key),
     unique=True,
-    sqlite_where=(TrackPartDefinition.is_current.is_(True))
-    & (TrackPartDefinition.source_id == ""),
+    sqlite_where=(TrackPartDefinition.is_current.is_(True)) & (TrackPartDefinition.source_id == ""),
 )
 Index(
     "uq_track_part_source_current",
     TrackPartDefinition.source_id,
     unique=True,
-    sqlite_where=(TrackPartDefinition.is_current.is_(True))
-    & (TrackPartDefinition.source_id != ""),
+    sqlite_where=(TrackPartDefinition.is_current.is_(True)) & (TrackPartDefinition.source_id != ""),
 )
 Index(
     "uq_track_part_lineage_revision",

@@ -53,11 +53,7 @@ def ensure_article(planner: TrackPlannerService, article: str) -> int:
     planner.list_parts()
     with planner.library._database.session() as session:
         rows = list(session.scalars(select(TrackPartDefinition)))
-    matches = [
-        row
-        for row in rows
-        if row.is_current and row.article_number.strip() == article
-    ]
+    matches = [row for row in rows if row.is_current and row.article_number.strip() == article]
     if matches:
         selectable = [
             row for row in matches if row.selectable and not row.legacy and not row.piece_key
@@ -100,9 +96,7 @@ def ensure_package(planner: TrackPlannerService, article: str) -> PackageView:
     for package in planner.list_packages():
         if package.article_number == article:
             return package
-    spec = next(
-        (item for item in standard_packages() if item.article_number == article), None
-    )
+    spec = next((item for item in standard_packages() if item.article_number == article), None)
     if spec is None:
         raise AssertionError(article)
     for content in spec.contents:

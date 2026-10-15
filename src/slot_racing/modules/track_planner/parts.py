@@ -666,9 +666,7 @@ def find_source_part(
     catalog: Mapping[int, PartSpec], source_id: str
 ) -> tuple[int, PartSpec] | None:
     """The current part with this source UUID."""
-    matches = [
-        (part_id, spec) for part_id, spec in catalog.items() if spec.source_id == source_id
-    ]
+    matches = [(part_id, spec) for part_id, spec in catalog.items() if spec.source_id == source_id]
     if not matches:
         return None
     matches.sort(key=lambda item: item[0])
@@ -709,9 +707,7 @@ def _turn_ends(spec: PartSpec) -> tuple[ConnectorSpec, ...]:
     Border joints stay on the part but are not a second driving end. A part with
     exactly two connectors is unchanged.
     """
-    rails = tuple(
-        joint for joint in spec.connectors if joint.kind == TRACK and not joint.exclusive
-    )
+    rails = tuple(joint for joint in spec.connectors if joint.kind == TRACK and not joint.exclusive)
     if len(rails) == 2:
         return rails
     return spec.connectors
@@ -913,9 +909,7 @@ def _named_extend_pose(
     ):
         return None
     pose = neighbor_pose(target, target_joint)
-    created = PartInstance(
-        "named", 0, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg
-    )
+    created = PartInstance("named", 0, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg)
     delta = placed_continuation_delta_deg(target, target_joint, created, spec)
     if delta is None or not _direction_matches(delta, direction):
         return None

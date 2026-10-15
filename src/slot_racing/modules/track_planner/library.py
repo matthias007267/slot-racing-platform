@@ -157,9 +157,7 @@ class PartLibrary:
     def _import_sources(self, session: Session) -> LibraryDraft:
         draft = load_carrera_library()
         stored = {
-            row.source_id
-            for row in session.scalars(select(TrackPartDefinition))
-            if row.source_id
+            row.source_id for row in session.scalars(select(TrackPartDefinition)) if row.source_id
         }
         for spec in draft.parts:
             if spec.source_id in stored:
@@ -172,9 +170,7 @@ class PartLibrary:
             if row.source_id and row.is_current
         }
         present = {
-            row.source_id
-            for row in session.scalars(select(TrackPartTemplate))
-            if row.source_id
+            row.source_id for row in session.scalars(select(TrackPartTemplate)) if row.source_id
         }
         for template in draft.templates:
             if template.source_id in present:
@@ -229,9 +225,7 @@ class PartLibrary:
                 if part is None:
                     missing = True
                     break
-                contents.append(
-                    PackageContentSpec(name, article, 1, source_id=part.source_id)
-                )
+                contents.append(PackageContentSpec(name, article, 1, source_id=part.source_id))
             if missing or not contents:
                 continue
             self._insert_package(
@@ -1037,9 +1031,11 @@ class PartLibrary:
                 raise self._duplicate(spec)
             if spec.source_id or row.source_id:
                 continue
-            if identity_key(row.name, row.article_number) == identity_key(
-                spec.name, spec.article_number
-            ) and (row.piece_key or "") == spec.piece_key:
+            if (
+                identity_key(row.name, row.article_number)
+                == identity_key(spec.name, spec.article_number)
+                and (row.piece_key or "") == spec.piece_key
+            ):
                 raise self._duplicate(spec)
 
     def _current_of(self, session: Session, lineage_id: str) -> TrackPartDefinition:

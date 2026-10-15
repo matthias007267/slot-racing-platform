@@ -364,9 +364,9 @@ def _drawing_paths(raw: object) -> tuple[SlotPath, ...]:
     return tuple(paths)
 
 
-def _connectors(part: dict[str, object], *, source_id: str, lane_count: int) -> tuple[
-    ConnectorSpec, ...
-]:
+def _connectors(
+    part: dict[str, object], *, source_id: str, lane_count: int
+) -> tuple[ConnectorSpec, ...]:
     edges = part.get("connectors") if isinstance(part.get("connectors"), list) else []
     slots = part.get("slots") if isinstance(part.get("slots"), list) else []
     center = part.get("center") if isinstance(part.get("center"), dict) else {}
@@ -380,9 +380,7 @@ def _connectors(part: dict[str, object], *, source_id: str, lane_count: int) -> 
             continue
         indices = [int(item) for item in row.get("connectorIndices") or []]
         chosen = [
-            edges[item]
-            for item in indices
-            if isinstance(edges, list) and 0 <= item < len(edges)
+            edges[item] for item in indices if isinstance(edges, list) and 0 <= item < len(edges)
         ]
         edge_points = _edge_points(chosen)
         if edge_points:
@@ -392,9 +390,7 @@ def _connectors(part: dict[str, object], *, source_id: str, lane_count: int) -> 
             mid_x = float(row.get("x") or 0.0)
             mid_y = float(row.get("y") or 0.0)
         types = tuple(
-            str(edge.get("type"))
-            for edge in chosen
-            if isinstance(edge, dict) and edge.get("type")
+            str(edge.get("type")) for edge in chosen if isinstance(edge, dict) and edge.get("type")
         )
         auto = bool(row.get("autoConnect"))
         lanes = () if auto or lane_count < 1 else tuple(range(1, lane_count + 1))
@@ -566,9 +562,7 @@ def _packages(specs: tuple[PartSpec, ...]) -> tuple[PackageDraft, ...]:
             PackageDraft(
                 article_number=article,
                 name=parts[0].name,
-                contents=tuple(
-                    (spec.source_id, spec.name, spec.article_number) for spec in parts
-                ),
+                contents=tuple((spec.source_id, spec.name, spec.article_number) for spec in parts),
             )
         )
     return tuple(packages)

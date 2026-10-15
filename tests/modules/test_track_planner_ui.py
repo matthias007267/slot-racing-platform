@@ -285,12 +285,8 @@ def test_group_rotation_handle_and_both_directions(qtbot: QtBot, env: Env) -> No
     page._rotated([item.id for item in selected], center[0], center[1], -35)
     turned = page.plan().instances
     assert turned[0].rotation_z_deg == (-35) % 360
-    assert math.isclose(
-        _distance(selected[0], center), _distance(turned[0], center), abs_tol=1e-6
-    )
-    assert math.isclose(
-        _distance(selected[1], center), _distance(turned[1], center), abs_tol=1e-6
-    )
+    assert math.isclose(_distance(selected[0], center), _distance(turned[0], center), abs_tol=1e-6)
+    assert math.isclose(_distance(selected[1], center), _distance(turned[1], center), abs_tol=1e-6)
     page._rotated([item.id for item in turned], center[0], center[1], 82)
     again = page.plan().instances
     assert again[0].rotation_z_deg == (-35 + 82) % 360

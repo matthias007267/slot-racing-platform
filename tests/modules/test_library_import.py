@@ -134,9 +134,7 @@ def test_straights_curves_borders_and_switches_keep_the_source_geometry(env: Env
     planner = _planner(env)
     by_source = {record.spec.source_id: record.spec for record in planner.list_parts()}
     straight = next(
-        spec
-        for spec in by_source.values()
-        if spec.article_number == "20509" and not spec.piece_key
+        spec for spec in by_source.values() if spec.article_number == "20509" and not spec.piece_key
     )
     slots = [path for path in straight.slot_paths if path.kind == PATH_SLOT]
     assert len(slots) == 2
@@ -160,9 +158,7 @@ def test_straights_curves_borders_and_switches_keep_the_source_geometry(env: Env
     shell = next(template for template in templates if template.article_number == "30343")
     assert {member.part_id for member in shell.members} == {
         next(
-            record.id
-            for record in planner.list_parts()
-            if record.spec.source_id == spec.source_id
+            record.id for record in planner.list_parts() if record.spec.source_id == spec.source_id
         )
         for spec in halves
     }
@@ -379,9 +375,7 @@ def _meeting_rails(straight: object, curve: object) -> tuple[ConnectorSpec, Conn
     return best[1], best[2]
 
 
-def _turn(
-    host: PartInstance, joint: ConnectorSpec, pose: Pose, spec: object
-) -> float:
+def _turn(host: PartInstance, joint: ConnectorSpec, pose: Pose, spec: object) -> float:
     seated = PartInstance("next", 2, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg)
     delta = placed_continuation_delta_deg(host, joint, seated, spec)  # type: ignore[arg-type]
     assert delta is not None

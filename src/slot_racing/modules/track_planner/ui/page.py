@@ -1278,13 +1278,9 @@ class PlannerPage(QWidget):
         self._commit(updated, created)
 
     def _warn_missing(self) -> None:
-        missing = sum(
-            1 for instance in self._plan.instances if instance.part_id not in self._parts
-        )
+        missing = sum(1 for instance in self._plan.instances if instance.part_id not in self._parts)
         if missing:
-            self.status.show_error(
-                self._translator.format("planner.missing_parts", count=missing)
-            )
+            self.status.show_error(self._translator.format("planner.missing_parts", count=missing))
 
     def _add_part(self) -> None:
         self._open_part_editor(None)
@@ -1503,9 +1499,7 @@ class PlannerPage(QWidget):
                     break
         self.library.setCurrentRow(row)
 
-    def _visible_templates(
-        self, scale: object, *, compatible: bool
-    ) -> tuple[TemplateView, ...]:
+    def _visible_templates(self, scale: object, *, compatible: bool) -> tuple[TemplateView, ...]:
         """Recipes beside the parts. A compatibility filter has no single body to match."""
         if compatible or not self._templates:
             return ()

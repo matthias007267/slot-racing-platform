@@ -487,11 +487,7 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
         tracks = source.services.get(TrackService)
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Gruppe", lane_count=2))
-        part = next(
-            record
-            for record in planner.list_parts()
-            if record.spec.piece_key == "20509.2"
-        )
+        part = next(record for record in planner.list_parts() if record.spec.piece_key == "20509.2")
         catalog = {part.id: part.spec}
         plan = set_plan_grid(empty_plan(track.id), enabled=False, grid_mm=100, snap_mm=25)
         plan = place_instance(plan, part.id, part.spec, 0, 0, 0, catalog)

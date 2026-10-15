@@ -355,9 +355,7 @@ def test_ensure_seed_does_not_rewrite_stored_source_geometry(env: Env) -> None:
         outline = list(row.outline)
     planner.library.ensure_seed()
     loaded = next(
-        record
-        for record in planner.list_parts()
-        if record.spec.source_id == ACTIVE_STRAIGHT_SOURCE
+        record for record in planner.list_parts() if record.spec.source_id == ACTIVE_STRAIGHT_SOURCE
     )
     assert loaded.spec.slot_paths
     assert [list(point) for point in loaded.spec.outline] == outline

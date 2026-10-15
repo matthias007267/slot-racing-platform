@@ -119,9 +119,9 @@ def parse_svg_path(text: str) -> tuple[ParsedPath, ...]:
     return tuple(subpaths)
 
 
-def outline_points(subpaths: tuple[ParsedPath, ...], *, step_deg: float = 6.0) -> tuple[
-    tuple[float, float], ...
-]:
+def outline_points(
+    subpaths: tuple[ParsedPath, ...], *, step_deg: float = 6.0
+) -> tuple[tuple[float, float], ...]:
     """Polygon for the filled roadway. Arcs are sampled from the stored centre."""
     points: list[tuple[float, float]] = []
     for subpath in subpaths:

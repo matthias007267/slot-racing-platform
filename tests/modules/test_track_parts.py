@@ -212,9 +212,7 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     records = planner.list_parts()
     by_source = {record.spec.source_id: record.spec for record in records}
     straight = next(
-        spec
-        for spec in by_source.values()
-        if spec.article_number == "20509" and not spec.piece_key
+        spec for spec in by_source.values() if spec.article_number == "20509" and not spec.piece_key
     )
     assert straight.category == STRAIGHT
     assert straight.length_mm == pytest.approx(345)
