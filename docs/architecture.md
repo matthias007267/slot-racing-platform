@@ -55,7 +55,8 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `statistics` | Placeholder plugin with navigation entry |
 | `track_planner` | Part library, plans, stock and packages. Lines, arcs and cubic Bézier curves share one path model (ADR 0017). A parametric editor creates and edits simple straights, curves and borders without dropping geometry it cannot edit (ADR 0018). A second tab draws one floor plate and up to four open lanes of lines and arcs, stored as a draft the planner cannot place (ADR 0019). Bézier curves, joints and complex parts stay locked there. A geometry edit of a used part forks a revision so saved plans keep their shape (ADR 0016) |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Zeitmessung** page that edits that document on the live picture. Zones are not stored per track |
-| `timing_sensor`, `audio_animation` | Placeholder plugin only (sensor off by default) |
+| `timing_sensor` | Sensor timing provider `sensor` (off by default). Physical sensors map to a position and a lane per track in the `settings` table. A provisional simulator frame and a diagnostic page share one reader. No serial port and no firmware |
+| `audio_animation` | Placeholder plugin only |
 
 ### Shared UI helpers (`slot_racing.uikit`)
 
@@ -63,8 +64,9 @@ Small Qt helpers used by the pages of several modules: `EntityPage` (list with a
 (de)activate / delete), `FormDialog`, table helpers, cards, `describe_error` and the common German
 texts. The dark racing theme (color and spacing tokens, Fusion palette, stylesheet) lives in
 `uikit.theme` and is applied once by the shell. It depends on the core only. The core, the engine,
-the timing module and the camera timing logic never import it (import-linter). The camera setup
-page (`timing_camera.ui`) may.
+the timing module, the camera timing logic and the sensor timing logic never import it
+(import-linter). The camera setup page (`timing_camera.ui`) and the sensor diagnostic page
+(`timing_sensor.ui`) may.
 
 ## Master data and race flow
 
@@ -163,7 +165,8 @@ TimingSource           one per race, built by the factory
      ↑ create_source(TimingSessionSpec)
 TimingSourceFactory    = provider, stable provider_id, capabilities, availability
      ↑ register_timing_provider
-Provider plugin        simulation · camera* · raspberry_pi* · manufacturer* (* future modules)
+Provider plugin        simulation · camera* · sensor* · manufacturer†
+                       (* off by default, † future)
 ```
 
 `TimingSource` knows nothing about its origin. Every source delivers the same event,
@@ -181,7 +184,7 @@ does **not** know the race engine, drivers, vehicles, standings, rules or the UI
 
 | Member | Purpose |
 |---|---|
-| `provider_id` | Stable technical id, for example `simulation`, `camera`, `raspberry_pi`. Stored with the race. Not a label: the UI translates `timing.provider.<id>` (falls back to the id). |
+| `provider_id` | Stable technical id, for example `simulation`, `camera`, `sensor`. Stored with the race. Not a label: the UI translates `timing.provider.<id>` (falls back to the id). |
 | `capabilities` | `ProviderCapabilities(supports_test_mode, supports_multiple_lanes)`. Callers ask capabilities, never provider names. |
 | `availability()` | `ProviderAvailability` (available, or a translatable reason key). Cheap, called before a race starts and for the selection list. |
 | `validate(spec)` | Optional check that the setup is supported (raises `ProviderConfigurationError`). |
@@ -301,8 +304,8 @@ Race ─ track ─▶ TimingSetupService.get_setup(track)   (fallback: default_t
 
 ### Attaching a timing provider
 
-A camera, Raspberry Pi or manufacturer-specific module implements `TimingSource` and a `TimingSourceFactory`
-with its own `provider_id` (for example `camera`, `raspberry_pi`) and calls
+A camera, sensor or manufacturer-specific module implements `TimingSource` and a `TimingSourceFactory`
+with its own `provider_id` (for example `camera`, `sensor`) and calls
 `context.register_timing_provider(...)`, exactly like the simulation. Its `availability()` reports
 "not connected" and the like; the race wizard then lists it as unavailable, and as soon as it is
 available it can be selected, without any change to the engine, race module or UI. It adds its
@@ -339,6 +342,20 @@ and the provider copies that value onto `SensorTriggered`. The race engine never
 camera. The same path is covered by an integration test with a scripted capture. Opening a
 real camera is a separate test, `pytest -m camera_hardware`, and the default `pytest` run
 does not include it.
+
+The sensor provider (`timing_sensor`, id `sensor`, off by default) is device-neutral. USB, a
+Raspberry Pi or another reader is a transport behind one shared link; none of those readers is
+implemented. Physical sensor ids are stored per track in `settings['timing_sensor.configuration']`,
+each pointing at a `position_id` and a lane. Two physical sensors may share one logical position
+when their lanes differ. The logical `hardware_id` is not that map. The diagnostic page and a race
+acquire the same link, so they do not open two readers. The simulator and any later transport yield
+text; one parser (`PSF/1`) turns it into observations. `PSF/1` is explicitly provisional and is not
+the USB protocol. Device time is converted to host monotonic nanoseconds only through an explicit
+clock mapping. Without that mapping, and after a restart that drops it, the provider emits no
+`SensorTriggered`. Session id and event number stay in the module: duplicates are dropped, gaps are
+counted and not filled. The page shows simulation mode, connection, sync, the assignment, device
+time, host time when converted, and those diagnostics. An invalid map or a lost mapping is not
+shown as ready. Section times stay in the engine.
 
 ### Timing configuration UI (`tracks` module)
 
@@ -445,7 +462,8 @@ data can be deactivated but not deleted.
   by plugins. The races module adds **Renn-HUD** there. The shell does not import the module:
   the section factory is registered at activation and returns a widget.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
-  Rennen 40, Sensor-Zeitmessung 50, Kamera-Zeitmessung 55 (only when the camera plugin is enabled),
+  Rennen 40, Sensor-Zeitmessung 50 (timing placeholder), Kamera-Zeitmessung 55 (only when the
+  camera plugin is enabled), Sensor-Zeitmessung 56 (only when the sensor plugin is enabled),
   Statistiken 60, Streckenplaner 70, Einstellungen (shell).
 
 ## Race HUD
@@ -550,7 +568,9 @@ thresholds are unchanged; see `docs/start-light-measurement.md` and ADR 0015.
 | `modules.races.hud` ↛ PySide6, `uikit`, engine, recorder, runner | import-linter |
 | `core` ↛ `uikit`; `uikit` ↛ `app`, `modules` | import-linter |
 | race engine ↛ timing modules, `app`, `uikit` (engine knows only the core) | import-linter |
-| `timing`, `timing_sensor` ↛ PySide6, `uikit`; `timing` ↛ cv2, gpiozero, RPi | import-linter |
+| `timing` ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |
+| sensor timing logic (protocol, clock, configuration, transport, intake, link, store, provider) ↛ PySide6, `uikit` | import-linter |
+| `timing_sensor.ui` ↛ `races` | import-linter |
 | camera timing logic (capture, detection, configuration, store, provider, preview) ↛ PySide6, `uikit` | import-linter |
 | `timing_camera.ui` ↛ cv2, `opencv_device`, `races` | import-linter |
 | `tracks.timing_editor`, `tracks.timing_test` ↛ PySide6, `uikit`, cv2, gpiozero, RPi | import-linter |

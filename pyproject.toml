@@ -219,11 +219,29 @@ allow_indirect_imports = true
 [[tool.importlinter.contracts]]
 name = "Timing providers do not know the UI"
 type = "forbidden"
+source_modules = ["slot_racing.modules.timing"]
+forbidden_modules = ["PySide6", "slot_racing.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Sensor timing logic does not know the UI"
+type = "forbidden"
 source_modules = [
-    "slot_racing.modules.timing",
-    "slot_racing.modules.timing_sensor",
+    "slot_racing.modules.timing_sensor.clock_map",
+    "slot_racing.modules.timing_sensor.configuration",
+    "slot_racing.modules.timing_sensor.intake",
+    "slot_racing.modules.timing_sensor.link",
+    "slot_racing.modules.timing_sensor.protocol",
+    "slot_racing.modules.timing_sensor.provider",
+    "slot_racing.modules.timing_sensor.store",
+    "slot_racing.modules.timing_sensor.transport",
 ]
 forbidden_modules = ["PySide6", "slot_racing.uikit"]
+
+[[tool.importlinter.contracts]]
+name = "Sensor diagnostic UI does not touch races"
+type = "forbidden"
+source_modules = ["slot_racing.modules.timing_sensor.ui"]
+forbidden_modules = ["slot_racing.modules.races"]
 
 [[tool.importlinter.contracts]]
 name = "Camera timing logic does not know the UI"

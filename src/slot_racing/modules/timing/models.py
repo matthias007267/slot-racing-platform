@@ -19,7 +19,7 @@ class TimingConfiguration(Base):
     name: Mapped[str] = mapped_column(String(100))
     source_type: Mapped[str] = mapped_column(String(32))
     """Provider normally used to time the track, for example ``simulation``, ``camera`` or
-    ``raspberry_pi``. Informational for now; the layout is the same for every provider."""
+    ``sensor``. Informational for now; the layout is the same for every provider."""
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 

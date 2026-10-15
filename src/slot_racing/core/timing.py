@@ -176,7 +176,7 @@ class TimingSourceFactory(ABC):
     @abstractmethod
     def provider_id(self) -> str:
         """Stable technical identifier, for example ``simulation``, ``camera`` or
-        ``raspberry_pi``. Not a UI label: the UI translates ``timing.provider.<provider_id>``."""
+        ``sensor``. Not a UI label: the UI translates ``timing.provider.<provider_id>``."""
 
     @property
     def capabilities(self) -> ProviderCapabilities:
