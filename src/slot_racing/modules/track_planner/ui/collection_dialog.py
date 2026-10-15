@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import QRegularExpression, Qt
+from PySide6.QtCore import QRegularExpression, Qt, Signal
 from PySide6.QtGui import QRegularExpressionValidator, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -35,6 +35,8 @@ from slot_racing.uikit.widgets import StatusLabel
 
 class CollectionDialog(QDialog):
     """Packages first, then one row per physical definition. A change is stored immediately."""
+
+    stock_changed = Signal()
 
     def __init__(
         self,
@@ -77,13 +79,21 @@ class CollectionDialog(QDialog):
         reset = QPushButton(translator.translate("planner.stock.reset"), self)
         reset.setObjectName("collection-reset")
         reset.clicked.connect(self._reset_library)
+        clear_stock = QPushButton(translator.translate("planner.stock.reset_quantities"), self)
+        clear_stock.setObjectName("collection-reset-stock")
+        clear_stock.clicked.connect(self._reset_quantities)
         close = QPushButton(translator.translate("planner.stock.close"), self)
         close.setObjectName("collection-close")
         close.clicked.connect(self.accept)
         actions = QHBoxLayout()
         actions.addWidget(reset)
+        actions.addWidget(clear_stock)
         actions.addStretch(1)
         actions.addWidget(close)
+        for button in (reset, clear_stock, close):
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(button.text()) + 28)
+        button_width = sum(button.minimumWidth() for button in (reset, clear_stock, close))
+        self.setMinimumWidth(max(self.minimumWidth(), button_width + 64))
         layout = QVBoxLayout(self)
         layout.addWidget(self.search)
         layout.addWidget(self.hide_sets)
@@ -182,6 +192,38 @@ class CollectionDialog(QDialog):
         self._planner.reset_library()
         self._fill()
         self.status.show_info(self._translator.translate("planner.stock.reset.done"))
+
+    def _reset_quantities(self) -> None:
+        if not self._confirm_quantity_reset():
+            return
+        self._planner.reset_collection_quantities()
+        for part_row in self._rows:
+            part_row.force_quantity(0)
+        for package_row in self._package_rows:
+            package_row.force_quantity(0)
+        self._refresh_labels()
+        self.stock_changed.emit()
+        self.status.show_info(self._translator.translate("planner.stock.reset_quantities.done"))
+
+    def _confirm_quantity_reset(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setObjectName("collection-reset-stock-dialog")
+        box.setWindowTitle(self._translator.translate("planner.stock.reset_quantities.title"))
+        box.setText(self._translator.translate("planner.stock.reset_quantities.confirm"))
+        accept = box.addButton(
+            self._translator.translate("planner.stock.reset.accept"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel = box.addButton(
+            self._translator.translate("planner.stock.reset.cancel"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        accept.setObjectName("collection-reset-stock-accept")
+        cancel.setObjectName("collection-reset-stock-cancel")
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is accept
 
     def _confirm_reset(self, report: CatalogReconcileReport) -> bool:
         box = QMessageBox(self)
@@ -332,6 +374,11 @@ class _PackageRow(QWidget):
     def quantity(self) -> int:
         return self._quantity
 
+    def force_quantity(self, quantity: int) -> None:
+        """Show ``quantity`` without storing it. The same later edit stores nothing."""
+        self._quantity = quantity
+        self._show(quantity)
+
     def show_contained(self, package: PackageView) -> None:
         self.recipe.setText(
             self._translator.translate("planner.stock.per_pack")
@@ -464,6 +511,11 @@ class _StockRow(QWidget):
 
     def quantity(self) -> int:
         return self._quantity
+
+    def force_quantity(self, quantity: int) -> None:
+        """Show ``quantity`` without storing it. The same later edit stores nothing."""
+        self._quantity = quantity
+        self._show(quantity)
 
     def show_saved(self, record: PartRecord) -> None:
         self.part_id = record.id

@@ -146,6 +146,10 @@ class TrackPlannerService:
         """Replace the managed catalogue with the bundled one. Custom parts and races stay."""
         return self.library.reset_to_catalog()
 
+    def reset_collection_quantities(self) -> int:
+        """Zero every personal part and package quantity. The library and tracks stay."""
+        return self.library.reset_collection_quantities()
+
     def add_package(self, spec: PackageSpec) -> PackageView:
         return self.library.add_package(spec)
 

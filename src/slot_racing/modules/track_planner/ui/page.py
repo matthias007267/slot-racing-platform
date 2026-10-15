@@ -1625,14 +1625,19 @@ class PlannerPage(QWidget):
         dialog = CollectionDialog(self._translator, self._planner, self, usage)
         self._collection_dialog = dialog
         dialog.destroyed.connect(self._release_collection_dialog)
+        dialog.stock_changed.connect(self._refresh_stock_displays)
         try:
             self.stock_dialog_runner(dialog)
-            self._stock = self._planner.stock_quantities()
+            self._refresh_stock_displays()
             self._current_of = self._planner.current_part_ids()
-            self._draw()
         finally:
             trace("COLLECTION_DIALOG_RETURN", result="closed")
             self._destroy_collection_dialog()
+
+    def _refresh_stock_displays(self) -> None:
+        self._stock = self._planner.stock_quantities()
+        self._apply_filters()
+        self._draw()
 
     def _destroy_collection_dialog(self) -> None:
         dialog = self._collection_dialog
