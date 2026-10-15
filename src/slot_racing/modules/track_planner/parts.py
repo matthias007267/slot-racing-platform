@@ -138,7 +138,26 @@ PATH_CENTER = "center"
 PATH_CONTOUR = "contour"
 PATH_BORDER = "border"
 PATH_START = "start"
+# A source drawing that is neither a driving groove nor a centre or start mark.
+PATH_DRAW = "draw"
 BORDER_SLOTS = frozenset({"left", "right", "inner", "outer"})
+_STYLE_KEYS = frozenset(
+    {
+        "kind",
+        "spans",
+        "lane",
+        "slot",
+        "stroke",
+        "width",
+        "cap",
+        "fill",
+        "fill_alt",
+        "dashed",
+        "closed",
+        "z",
+        "extras",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,11 +207,12 @@ class SlotSpan:
 
 @dataclass(frozen=True, slots=True)
 class SlotPath:
-    """One continuous groove. Several spans join end to end.
+    """One continuous groove or drawing. Several spans join end to end.
 
-    ``kind`` is ``slot`` for a driving groove and ``center`` for the dashed line
-    between two lanes. Complex parts store these on the definition. A part with
-    no paths gets the ordinary lanes derived from its measures.
+    ``kind`` is ``slot`` for a driving groove, ``center`` for a centre mark and
+    ``draw`` for a source fill or stroke that is not a groove. A part with no
+    paths gets the ordinary lanes derived from its measures. Paint fields stay
+    empty on a groove, so a drawing cannot move a rail joint.
     """
 
     spans: tuple[SlotSpan, ...]
@@ -201,6 +221,17 @@ class SlotPath:
     lane: int | None = None
     # Set on a border edge. A groove leaves this empty.
     slot: str | None = None
+    stroke: str | None = None
+    width_mm: float | None = None
+    linecap: str | None = None
+    fill: str | None = None
+    fill_alt: str | None = None
+    dashed: bool = False
+    closed: bool = False
+    # Higher source indexes sit further back. A negative value is a user mark on top.
+    z_order: int = 0
+    # Drawing keys the importer does not interpret. They stay in the JSON.
+    extras: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1104,10 +1135,14 @@ def lane_offset_mm(index: int, lane_count: int) -> float:
 
 
 def curve_bends_left(spec: PartSpec) -> bool:
-    """True when a stored arc sweeps toward negative y. Catalogue curves do not."""
+    """True when a stored groove arc sweeps toward negative y. Catalogue curves do not.
+
+    Paint and centre marks are not grooves, so their arcs do not flip the joint.
+    """
     return any(
         span.kind == SPAN_ARC and span.sweep_deg < 0.0
         for path in spec.slot_paths
+        if path.kind == PATH_SLOT
         for span in path.spans
     )
 
@@ -1143,7 +1178,7 @@ def geometry_of(path: SlotPath) -> GeometryPath:
     role: Literal["slot", "center", "contour", "border"]
     if path.kind == PATH_CENTER:
         role = "center"
-    elif path.kind == PATH_CONTOUR:
+    elif path.kind in {PATH_CONTOUR, PATH_DRAW} or path.closed:
         role = "contour"
     elif path.kind == PATH_BORDER:
         role = "border"
@@ -1227,6 +1262,8 @@ def _curve_paths(spec: PartSpec) -> tuple[GeometryPath, ...]:
 def validate_part_geometry(spec: PartSpec) -> None:
     """Check one part's own curves, lanes and border edges. This is not a lap-closure test."""
     for path in spec.slot_paths:
+        if path.kind == PATH_DRAW:
+            continue
         validate_path(geometry_of(path))
     for path in spec.contours:
         contour = geometry_of(path)
@@ -1462,10 +1499,11 @@ def decode_geometry(
         slot = entry.get("slot")
         lane_no = lane if isinstance(lane, int) and not isinstance(lane, bool) else None
         slot_name = slot if isinstance(slot, str) else None
-        if kind in {PATH_SLOT, PATH_CENTER, PATH_START}:
-            slots.append(SlotPath(tuple(spans), str(kind), lane_no, slot_name))
+        style = _decode_style(entry)
+        if kind in {PATH_SLOT, PATH_CENTER, PATH_START, PATH_DRAW}:
+            slots.append(SlotPath(tuple(spans), str(kind), lane_no, slot_name, *style))
         elif kind == PATH_CONTOUR:
-            contours.append(SlotPath(tuple(spans), PATH_CONTOUR))
+            contours.append(SlotPath(tuple(spans), PATH_CONTOUR, None, None, *style))
         elif kind == PATH_BORDER and slot_name in BORDER_SLOTS:
             edges.append(BorderEdge(slot_name, tuple(spans)))
         else:
@@ -1479,6 +1517,24 @@ def _encode_path(path: SlotPath) -> dict[str, object]:
         encoded["lane"] = path.lane
     if path.slot is not None:
         encoded["slot"] = path.slot
+    if path.stroke is not None:
+        encoded["stroke"] = path.stroke
+    if path.width_mm is not None:
+        encoded["width"] = path.width_mm
+    if path.linecap is not None:
+        encoded["cap"] = path.linecap
+    if path.fill is not None:
+        encoded["fill"] = path.fill
+    if path.fill_alt is not None:
+        encoded["fill_alt"] = path.fill_alt
+    if path.dashed:
+        encoded["dashed"] = True
+    if path.closed:
+        encoded["closed"] = True
+    if path.z_order:
+        encoded["z"] = path.z_order
+    if path.extras:
+        encoded["extras"] = [[key, value] for key, value in path.extras]
     return encoded
 
 
@@ -1515,6 +1571,74 @@ def _encode_span(span: SlotSpan) -> dict[str, object]:
         "x1": span.x1,
         "y1": span.y1,
     }
+
+
+def _decode_style(
+    entry: Mapping[str, object],
+) -> tuple[
+    str | None,
+    float | None,
+    str | None,
+    str | None,
+    str | None,
+    bool,
+    bool,
+    int,
+    tuple[tuple[str, str], ...],
+]:
+    """Paint fields. A row written before drawings were stored leaves them empty."""
+    extras = _decode_extras(entry.get("extras"))
+    unknown = [(key, _style_text(value)) for key, value in entry.items() if key not in _STYLE_KEYS]
+    z_raw = entry.get("z", 0)
+    z_order = z_raw if isinstance(z_raw, int) and not isinstance(z_raw, bool) else 0
+    return (
+        _optional_text(entry.get("stroke")),
+        _optional_float(entry.get("width")) if "width" in entry else None,
+        _optional_text(entry.get("cap")),
+        _optional_text(entry.get("fill")),
+        _optional_text(entry.get("fill_alt")),
+        entry.get("dashed") is True,
+        entry.get("closed") is True,
+        z_order,
+        extras + tuple(unknown),
+    )
+
+
+def _decode_extras(raw: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, list):
+        return ()
+    found: list[tuple[str, str]] = []
+    for item in raw:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+        ):
+            found.append((item[0], item[1]))
+    return tuple(found)
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _style_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _decode_span(raw: object) -> SlotSpan | None:

@@ -262,7 +262,7 @@ def _arc_slots_and_centers(
     start = -angle / 2.0
     stored = tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
     if stored:
-        return stored, tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
+        return stored, _generic_centers(spec)
     slots = tuple(
         SlotPath(
             (
@@ -341,8 +341,7 @@ def _crossing(spec: PartSpec) -> TrackFigure:
 def _slots_and_centers(spec: PartSpec) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...]]:
     if spec.slot_paths:
         slots = tuple(path for path in spec.slot_paths if path.kind == PATH_SLOT)
-        centers = tuple(path for path in spec.slot_paths if path.kind == PATH_CENTER)
-        return slots, centers
+        return slots, _generic_centers(spec)
     return _derived_slots(spec)
 
 
@@ -512,6 +511,19 @@ def _outline_edges(outline: tuple[tuple[float, float], ...]) -> tuple[SlotPath, 
         for (x0, y0), (x1, y1) in zip(outline, outline[1:] + outline[:1], strict=True)
     ]
     return (SlotPath(tuple(spans)),)
+
+
+def _generic_centers(spec: PartSpec) -> tuple[SlotPath, ...]:
+    """Centre lines the generic figure dashes.
+
+    A mark that carries its own stroke is painted from the source instead, so the
+    dashed approximation does not replace the stored dashes.
+    """
+    return tuple(
+        path
+        for path in spec.slot_paths
+        if path.kind == PATH_CENTER and path.stroke is None and not path.dashed
+    )
 
 
 def _dashed(paths: tuple[SlotPath, ...]) -> tuple[SlotPath, ...]:

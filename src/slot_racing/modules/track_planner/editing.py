@@ -406,7 +406,10 @@ def _numbered(paths: tuple[SlotPath, ...]) -> tuple[SlotPath, ...]:
 def path_refs(spec: PartSpec) -> tuple[PathRef, ...]:
     refs: list[PathRef] = []
     for index, path in enumerate(spec.slot_paths):
-        refs.append(PathRef(LAYER_GROOVE if path.kind == PATH_SLOT else LAYER_CENTER, index))
+        if path.kind == PATH_SLOT:
+            refs.append(PathRef(LAYER_GROOVE, index))
+        elif path.kind == PATH_CENTER:
+            refs.append(PathRef(LAYER_CENTER, index))
     refs.extend(PathRef(LAYER_CONTOUR, index) for index in range(len(spec.contours)))
     refs.extend(PathRef(LAYER_EDGE, index) for index in range(len(spec.border_edges)))
     if spec.attachment is not None and spec.attachment.edge:

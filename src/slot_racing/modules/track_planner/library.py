@@ -49,11 +49,13 @@ from slot_racing.modules.track_planner.parts import (
     ORIGIN_CATALOG,
     ORIGIN_CUSTOM,
     ORIGIN_MODIFIED,
+    PATH_SLOT,
     AttachmentProfile,
     ConnectorSpec,
     PartInstance,
     PartRecord,
     PartSpec,
+    SlotPath,
     catalog_storage_key,
     decode_geometry,
     encode_geometry,
@@ -147,11 +149,41 @@ class PartLibrary:
         the active library. This pass adds missing source rows and drops or
         retires those obsolete supplied rows. It does not rewrite geometry the
         user already has, and it does not recreate a part they suppressed.
+        Source paint that was dropped by an older import is filled in on the
+        same row when the driving grooves still match the file.
         """
         with self._database.session() as session:
-            if self._catalog_is_current(session):
-                return
-            self._reconcile(session, update_existing=False, import_missing=True)
+            if not self._catalog_is_current(session):
+                self._reconcile(session, update_existing=False, import_missing=True)
+            self._backfill_source_paint(session)
+
+    def _backfill_source_paint(self, session: Session) -> None:
+        """Put source drawings back on a catalogue row whose grooves still match.
+
+        The same definition id keeps stock, plans and templates. A modified row
+        and a groove that no longer matches the file are left alone. A second
+        call writes nothing.
+        """
+        draft = {spec.source_id: spec for spec in load_carrera_library().parts}
+        rows = session.scalars(select(TrackPartDefinition)).all()
+        for row in rows:
+            spec = draft.get(row.source_id)
+            if (
+                spec is None
+                or not row.is_current
+                or row.origin != ORIGIN_CATALOG
+                or geometry_payload_corrupt(row.slot_paths)
+            ):
+                continue
+            stored = self._record(session, row).spec
+            if _slot_identity(stored.slot_paths) != _slot_identity(spec.slot_paths):
+                continue
+            paint = tuple(path for path in spec.slot_paths if path.kind != PATH_SLOT)
+            stored_paint = tuple(path for path in stored.slot_paths if path.kind != PATH_SLOT)
+            if stored_paint == paint:
+                continue
+            physical = tuple(path for path in stored.slot_paths if path.kind == PATH_SLOT)
+            row.slot_paths = encode_geometry(replace(stored, slot_paths=physical + paint))
 
     def retire_bundled_catalog(self) -> int:
         """Retire or remove supplied definitions the current catalogue no longer has.
@@ -1596,6 +1628,11 @@ class PartLibrary:
             name=spec.name.strip(),
             article=spec.article_number.strip(),
         )
+
+
+def _slot_identity(paths: tuple[SlotPath, ...]) -> tuple[object, ...]:
+    """Driving grooves only. Paint on the same row must not count as a new joint."""
+    return tuple((path.lane, path.slot, path.spans) for path in paths if path.kind == PATH_SLOT)
 
 
 def _is_supplied_part(row: TrackPartDefinition) -> bool:
