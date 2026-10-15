@@ -33,7 +33,11 @@ from slot_racing.modules.track_planner.inventory import (
     PhysicalStock,
     analyze_inventory,
 )
-from slot_racing.modules.track_planner.library import PartLibrary, TemplateView
+from slot_racing.modules.track_planner.library import (
+    CatalogReconcileReport,
+    PartLibrary,
+    TemplateView,
+)
 from slot_racing.modules.track_planner.packages import PackageSpec, PackageView
 from slot_racing.modules.track_planner.parts import PartInstance, PartRecord, PartSpec
 
@@ -133,6 +137,14 @@ class TrackPlannerService:
 
     def list_templates(self) -> tuple[TemplateView, ...]:
         return self.library.list_templates()
+
+    def preview_library_reset(self) -> CatalogReconcileReport:
+        """The reset that ``reset_library`` would apply. Nothing is written."""
+        return self.library.preview_library_reset()
+
+    def reset_library(self) -> CatalogReconcileReport:
+        """Replace the managed catalogue with the bundled one. Custom parts and races stay."""
+        return self.library.reset_to_catalog()
 
     def add_package(self, spec: PackageSpec) -> PackageView:
         return self.library.add_package(spec)

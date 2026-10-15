@@ -15,6 +15,7 @@ from slot_racing.core.storage import Database
 from slot_racing.core.storage.base import Base
 from slot_racing.modules.track_planner.catalog_import import (
     LibraryDraft,
+    PackageDraft,
     TemplateDraft,
     load_carrera_library,
 )
@@ -45,7 +46,6 @@ from slot_racing.modules.track_planner.packages import (
     standard_packages,
 )
 from slot_racing.modules.track_planner.parts import (
-    ACTIVE_STRAIGHT_SOURCE,
     ORIGIN_CATALOG,
     ORIGIN_CUSTOM,
     ORIGIN_MODIFIED,
@@ -85,6 +85,36 @@ class TemplateView:
     members: tuple[TemplateMemberView, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogEntryChange:
+    """One definition the catalogue reconcile will add, update, remove or retire."""
+
+    kind: str
+    article_number: str
+    name: str
+    stock: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogReconcileReport:
+    """What a catalogue reconcile changes. Empty means the library already matches.
+
+    ``removed`` entries had no reference from a plan, a package, a template or
+    the collection, so the row and its stock go away. ``retired`` entries stay
+    in the database because something still points at them. They leave the
+    active library and the collection picker; the reference keeps resolving.
+    Stock of a part that is still in the catalogue stays on that part's id.
+    """
+
+    added: tuple[CatalogEntryChange, ...] = ()
+    updated: tuple[CatalogEntryChange, ...] = ()
+    removed: tuple[CatalogEntryChange, ...] = ()
+    retired: tuple[CatalogEntryChange, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not (self.added or self.updated or self.removed or self.retired)
+
+
 class PartLibrary:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -109,50 +139,179 @@ class PartLibrary:
             return tuple(self._record(session, row) for row in rows)
 
     def ensure_seed(self) -> None:
-        """Hide the old bundled catalogue and import the Carrera source files once.
+        """Bring the stored catalogue in line with the bundled source files.
 
-        A suppressed or legacy row stays. Seeding does not recreate the old
-        catalogue and does not delete plans, layouts or stock.
+        The first import used to stop as soon as the active straight existed,
+        and a row that already had a source id was never compared again. A
+        supplied definition that has since left the files therefore stayed in
+        the active library. This pass adds missing source rows and drops or
+        retires those obsolete supplied rows. It does not rewrite geometry the
+        user already has, and it does not recreate a part they suppressed.
         """
         with self._database.session() as session:
-            present = session.scalar(
-                select(TrackPartDefinition.id).where(
-                    TrackPartDefinition.source_id == ACTIVE_STRAIGHT_SOURCE
-                )
-            )
-            if present is not None:
+            if self._catalog_is_current(session):
                 return
-            self._retire_bundled(session)
-            self._import_sources(session)
+            self._reconcile(session, update_existing=False, import_missing=True)
 
     def retire_bundled_catalog(self) -> int:
-        """Mark bundled definitions and sets as legacy. Returns how many parts were retired.
+        """Retire or remove supplied definitions the current catalogue no longer has.
 
-        Stock, plans and layouts stay. The active library no longer lists them.
+        Returns how many parts were retired or removed. Stock on a part that
+        stays, plans and layouts stay. The active library no longer lists them.
         """
         with self._database.session() as session:
-            return self._retire_bundled(session)
+            report = self._reconcile(
+                session,
+                update_existing=False,
+                import_missing=False,
+                retire_legacy_packages=True,
+            )
+            return sum(1 for entry in (*report.retired, *report.removed) if entry.kind == "part")
+
+    def preview_library_reset(self) -> CatalogReconcileReport:
+        """Describe a reset without writing. A second call after the reset is empty."""
+        with self._database.session() as session:
+            return self._reconcile(session, update_existing=True, import_missing=True, dry_run=True)
+
+    def reset_to_catalog(self) -> CatalogReconcileReport:
+        """Add, update and drop supplied rows so the library matches the bundled catalogue.
+
+        One transaction. Custom parts stay. Stock and package counts of a part
+        or box that is still supplied stay on the same id. Repeating the reset
+        adds nothing and changes nothing.
+        """
+        with self._database.session() as session:
+            return self._reconcile(session, update_existing=True, import_missing=True)
 
     def import_carrera_library(self) -> LibraryDraft:
         """Insert source parts that are not stored yet. A second call adds nothing."""
         with self._database.session() as session:
             return self._import_sources(session)
 
-    def _retire_bundled(self, session: Session) -> int:
-        retired = 0
-        for row in session.scalars(select(TrackPartDefinition)):
-            if row.source_id or row.legacy:
+    def _catalog_is_current(self, session: Session) -> bool:
+        """True when nothing supplied is missing or still active after leaving the catalogue."""
+        draft = load_carrera_library()
+        catalog_ids = {spec.source_id for spec in draft.parts}
+        rows = list(session.scalars(select(TrackPartDefinition)))
+        current = [row for row in rows if row.is_current]
+        by_source = {row.source_id: row for row in current if row.source_id}
+        for source_id in catalog_ids:
+            row = by_source.get(source_id)
+            if row is None or (row.legacy and not row.suppressed):
+                return False
+        for row in current:
+            if not _is_supplied_part(row) or row.source_id in catalog_ids:
                 continue
-            if row.origin != ORIGIN_CATALOG and not row.catalog_key:
+            if not row.legacy and not row.suppressed:
+                return False
+        if not self._hidden_obsolete_parts_are_kept(session, rows, catalog_ids):
+            return False
+        template_ids = {
+            row.source_id for row in session.scalars(select(TrackPartTemplate)) if row.source_id
+        }
+        draft_templates = {template.source_id for template in draft.templates}
+        if template_ids != draft_templates:
+            return False
+        draft_packages = {_draft_package_identity(package) for package in draft.packages}
+        packages = list(session.scalars(select(TrackPartPackage)))
+        stored = {_package_identity(package): package for package in packages}
+        if not draft_packages <= set(stored):
+            return False
+        for package in packages:
+            if not _is_supplied_package(package, draft_packages):
                 continue
-            row.legacy = True
-            row.selectable = False
-            retired += 1
-        bundled = {_package_identity(spec) for spec in standard_packages()}
-        for package in session.scalars(select(TrackPartPackage)):
-            if _package_identity(package) in bundled:
-                package.suppressed = True
-        return retired
+            identity = _package_identity(package)
+            if identity in draft_packages:
+                if not package.bundled:
+                    return False
+                continue
+            if not package.suppressed:
+                return False
+        return True
+
+    def _hidden_obsolete_parts_are_kept(
+        self,
+        session: Session,
+        rows: Sequence[TrackPartDefinition],
+        catalog_ids: set[str],
+    ) -> bool:
+        """False when a hidden obsolete part could be deleted without breaking a reference."""
+        hidden = [
+            row
+            for row in rows
+            if row.is_current
+            and _is_supplied_part(row)
+            and row.source_id not in catalog_ids
+            and (row.legacy or row.suppressed)
+        ]
+        if not hidden:
+            return True
+        blocking = _blocking_part_ids(session)
+        lineages: dict[str, list[int]] = {}
+        for row in rows:
+            lineages.setdefault(row.lineage_id, []).append(row.id)
+        return all(set(lineages.get(row.lineage_id, [])) & blocking for row in hidden)
+
+    def _reconcile(
+        self,
+        session: Session,
+        *,
+        update_existing: bool,
+        import_missing: bool,
+        dry_run: bool = False,
+        retire_legacy_packages: bool = False,
+    ) -> CatalogReconcileReport:
+        draft = load_carrera_library()
+        added: list[CatalogEntryChange] = []
+        updated: list[CatalogEntryChange] = []
+        removed: list[CatalogEntryChange] = []
+        retired: list[CatalogEntryChange] = []
+        self._retire_obsolete_templates(session, draft, removed=removed, dry_run=dry_run)
+        by_source = self._sync_catalog_parts(
+            session,
+            draft,
+            update_existing=update_existing,
+            import_missing=import_missing,
+            dry_run=dry_run,
+            added=added,
+            updated=updated,
+        )
+        self._sync_catalog_templates(
+            session,
+            draft,
+            by_source,
+            update_existing=update_existing,
+            import_missing=import_missing,
+            dry_run=dry_run,
+            added=added,
+            updated=updated,
+        )
+        self._sync_catalog_packages(
+            session,
+            draft,
+            by_source,
+            update_existing=update_existing,
+            import_missing=import_missing,
+            dry_run=dry_run,
+            retire_legacy_packages=retire_legacy_packages,
+            added=added,
+            updated=updated,
+            removed=removed,
+            retired=retired,
+        )
+        self._retire_obsolete_parts(
+            session,
+            draft,
+            dry_run=dry_run,
+            removed=removed,
+            retired=retired,
+        )
+        return CatalogReconcileReport(
+            added=tuple(added),
+            updated=tuple(updated),
+            removed=tuple(removed),
+            retired=tuple(retired),
+        )
 
     def _import_sources(self, session: Session) -> LibraryDraft:
         draft = load_carrera_library()
@@ -192,20 +351,7 @@ class PartLibrary:
         )
         session.add(row)
         session.flush()
-        for index, member in enumerate(template.members):
-            part = by_source.get(member.source_id)
-            if part is None:
-                continue
-            session.add(
-                TrackPartTemplateMember(
-                    template_id=row.id,
-                    part_id=part.id,
-                    x_mm=member.x_mm,
-                    y_mm=member.y_mm,
-                    angle_deg=member.angle_deg,
-                    sort_order=index,
-                )
-            )
+        self._append_template_members(session, row.id, template, by_source)
 
     def _import_packages(
         self,
@@ -231,8 +377,307 @@ class PartLibrary:
             self._insert_package(
                 session,
                 PackageSpec("Carrera", package.article_number, package.name, tuple(contents)),
+                bundled=True,
             )
             stored.add(identity)
+
+    def _retire_obsolete_templates(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        *,
+        removed: list[CatalogEntryChange],
+        dry_run: bool,
+    ) -> None:
+        keep = {template.source_id for template in draft.templates}
+        for row in list(session.scalars(select(TrackPartTemplate))):
+            if not row.source_id or row.source_id in keep:
+                continue
+            removed.append(_entry_change("template", row.article_number, row.name))
+            if not dry_run:
+                session.delete(row)
+        if not dry_run:
+            session.flush()
+
+    def _sync_catalog_parts(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        *,
+        update_existing: bool,
+        import_missing: bool,
+        dry_run: bool,
+        added: list[CatalogEntryChange],
+        updated: list[CatalogEntryChange],
+    ) -> dict[str, TrackPartDefinition]:
+        current = {
+            row.source_id: row
+            for row in session.scalars(select(TrackPartDefinition))
+            if row.source_id and row.is_current
+        }
+        for spec in draft.parts:
+            row = current.get(spec.source_id)
+            if row is None:
+                if not import_missing:
+                    continue
+                added.append(_entry_change("part", spec.article_number, spec.name))
+                if dry_run:
+                    continue
+                inserted = self._insert(
+                    session, spec, origin=ORIGIN_CATALOG, catalog_key=spec.source_id
+                )
+                current[spec.source_id] = inserted
+                continue
+            if row.suppressed:
+                continue
+            if row.legacy:
+                added.append(_entry_change("part", spec.article_number, spec.name))
+                if not dry_run:
+                    row.legacy = False
+                    row.selectable = spec.selectable
+                    if update_existing and not self._catalog_part_matches(session, row, spec):
+                        self._apply(session, row, spec, ORIGIN_CATALOG)
+                        row.catalog_key = spec.source_id
+                        row.legacy = False
+                        row.selectable = spec.selectable
+                continue
+            if not update_existing or self._catalog_part_matches(session, row, spec):
+                continue
+            updated.append(
+                _entry_change(
+                    "part", row.article_number, row.name, _stock_quantity(session, row.id)
+                )
+            )
+            if dry_run:
+                continue
+            self._apply(session, row, spec, ORIGIN_CATALOG)
+            row.catalog_key = spec.source_id
+            row.legacy = False
+            row.selectable = spec.selectable
+        if not dry_run:
+            session.flush()
+        return {
+            row.source_id: row
+            for row in session.scalars(select(TrackPartDefinition))
+            if row.source_id and row.is_current
+        }
+
+    def _catalog_part_matches(
+        self, session: Session, row: TrackPartDefinition, spec: PartSpec
+    ) -> bool:
+        if row.legacy or row.origin != ORIGIN_CATALOG or row.selectable != spec.selectable:
+            return False
+        if (row.catalog_key or "") != spec.source_id:
+            return False
+        stored = self._record(session, row).spec
+        return (
+            stored.name == spec.name
+            and stored.article_number == spec.article_number
+            and stored.piece_key == spec.piece_key
+            and stored.systems == spec.systems
+            and stored.manufacturer == (spec.manufacturer.strip() or "Carrera")
+            and stored.description == spec.description
+            and stored.source_id == spec.source_id
+            and same_geometry(stored, spec)
+        )
+
+    def _sync_catalog_templates(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        by_source: dict[str, TrackPartDefinition],
+        *,
+        update_existing: bool,
+        import_missing: bool,
+        dry_run: bool,
+        added: list[CatalogEntryChange],
+        updated: list[CatalogEntryChange],
+    ) -> None:
+        stored = {
+            row.source_id: row
+            for row in session.scalars(select(TrackPartTemplate))
+            if row.source_id
+        }
+        members = list(session.scalars(select(TrackPartTemplateMember)))
+        grouped: dict[int, list[TrackPartTemplateMember]] = {}
+        for member in members:
+            grouped.setdefault(member.template_id, []).append(member)
+        for template in draft.templates:
+            row = stored.get(template.source_id)
+            if row is None:
+                if not import_missing:
+                    continue
+                added.append(_entry_change("template", template.article_number, template.name))
+                if not dry_run:
+                    self._insert_template(session, template, by_source)
+                continue
+            if not update_existing or _template_members_match(
+                grouped.get(row.id, []), template, by_source
+            ):
+                continue
+            updated.append(_entry_change("template", row.article_number, row.name))
+            if dry_run:
+                continue
+            session.execute(
+                delete(TrackPartTemplateMember).where(TrackPartTemplateMember.template_id == row.id)
+            )
+            session.flush()
+            self._append_template_members(session, row.id, template, by_source)
+            row.article_number = template.article_number
+            row.name = template.name
+
+    def _append_template_members(
+        self,
+        session: Session,
+        template_id: int,
+        template: TemplateDraft,
+        by_source: dict[str, TrackPartDefinition],
+    ) -> None:
+        for index, member in enumerate(template.members):
+            part = by_source.get(member.source_id)
+            if part is None:
+                continue
+            session.add(
+                TrackPartTemplateMember(
+                    template_id=template_id,
+                    part_id=part.id,
+                    x_mm=member.x_mm,
+                    y_mm=member.y_mm,
+                    angle_deg=member.angle_deg,
+                    sort_order=index,
+                )
+            )
+
+    def _sync_catalog_packages(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        by_source: dict[str, TrackPartDefinition],
+        *,
+        update_existing: bool,
+        import_missing: bool,
+        dry_run: bool,
+        retire_legacy_packages: bool,
+        added: list[CatalogEntryChange],
+        updated: list[CatalogEntryChange],
+        removed: list[CatalogEntryChange],
+        retired: list[CatalogEntryChange],
+    ) -> None:
+        draft_packages = {_draft_package_identity(package): package for package in draft.packages}
+        old_packages = {_package_identity(spec) for spec in standard_packages()}
+        stored = {
+            _package_identity(package): package
+            for package in session.scalars(select(TrackPartPackage))
+        }
+        for identity, package in draft_packages.items():
+            row = stored.get(identity)
+            if row is None:
+                if not import_missing:
+                    continue
+                if dry_run:
+                    added.append(_entry_change("package", package.article_number, package.name))
+                    continue
+                contents = _draft_package_contents(package, by_source)
+                if contents is None:
+                    continue
+                added.append(_entry_change("package", package.article_number, package.name))
+                self._insert_package(
+                    session,
+                    PackageSpec("Carrera", package.article_number, package.name, contents),
+                    bundled=True,
+                )
+                continue
+            if not dry_run and not row.bundled:
+                row.bundled = True
+            if row.suppressed or not update_existing:
+                continue
+            if _package_contents_match(session, row, package, by_source):
+                continue
+            contents = _draft_package_contents(package, by_source)
+            if contents is None:
+                continue
+            quantity = _package_quantity(session, row.id)
+            updated.append(_entry_change("package", row.article_number, row.name, quantity))
+            if dry_run:
+                continue
+            row.name = package.name
+            session.execute(
+                delete(TrackPartPackageContent).where(TrackPartPackageContent.package_id == row.id)
+            )
+            session.flush()
+            for content in contents:
+                part = self._definition_for_content(session, content)
+                session.add(
+                    TrackPartPackageContent(
+                        package_id=row.id,
+                        part_id=part.id,
+                        quantity=content.quantity,
+                    )
+                )
+        if not dry_run:
+            session.flush()
+        for row in list(session.scalars(select(TrackPartPackage))):
+            identity = _package_identity(row)
+            legacy_box = retire_legacy_packages and identity in old_packages
+            if not _is_supplied_package(row, set(draft_packages)) and not legacy_box:
+                continue
+            if identity in draft_packages:
+                continue
+            if row.suppressed:
+                if not dry_run:
+                    row.bundled = True
+                continue
+            retired.append(
+                _entry_change(
+                    "package",
+                    row.article_number,
+                    row.name,
+                    _package_quantity(session, row.id),
+                )
+            )
+            if not dry_run:
+                row.suppressed = True
+                row.bundled = True
+        if not dry_run:
+            session.flush()
+
+    def _retire_obsolete_parts(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        *,
+        dry_run: bool,
+        removed: list[CatalogEntryChange],
+        retired: list[CatalogEntryChange],
+    ) -> None:
+        catalog_ids = {spec.source_id for spec in draft.parts}
+        rows = list(session.scalars(select(TrackPartDefinition)))
+        lineages: dict[str, list[TrackPartDefinition]] = {}
+        for row in rows:
+            lineages.setdefault(row.lineage_id, []).append(row)
+        blocking = _blocking_part_ids(session)
+        for row in rows:
+            if not row.is_current or not _is_supplied_part(row) or row.source_id in catalog_ids:
+                continue
+            members = lineages.get(row.lineage_id, [row])
+            member_ids = {member.id for member in members}
+            stock = _stock_quantity(session, row.id)
+            if member_ids & blocking:
+                if row.legacy and not row.selectable:
+                    continue
+                retired.append(_entry_change("part", row.article_number, row.name, stock))
+                if dry_run:
+                    continue
+                row.legacy = True
+                row.selectable = False
+                continue
+            removed.append(_entry_change("part", row.article_number, row.name, stock))
+            if dry_run:
+                continue
+            for member in members:
+                session.delete(member)
+        if not dry_run:
+            session.flush()
 
     def list_templates(self) -> tuple[TemplateView, ...]:
         self.ensure_seed()
@@ -749,11 +1194,14 @@ class PartLibrary:
                 )
             stored.add(_package_identity(spec))
 
-    def _insert_package(self, session: Session, spec: PackageSpec) -> TrackPartPackage:
+    def _insert_package(
+        self, session: Session, spec: PackageSpec, *, bundled: bool = False
+    ) -> TrackPartPackage:
         package = TrackPartPackage(
             manufacturer=spec.manufacturer.strip(),
             article_number=spec.article_number.strip(),
             name=spec.name.strip(),
+            bundled=bundled,
         )
         session.add(package)
         session.flush()
@@ -1112,6 +1560,115 @@ class PartLibrary:
             name=spec.name.strip(),
             article=spec.article_number.strip(),
         )
+
+
+def _is_supplied_part(row: TrackPartDefinition) -> bool:
+    """A bundled definition. An own part has neither key nor catalogue origin."""
+    if row.source_id.strip():
+        return True
+    if (row.catalog_key or "").strip():
+        return True
+    return row.origin == ORIGIN_CATALOG
+
+
+def _is_supplied_package(package: TrackPartPackage, draft_ids: set[tuple[str, str]]) -> bool:
+    """A box from the bundled catalogue. The flag is set on import, not from the name."""
+    return bool(package.bundled) or _package_identity(package) in draft_ids
+
+
+def _draft_package_identity(package: PackageDraft) -> tuple[str, str]:
+    return ("carrera", package.article_number.strip())
+
+
+def _entry_change(
+    kind: str, article_number: str, name: str, stock: int | None = None
+) -> CatalogEntryChange:
+    return CatalogEntryChange(kind, article_number.strip(), name.strip(), stock)
+
+
+def _stock_quantity(session: Session, part_id: int) -> int | None:
+    row = session.get(TrackPartStock, part_id)
+    if row is None:
+        return None
+    return row.quantity
+
+
+def _package_quantity(session: Session, package_id: int) -> int | None:
+    row = session.get(TrackPartPackageStock, package_id)
+    if row is None:
+        return None
+    return row.quantity
+
+
+def _blocking_part_ids(session: Session) -> set[int]:
+    """Plans, package contents, template members and collection rows that still point at a part."""
+    found = {int(part_id) for part_id in session.scalars(select(TrackPlanInstance.part_id))}
+    for data in session.scalars(select(_layouts().c.data)):
+        found.update(_part_ids_in_document(data))
+    found.update(
+        int(part_id) for part_id in session.scalars(select(TrackPartPackageContent.part_id))
+    )
+    found.update(
+        int(part_id) for part_id in session.scalars(select(TrackPartTemplateMember.part_id))
+    )
+    found.update(int(part_id) for part_id in session.scalars(select(TrackPartStock.part_id)))
+    return found
+
+
+def _template_members_match(
+    stored: Sequence[TrackPartTemplateMember],
+    template: TemplateDraft,
+    by_source: dict[str, TrackPartDefinition],
+) -> bool:
+    expected: list[tuple[int, float, float, float]] = []
+    for member in template.members:
+        part = by_source.get(member.source_id)
+        if part is None:
+            return False
+        expected.append((part.id, member.x_mm, member.y_mm, member.angle_deg))
+    actual = sorted(
+        (member.part_id, member.x_mm, member.y_mm, member.angle_deg) for member in stored
+    )
+    return actual == sorted(expected)
+
+
+def _draft_package_contents(
+    package: PackageDraft, by_source: dict[str, TrackPartDefinition]
+) -> tuple[PackageContentSpec, ...] | None:
+    contents: list[PackageContentSpec] = []
+    for source_id, name, article in package.contents:
+        part = by_source.get(source_id)
+        if part is None:
+            return None
+        contents.append(PackageContentSpec(name, article, 1, source_id=part.source_id))
+    if not contents:
+        return None
+    return tuple(contents)
+
+
+def _package_contents_match(
+    session: Session,
+    package: TrackPartPackage,
+    draft: PackageDraft,
+    by_source: dict[str, TrackPartDefinition],
+) -> bool:
+    if package.name != draft.name:
+        return False
+    rows = list(
+        session.scalars(
+            select(TrackPartPackageContent)
+            .where(TrackPartPackageContent.package_id == package.id)
+            .order_by(TrackPartPackageContent.id)
+        )
+    )
+    expected: list[tuple[int, int]] = []
+    for source_id, _name, _article in draft.contents:
+        part = by_source.get(source_id)
+        if part is None:
+            return False
+        expected.append((part.id, 1))
+    actual = [(row.part_id, row.quantity) for row in rows]
+    return sorted(actual) == sorted(expected)
 
 
 def _stored_catalog_keys(rows: Sequence[TrackPartDefinition]) -> set[tuple[str, str]]:

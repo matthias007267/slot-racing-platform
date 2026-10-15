@@ -184,6 +184,8 @@ class TrackPartPackage(Base):
     name: Mapped[str] = mapped_column(String(120))
     # A bundled package the user removed. Seeding must not insert it again.
     suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Supplied by the bundled catalogue. A package the user created stays false.
+    bundled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class TrackPartPackageContent(Base):

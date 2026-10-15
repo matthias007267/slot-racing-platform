@@ -13,6 +13,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 from importlib.resources import files
 
 from slot_racing.modules.track_planner.parts import (
@@ -90,8 +91,12 @@ class LibraryDraft:
     notes: tuple[ImportNote, ...]
 
 
+@cache
 def load_carrera_library() -> LibraryDraft:
-    """Both source files. A part that cannot be read is listed and left out."""
+    """Both source files. A part that cannot be read is listed and left out.
+
+    The files are bundled with the application, so the parsed draft is reused.
+    """
     evolution = _part_table(_payload(EVOLUTION_FILE), EVOLUTION_FILE)
     digital = _part_table(_payload(DIGITAL_FILE), DIGITAL_FILE)
     raw = {**evolution, **digital}

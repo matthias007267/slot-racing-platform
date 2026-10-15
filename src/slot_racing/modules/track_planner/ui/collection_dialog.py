@@ -7,10 +7,12 @@ from collections.abc import Callable, Mapping
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QRegularExpressionValidator, QShowEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -19,11 +21,12 @@ from PySide6.QtWidgets import (
 
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.inventory import PhysicalStock
+from slot_racing.modules.track_planner.library import CatalogReconcileReport
 from slot_racing.modules.track_planner.packages import PackageContentView, PackageView
 from slot_racing.modules.track_planner.parts import PartRecord
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
-from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog
+from slot_racing.modules.track_planner.ui.dialog_lifetime import destroy_dialog, destroy_widget
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.uikit.errors import describe_error
 from slot_racing.uikit.theme import set_role, set_tone
@@ -49,59 +52,41 @@ class CollectionDialog(QDialog):
         self._usage = dict(usage or {})
         self._rows: list[_StockRow] = []
         self._package_rows: list[_PackageRow] = []
+        self._package_heading: QLabel | None = None
+        self._parts_heading: QLabel | None = None
         self._opened = False
         self.status = StatusLabel("collection-message")
         self.status.setParent(self)
-        breakdown = {line.part_id: line for line in planner.stock_breakdown().values()}
-        records = tuple(
-            sorted(planner.list_parts(), key=lambda record: record.spec.name.casefold())
-        )
+        self.search = QLineEdit(self)
+        self.search.setObjectName("collection-search")
+        self.search.setPlaceholderText(translator.translate("planner.stock.search"))
+        self.search.textChanged.connect(self._apply_filter)
+        self.hide_sets = QCheckBox(translator.translate("planner.stock.hide_sets"), self)
+        self.hide_sets.setObjectName("collection-hide-sets")
+        self.hide_sets.toggled.connect(self._apply_filter)
         self._list = QWidget(self)
         self._list.setObjectName("collection-list")
-        rows = QVBoxLayout(self._list)
-        rows.setContentsMargins(0, 0, 0, 0)
-        packages = planner.list_packages()
-        if packages:
-            heading = QLabel(translator.translate("planner.stock.packages"), self._list)
-            heading.setObjectName("collection-packages")
-            set_role(heading, "caption")
-            rows.addWidget(heading)
-            for package in packages:
-                package_row = _PackageRow(translator, package, self._store_package, self._list)
-                self._package_rows.append(package_row)
-                rows.addWidget(package_row)
-        parts_heading = QLabel(translator.translate("planner.stock.parts"), self._list)
-        parts_heading.setObjectName("collection-parts")
-        set_role(parts_heading, "caption")
-        rows.addWidget(parts_heading)
-        for record in records:
-            line = breakdown.get(record.id)
-            adjustment = 0 if line is None else line.adjustment
-            part_row = _StockRow(
-                translator,
-                record,
-                adjustment,
-                self._usage.get(record.id, 0),
-                line,
-                self._store_adjustment,
-                self._edit_part,
-                self._list,
-            )
-            self._rows.append(part_row)
-            rows.addWidget(part_row)
-        rows.addStretch(1)
+        self._rows_layout = QVBoxLayout(self._list)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._fill()
         scroll = QScrollArea(self)
         scroll.setObjectName("collection-scroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(self._list)
+        reset = QPushButton(translator.translate("planner.stock.reset"), self)
+        reset.setObjectName("collection-reset")
+        reset.clicked.connect(self._reset_library)
         close = QPushButton(translator.translate("planner.stock.close"), self)
         close.setObjectName("collection-close")
         close.clicked.connect(self.accept)
         actions = QHBoxLayout()
+        actions.addWidget(reset)
         actions.addStretch(1)
         actions.addWidget(close)
         layout = QVBoxLayout(self)
+        layout.addWidget(self.search)
+        layout.addWidget(self.hide_sets)
         layout.addWidget(scroll, 1)
         layout.addWidget(self.status)
         layout.addLayout(actions)
@@ -111,6 +96,112 @@ class CollectionDialog(QDialog):
             self._opened = True
             trace("COLLECTION_DIALOG_OPEN", result="opened")
         super().showEvent(event)
+
+    def _fill(self) -> None:
+        self._clear_rows()
+        breakdown = {line.part_id: line for line in self._planner.stock_breakdown().values()}
+        records = tuple(
+            sorted(self._planner.list_parts(), key=lambda record: record.spec.name.casefold())
+        )
+        packages = self._planner.list_packages()
+        if packages:
+            heading = QLabel(self._translator.translate("planner.stock.packages"), self._list)
+            heading.setObjectName("collection-packages")
+            set_role(heading, "caption")
+            self._package_heading = heading
+            self._rows_layout.addWidget(heading)
+            for package in packages:
+                package_row = _PackageRow(
+                    self._translator, package, self._store_package, self._list
+                )
+                self._package_rows.append(package_row)
+                self._rows_layout.addWidget(package_row)
+        parts_heading = QLabel(self._translator.translate("planner.stock.parts"), self._list)
+        parts_heading.setObjectName("collection-parts")
+        set_role(parts_heading, "caption")
+        self._parts_heading = parts_heading
+        self._rows_layout.addWidget(parts_heading)
+        for record in records:
+            line = breakdown.get(record.id)
+            adjustment = 0 if line is None else line.adjustment
+            part_row = _StockRow(
+                self._translator,
+                record,
+                adjustment,
+                self._usage.get(record.id, 0),
+                line,
+                self._store_adjustment,
+                self._edit_part,
+                self._list,
+            )
+            self._rows.append(part_row)
+            self._rows_layout.addWidget(part_row)
+        self._rows_layout.addStretch(1)
+        self._apply_filter()
+
+    def _clear_rows(self) -> None:
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            widget = None if item is None else item.widget()
+            if widget is not None:
+                destroy_widget(widget)
+        self._rows = []
+        self._package_rows = []
+        self._package_heading = None
+        self._parts_heading = None
+
+    def _apply_filter(self) -> None:
+        query = self.search.text()
+        hide_sets = self.hide_sets.isChecked()
+        packages_visible = 0
+        for row in self._package_rows:
+            visible = not hide_sets and collection_query_matches(
+                query, name=row.entry_name, article=row.entry_article, category_label=""
+            )
+            row.setVisible(visible)
+            packages_visible += int(visible)
+        if self._package_heading is not None:
+            self._package_heading.setVisible(packages_visible > 0)
+        parts_visible = 0
+        for part_row in self._rows:
+            visible = collection_query_matches(
+                query,
+                name=part_row.entry_name,
+                article=part_row.entry_article,
+                category_label=part_row.category_label,
+            )
+            part_row.setVisible(visible)
+            parts_visible += int(visible)
+        if self._parts_heading is not None:
+            self._parts_heading.setVisible(parts_visible > 0)
+
+    def _reset_library(self) -> None:
+        report = self._planner.preview_library_reset()
+        if not self._confirm_reset(report):
+            return
+        self._planner.reset_library()
+        self._fill()
+        self.status.show_info(self._translator.translate("planner.stock.reset.done"))
+
+    def _confirm_reset(self, report: CatalogReconcileReport) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setObjectName("collection-reset-dialog")
+        box.setWindowTitle(self._translator.translate("planner.stock.reset.title"))
+        box.setText(_reset_message(self._translator, report))
+        accept = box.addButton(
+            self._translator.translate("planner.stock.reset.accept"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel = box.addButton(
+            self._translator.translate("planner.stock.reset.cancel"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        accept.setObjectName("collection-reset-accept")
+        cancel.setObjectName("collection-reset-cancel")
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is accept
 
     def quantity(self, part_id: int) -> int:
         for row in self._rows:
@@ -140,6 +231,7 @@ class CollectionDialog(QDialog):
         for row in self._rows:
             if row.part_id == part_id:
                 row.show_saved(saved)
+        self._apply_filter()
         self.status.show_info(self._translator.translate("planner.library.updated"))
 
     def _store_adjustment(self, part_id: int, quantity: int) -> bool:
@@ -186,6 +278,9 @@ class _PackageRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self.package_id = package.id
+        self.entry_kind = "package"
+        self.entry_name = package.name
+        self.entry_article = package.article_number
         self._store = store
         self._quantity = package.quantity
         self._filling = False
@@ -294,6 +389,10 @@ class _StockRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self.part_id = record.id
+        self.entry_kind = "part"
+        self.entry_name = record.spec.name
+        self.entry_article = record.spec.article_number
+        self.category_label = translator.translate(f"planner.category.{record.spec.category}")
         self._store = store
         self._edit = edit
         self._quantity = adjustment
@@ -368,6 +467,9 @@ class _StockRow(QWidget):
 
     def show_saved(self, record: PartRecord) -> None:
         self.part_id = record.id
+        self.entry_name = record.spec.name
+        self.entry_article = record.spec.article_number
+        self.category_label = self._translator.translate(f"planner.category.{record.spec.category}")
         self.name.setText(record.spec.name)
         self.article.setText(record.spec.article_number)
 
@@ -419,6 +521,46 @@ class _StockRow(QWidget):
         self._filling = True
         self.field.setText(str(quantity))
         self._filling = False
+
+
+def collection_query_matches(query: str, *, name: str, article: str, category_label: str) -> bool:
+    """Case-insensitive match on designation, article and the readable category.
+
+    ``Geraden`` matches the category ``Gerade``, and ``Kurven`` matches ``Kurve``,
+    including a steep curve whose designation does not contain that word.
+    """
+    needle = query.strip().casefold()
+    if not needle:
+        return True
+    if needle in name.casefold() or needle in article.casefold():
+        return True
+    label = category_label.strip().casefold()
+    if not label:
+        return False
+    if needle in label:
+        return True
+    return needle.startswith(label) and needle[len(label) :] in {"n", "en", "e", "s"}
+
+
+def _reset_message(translator: Translator, report: CatalogReconcileReport) -> str:
+    if report.is_empty():
+        return translator.translate("planner.stock.reset.none")
+    lines = [translator.translate("planner.stock.reset.intro")]
+    groups = (
+        ("planner.stock.reset.added", report.added),
+        ("planner.stock.reset.updated", report.updated),
+        ("planner.stock.reset.removed", report.removed),
+        ("planner.stock.reset.retired", report.retired),
+    )
+    for key, entries in groups:
+        if not entries:
+            continue
+        lines.append(translator.format(key, count=len(entries)))
+        for entry in entries:
+            stock = "" if entry.stock is None else f" ({entry.stock})"
+            lines.append(f"• {entry.article_number} {entry.name}{stock}")
+    lines.append(translator.translate("planner.stock.reset.keep"))
+    return "\n".join(lines)
 
 
 def _pieces(contents: tuple[PackageContentView, ...], *, multiplier: int) -> str:
