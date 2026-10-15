@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Collection, Mapping
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -20,12 +20,14 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSceneMouseEvent,
     QGraphicsView,
     QRubberBand,
     QWidget,
 )
+from shiboken6 import Shiboken
 
 from slot_racing.modules.track_planner.attachment import placed_outline
 from slot_racing.modules.track_planner.document import (
@@ -182,54 +184,68 @@ class PlanCanvas(QGraphicsView):
         *,
         excess: Collection[str] | None = None,
     ) -> None:
-        chosen = {selected} if isinstance(selected, str) else set(selected or ())
-        extra = set(excess or ())
-        self._loading = True
-        self._lane_count = lane_count
-        self._direction = plan.direction
-        self._scene.grid_enabled = plan.grid_enabled
-        self._scene.grid_px = max(plan.grid_mm * MM, 4.0)
-        self.rotation_handle.hide()
-        if self.rotation_handle.scene() is self._scene:
-            self._scene.removeItem(self.rotation_handle)
-        self._arrows = []
-        self._catalog = {} if parts is None else parts
-        self._scene.clear()
-        self._scene.addItem(self.rotation_handle)
-        catalog = {} if parts is None else parts
-        for instance in plan.instances:
-            spec = catalog.get(instance.part_id)
-            if spec is None:
-                continue
-            placed = InstanceItem(instance, spec, self._report_group)
-            placed.set_color_coding(self._color_coding)
-            placed.set_shortage(placed.item_id in extra)
-            self._scene.addItem(placed)
-            placed.setSelected(placed.item_id in chosen)
-        for piece in plan.pieces:
-            piece_item = PieceItem(piece, lane_count, plan.direction, self._report)
-            self._scene.addItem(piece_item)
-            piece_item.setSelected(piece_item.item_id in chosen)
-        for marker in plan.markers:
-            if marker.kind != START_FINISH:
-                continue
-            start = StartItem(marker, self._report)
-            self._scene.addItem(start)
-            start.setSelected(start.item_id in chosen)
-        self._loading = False
-        self.expand_groups()
-        self._place_extras()
-        self._scene.invalidate(self._scene.sceneRect(), QGraphicsScene.SceneLayer.BackgroundLayer)
-        self.viewport().update()
+        # clear() and setSelected() emit selectionChanged while items are being
+        # deleted or created. Listeners must not run until the scene is stable.
+        previous = self._scene.blockSignals(True)
+        try:
+            chosen = {selected} if isinstance(selected, str) else set(selected or ())
+            extra = set(excess or ())
+            self._loading = True
+            self._lane_count = lane_count
+            self._direction = plan.direction
+            self._scene.grid_enabled = plan.grid_enabled
+            self._scene.grid_px = max(plan.grid_mm * MM, 4.0)
+            self.rotation_handle.hide()
+            if self.rotation_handle.scene() is self._scene:
+                self._scene.removeItem(self.rotation_handle)
+            self._arrows = []
+            self._catalog = {} if parts is None else parts
+            self._scene.clear()
+            self._scene.addItem(self.rotation_handle)
+            catalog = {} if parts is None else parts
+            for instance in plan.instances:
+                spec = catalog.get(instance.part_id)
+                if spec is None:
+                    missing = MissingItem(instance)
+                    self._scene.addItem(missing)
+                    missing.setSelected(missing.item_id in chosen)
+                    continue
+                placed = InstanceItem(instance, spec, self._report_group)
+                placed.set_color_coding(self._color_coding)
+                placed.set_shortage(placed.item_id in extra)
+                self._scene.addItem(placed)
+                placed.setSelected(placed.item_id in chosen)
+            for piece in plan.pieces:
+                piece_item = PieceItem(piece, lane_count, plan.direction, self._report)
+                self._scene.addItem(piece_item)
+                piece_item.setSelected(piece_item.item_id in chosen)
+            for marker in plan.markers:
+                if marker.kind != START_FINISH:
+                    continue
+                start = StartItem(marker, self._report)
+                self._scene.addItem(start)
+                start.setSelected(start.item_id in chosen)
+            self._loading = False
+            self.expand_groups()
+            self._place_extras()
+            self._scene.invalidate(
+                self._scene.sceneRect(), QGraphicsScene.SceneLayer.BackgroundLayer
+            )
+            self.viewport().update()
+        finally:
+            self._loading = False
+            self._scene.blockSignals(previous)
 
     def selected_id(self) -> str | None:
         ids = self.selected_ids()
         return ids[0] if ids else None
 
     def selected_ids(self) -> list[str]:
+        if not Shiboken.isValid(self._scene):
+            return []
         found: list[str] = []
         for item in self._scene.selectedItems():
-            if isinstance(item, (PieceItem, StartItem, InstanceItem)):
+            if isinstance(item, (PieceItem, StartItem, InstanceItem, MissingItem)):
                 found.append(item.item_id)
         return found
 
@@ -237,7 +253,7 @@ class PlanCanvas(QGraphicsView):
         """Select every part whose bounds lie completely inside ``area``."""
         self._scene.clearSelection()
         for item in self._scene.items():
-            if not isinstance(item, (InstanceItem, PieceItem, StartItem)):
+            if not isinstance(item, (InstanceItem, PieceItem, StartItem, MissingItem)):
                 continue
             if rect_fully_inside(item.sceneBoundingRect(), area):
                 item.setSelected(True)
@@ -453,7 +469,7 @@ class PlanCanvas(QGraphicsView):
         self._expanding = False
 
     def _on_selection(self) -> None:
-        if self._loading or self._expanding or self._placing:
+        if self._loading or self._expanding or self._placing or not Shiboken.isValid(self._scene):
             return
         self._place_extras()
 
@@ -594,6 +610,13 @@ class PlanScene(QGraphicsScene):
         self.grid_enabled = False
         self.grid_px = float(CELL)
 
+    def event(self, event: QEvent) -> bool:
+        # Item teardown emits selectionChanged. Mute it before the scene goes away,
+        # including when a parent delete reaches this object through deleteLater.
+        if event.type() == QEvent.Type.DeferredDelete:
+            self.blockSignals(True)
+        return super().event(event)
+
     def drawBackground(self, painter: QPainter, rect: QRectF | QRect) -> None:  # noqa: N802
         painter.fillRect(rect, QColor(COLORS.background))
         if not self.grid_enabled:
@@ -712,6 +735,21 @@ def _snap(value: QPointF, width: int, height: int) -> QPointF:
     x = min(max(x, 0), (GRID_LIMIT - width) * CELL)
     y = min(max(y, 0), (GRID_LIMIT - height) * CELL)
     return QPointF(x, y)
+
+
+class MissingItem(QGraphicsRectItem):
+    """A saved part whose definition is no longer in the library."""
+
+    def __init__(self, instance: PartInstance) -> None:
+        super().__init__(-80 * MM, -40 * MM, 160 * MM, 80 * MM)
+        self.item_id = instance.id
+        self.setPos(instance.x_mm * MM, instance.y_mm * MM)
+        self.setRotation(instance.rotation_z_deg)
+        self.setPen(QPen(QColor(COLORS.warning), 2))
+        self.setBrush(QColor(COLORS.warning))
+        self.setOpacity(0.35)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setZValue(3)
 
 
 class InstanceItem(QGraphicsItem):

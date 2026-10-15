@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from slot_racing.modules.track_planner.library import TemplateView
 from slot_racing.modules.track_planner.parts import PartRecord, PartSpec
 from slot_racing.modules.track_planner.ui.track_paint import apply_preview_transform, paint_part
 from slot_racing.uikit.theme import set_tone
@@ -61,6 +62,7 @@ class PartLibrary(QListWidget):
         super().__init__()
         self._color_coding = False
         self._fitting = False
+        self._shown: tuple[object, ...] | None = None
         self.setObjectName("planner-library")
         self.setMinimumWidth(340)
         self.setUniformItemSizes(False)
@@ -71,10 +73,18 @@ class PartLibrary(QListWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def set_records(
-        self, records: Sequence[PartRecord], remaining: Mapping[int, str] | None = None
+        self,
+        records: Sequence[PartRecord],
+        remaining: Mapping[int, str] | None = None,
+        templates: Sequence[TemplateView] | None = None,
     ) -> None:
         notes = {} if remaining is None else remaining
+        signature = _shown_signature(records, notes, templates)
+        if signature == self._shown:
+            return
+        self._discard_cards()
         self.clear()
+        self._shown = signature
         for record in records:
             spec = record.spec
             item = QListWidgetItem()
@@ -85,7 +95,30 @@ class PartLibrary(QListWidget):
             item.setSizeHint(_card_size(card))
             self.addItem(item)
             self.setItemWidget(item, card)
+        for template in templates or ():
+            item = QListWidgetItem()
+            item.setText("")
+            item.setData(Qt.ItemDataRole.UserRole, -template.id)
+            item.setData(_CAPTION_ROLE, f"{template.name} ({template.article_number})")
+            card = _template_card(template)
+            item.setSizeHint(_card_size(card))
+            self.addItem(item)
+            self.setItemWidget(item, card)
         self._fit_item_widths()
+
+    def _discard_cards(self) -> None:
+        """Drop the previous cards. ``clear()`` leaves them on the viewport."""
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None:
+                continue
+            widget = self.itemWidget(item)
+            if widget is None:
+                continue
+            self.removeItemWidget(item)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -146,6 +179,30 @@ class PartLibrary(QListWidget):
                 preview.set_color_coding(enabled)
 
 
+def _shown_signature(
+    records: Sequence[PartRecord],
+    notes: Mapping[int, str],
+    templates: Sequence[TemplateView] | None,
+) -> tuple[object, ...]:
+    """Identity of the visible cards. Order, stock text and revision are part of it."""
+    parts = tuple(
+        (
+            record.id,
+            record.revision,
+            record.spec.name,
+            record.spec.piece_key,
+            record.spec.article_number,
+            record.spec.scale,
+            notes.get(record.id),
+        )
+        for record in records
+    )
+    recipes = tuple(
+        (template.id, template.name, template.article_number) for template in (templates or ())
+    )
+    return (parts, recipes)
+
+
 def _card(record: PartRecord, *, color_coding: bool, remaining: str | None = None) -> QWidget:
     """Preview on the left. The text beside it is designation, article number and scale."""
     spec = record.spec
@@ -153,7 +210,7 @@ def _card(record: PartRecord, *, color_coding: bool, remaining: str | None = Non
     card.setObjectName("planner-part-card")
     preview = PartPreview(spec, color_coding=color_coding)
     name = _NameLabel(spec.name)
-    article = QLabel(spec.article_number)
+    article = QLabel(spec.piece_key or spec.article_number)
     article.setObjectName("planner-part-article")
     scale = QLabel(spec.scale)
     scale.setObjectName("planner-part-scale")
@@ -168,6 +225,33 @@ def _card(record: PartRecord, *, color_coding: bool, remaining: str | None = Non
         note.setObjectName("planner-part-remaining")
         set_tone(note, "muted")
         text.addWidget(note)
+    text.addStretch(1)
+    row = QHBoxLayout(card)
+    row.setContentsMargins(6, 4, 6, 4)
+    row.setSpacing(8)
+    row.addWidget(preview, 0, Qt.AlignmentFlag.AlignVCenter)
+    row.addLayout(text, 1)
+    return card
+
+
+def _template_card(template: TemplateView) -> QWidget:
+    """A placement recipe. It is not a physical part and has no stock of its own."""
+    card = QWidget()
+    card.setObjectName("planner-part-card")
+    name = _NameLabel(template.name)
+    article = QLabel(template.article_number)
+    article.setObjectName("planner-part-article")
+    kind = QLabel("Vorlage")
+    kind.setObjectName("planner-part-scale")
+    preview = QWidget()
+    preview.setObjectName("planner-part-preview")
+    preview.setFixedSize(72, 48)
+    text = QVBoxLayout()
+    text.setContentsMargins(8, 0, 0, 0)
+    text.setSpacing(1)
+    text.addWidget(name)
+    text.addWidget(article)
+    text.addWidget(kind)
     text.addStretch(1)
     row = QHBoxLayout(card)
     row.setContentsMargins(6, 4, 6, 4)

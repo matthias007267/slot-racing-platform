@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.storage import Database
 from slot_racing.core.storage.base import Base
+from slot_racing.modules.track_planner.catalog_import import (
+    LibraryDraft,
+    TemplateDraft,
+    load_carrera_library,
+)
 from slot_racing.modules.track_planner.inventory import (
     PackageContribution,
     PhysicalStock,
@@ -28,6 +33,8 @@ from slot_racing.modules.track_planner.models import (
     TrackPartPackageContent,
     TrackPartPackageStock,
     TrackPartStock,
+    TrackPartTemplate,
+    TrackPartTemplateMember,
     TrackPlanInstance,
 )
 from slot_racing.modules.track_planner.packages import (
@@ -38,6 +45,7 @@ from slot_racing.modules.track_planner.packages import (
     standard_packages,
 )
 from slot_racing.modules.track_planner.parts import (
+    ACTIVE_STRAIGHT_SOURCE,
     ORIGIN_CATALOG,
     ORIGIN_CUSTOM,
     ORIGIN_MODIFIED,
@@ -49,7 +57,6 @@ from slot_racing.modules.track_planner.parts import (
     catalog_storage_key,
     decode_geometry,
     encode_geometry,
-    encode_slot_paths,
     geometry_payload_corrupt,
     identity_key,
     merge_preserved_geometry,
@@ -61,67 +68,200 @@ from slot_racing.modules.track_planner.parts import (
 from slot_racing.modules.track_planner.trace import trace
 
 
+@dataclass(frozen=True, slots=True)
+class TemplateMemberView:
+    part_id: int
+    x_mm: float
+    y_mm: float
+    angle_deg: float
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateView:
+    id: int
+    source_id: str
+    article_number: str
+    name: str
+    members: tuple[TemplateMemberView, ...]
+
+
 class PartLibrary:
     def __init__(self, database: Database) -> None:
         self._database = database
 
     def list_parts(self) -> tuple[PartRecord, ...]:
         self.ensure_seed()
+        return self.list_active()
+
+    def list_active(self) -> tuple[PartRecord, ...]:
+        """Current selectable parts. This does not import or retire anything."""
         with self._database.session() as session:
             rows = session.scalars(
                 select(TrackPartDefinition)
                 .where(
                     TrackPartDefinition.suppressed.is_(False),
                     TrackPartDefinition.is_current.is_(True),
+                    TrackPartDefinition.legacy.is_(False),
+                    TrackPartDefinition.selectable.is_(True),
                 )
                 .order_by(TrackPartDefinition.id)
             )
             return tuple(self._record(session, row) for row in rows)
 
     def ensure_seed(self) -> None:
-        """Insert the original catalogue when a part is not stored yet.
+        """Hide the old bundled catalogue and import the Carrera source files once.
 
-        A part that was stored before grooves existed gets those grooves once.
-        The outline and the joints are left as they are. A suppressed catalogue
-        row still counts as stored, so deleting a bundled part does not recreate it.
+        A suppressed or legacy row stays. Seeding does not recreate the old
+        catalogue and does not delete plans, layouts or stock.
         """
-        catalog = {
-            identity_key(spec.name, spec.article_number): spec for spec in standard_catalog()
-        }
         with self._database.session() as session:
-            rows = list(session.scalars(select(TrackPartDefinition)))
-            stored = {identity_key(row.name, row.article_number) for row in rows}
-            stored.update(_stored_catalog_keys(rows))
-            for spec in standard_catalog():
-                key = identity_key(spec.name, spec.article_number)
-                if key not in stored:
-                    self._insert(session, spec, origin=ORIGIN_CATALOG)
-                    stored.add(key)
-            for row in rows:
-                if not row.is_current or row.origin != ORIGIN_CATALOG:
-                    continue
-                known = catalog.get(identity_key(row.name, row.article_number))
-                if known is None and row.catalog_key and "\t" in row.catalog_key:
-                    stored_name, stored_article = row.catalog_key.split("\t", 1)
-                    known = catalog.get((stored_name, stored_article))
-                if known is None:
-                    continue
-                if known.slot_paths and not row.slot_paths:
-                    row.slot_paths = encode_slot_paths(known.slot_paths)
-                if self._needs_attachment_refresh(session, row, known):
-                    self._assign_attachment(row, known)
-                    row.outline = [list(point) for point in known.outline]
-                    row.length_mm = known.length_mm
-                    row.width_mm = known.width_mm
-                    row.radius_mm = known.radius_mm
-                    row.angle_deg = known.angle_deg
-                    row.category = known.category
-                    row.lane_count = known.lane_count
-                    session.execute(
-                        delete(TrackPartConnector).where(TrackPartConnector.part_id == row.id)
+            present = session.scalar(
+                select(TrackPartDefinition.id).where(
+                    TrackPartDefinition.source_id == ACTIVE_STRAIGHT_SOURCE
+                )
+            )
+            if present is not None:
+                return
+            self._retire_bundled(session)
+            self._import_sources(session)
+
+    def retire_bundled_catalog(self) -> int:
+        """Mark bundled definitions and sets as legacy. Returns how many parts were retired.
+
+        Stock, plans and layouts stay. The active library no longer lists them.
+        """
+        with self._database.session() as session:
+            return self._retire_bundled(session)
+
+    def import_carrera_library(self) -> LibraryDraft:
+        """Insert source parts that are not stored yet. A second call adds nothing."""
+        with self._database.session() as session:
+            return self._import_sources(session)
+
+    def _retire_bundled(self, session: Session) -> int:
+        retired = 0
+        for row in session.scalars(select(TrackPartDefinition)):
+            if row.source_id or row.legacy:
+                continue
+            if row.origin != ORIGIN_CATALOG and not row.catalog_key:
+                continue
+            row.legacy = True
+            row.selectable = False
+            retired += 1
+        bundled = {_package_identity(spec) for spec in standard_packages()}
+        for package in session.scalars(select(TrackPartPackage)):
+            if _package_identity(package) in bundled:
+                package.suppressed = True
+        return retired
+
+    def _import_sources(self, session: Session) -> LibraryDraft:
+        draft = load_carrera_library()
+        stored = {
+            row.source_id for row in session.scalars(select(TrackPartDefinition)) if row.source_id
+        }
+        for spec in draft.parts:
+            if spec.source_id in stored:
+                continue
+            self._insert(session, spec, origin=ORIGIN_CATALOG, catalog_key=spec.source_id)
+            stored.add(spec.source_id)
+        by_source = {
+            row.source_id: row
+            for row in session.scalars(select(TrackPartDefinition))
+            if row.source_id and row.is_current
+        }
+        present = {
+            row.source_id for row in session.scalars(select(TrackPartTemplate)) if row.source_id
+        }
+        for template in draft.templates:
+            if template.source_id in present:
+                continue
+            self._insert_template(session, template, by_source)
+        self._import_packages(session, draft, by_source)
+        return draft
+
+    def _insert_template(
+        self,
+        session: Session,
+        template: TemplateDraft,
+        by_source: dict[str, TrackPartDefinition],
+    ) -> None:
+        row = TrackPartTemplate(
+            source_id=template.source_id,
+            article_number=template.article_number,
+            name=template.name,
+        )
+        session.add(row)
+        session.flush()
+        for index, member in enumerate(template.members):
+            part = by_source.get(member.source_id)
+            if part is None:
+                continue
+            session.add(
+                TrackPartTemplateMember(
+                    template_id=row.id,
+                    part_id=part.id,
+                    x_mm=member.x_mm,
+                    y_mm=member.y_mm,
+                    angle_deg=member.angle_deg,
+                    sort_order=index,
+                )
+            )
+
+    def _import_packages(
+        self,
+        session: Session,
+        draft: LibraryDraft,
+        by_source: dict[str, TrackPartDefinition],
+    ) -> None:
+        stored = {_package_identity(row) for row in session.scalars(select(TrackPartPackage))}
+        for package in draft.packages:
+            identity = ("carrera", package.article_number.strip())
+            if identity in stored:
+                continue
+            contents: list[PackageContentSpec] = []
+            missing = False
+            for source_id, name, article in package.contents:
+                part = by_source.get(source_id)
+                if part is None:
+                    missing = True
+                    break
+                contents.append(PackageContentSpec(name, article, 1, source_id=part.source_id))
+            if missing or not contents:
+                continue
+            self._insert_package(
+                session,
+                PackageSpec("Carrera", package.article_number, package.name, tuple(contents)),
+            )
+            stored.add(identity)
+
+    def list_templates(self) -> tuple[TemplateView, ...]:
+        self.ensure_seed()
+        with self._database.session() as session:
+            templates = list(
+                session.scalars(select(TrackPartTemplate).order_by(TrackPartTemplate.id))
+            )
+            members = list(
+                session.scalars(
+                    select(TrackPartTemplateMember).order_by(
+                        TrackPartTemplateMember.sort_order, TrackPartTemplateMember.id
                     )
-                    self._add_connectors(session, row.id, known)
-            self._ensure_packages(session)
+                )
+            )
+        grouped: dict[int, list[TemplateMemberView]] = {}
+        for member in members:
+            grouped.setdefault(member.template_id, []).append(
+                TemplateMemberView(member.part_id, member.x_mm, member.y_mm, member.angle_deg)
+            )
+        return tuple(
+            TemplateView(
+                row.id,
+                row.source_id,
+                row.article_number,
+                row.name,
+                tuple(grouped.get(row.id, [])),
+            )
+            for row in templates
+        )
 
     def add_part(self, spec: PartSpec) -> PartRecord:
         validate_part_geometry(spec)
@@ -459,6 +599,10 @@ class PartLibrary:
                 session.flush()
             session.delete(package)
 
+    def known_part_ids(self) -> set[int]:
+        with self._database.session() as session:
+            return set(session.scalars(select(TrackPartDefinition.id)))
+
     def require(self, part_id: int) -> PartRecord:
         with self._database.session() as session:
             definition = session.get(TrackPartDefinition, part_id)
@@ -486,6 +630,9 @@ class PartLibrary:
                 group_id=row.group_id,
                 host_id=row.host_instance_id,
                 attachment_slot=row.attachment_slot,
+                host_dx=row.host_dx,
+                host_dy=row.host_dy,
+                host_da=row.host_da,
             )
             for row in rows
         )
@@ -494,13 +641,11 @@ class PartLibrary:
         self, session: Session, track_id: int, instances: tuple[PartInstance, ...]
     ) -> None:
         known = set(session.scalars(select(TrackPartDefinition.id)))
-        for instance in instances:
-            if instance.part_id not in known:
-                raise ValidationError("error.planner.part")
+        storable = tuple(instance for instance in instances if instance.part_id in known)
         session.execute(delete(TrackPlanInstance).where(TrackPlanInstance.track_id == track_id))
         # Hosts first so a reader that walks the insert order sees the parent
         # before the accessory. There is no foreign key; the plan enforces it.
-        ordered = sorted(instances, key=lambda instance: instance.host_id is not None)
+        ordered = sorted(storable, key=lambda instance: instance.host_id is not None)
         for index, instance in enumerate(ordered):
             session.add(
                 TrackPlanInstance(
@@ -518,6 +663,9 @@ class PartLibrary:
                     sort_order=index,
                     host_instance_id=instance.host_id,
                     attachment_slot=instance.attachment_slot,
+                    host_dx=instance.host_dx,
+                    host_dy=instance.host_dy,
+                    host_da=instance.host_da,
                 )
             )
 
@@ -623,6 +771,13 @@ class PartLibrary:
     def _definition_for_content(
         self, session: Session, content: PackageContentSpec
     ) -> TrackPartDefinition:
+        if content.source_id:
+            for row in session.scalars(select(TrackPartDefinition)):
+                if row.source_id != content.source_id:
+                    continue
+                if row.is_current:
+                    return row
+            raise ValidationError("error.planner.part")
         key = identity_key(content.part_name, content.article_number)
         found: TrackPartDefinition | None = None
         for row in session.scalars(select(TrackPartDefinition)):
@@ -697,10 +852,11 @@ class PartLibrary:
         from uuid import uuid4
 
         if origin == ORIGIN_CATALOG and catalog_key is None:
-            catalog_key = catalog_storage_key(spec.name, spec.article_number)
+            catalog_key = spec.source_id or catalog_storage_key(spec.name, spec.article_number)
         manufacturer = spec.manufacturer.strip()
         if not manufacturer and origin == ORIGIN_CATALOG:
             manufacturer = "Carrera"
+        lineage = lineage_id or (spec.source_id.replace("-", "") if spec.source_id else uuid4().hex)
         definition = TrackPartDefinition(
             article_number=spec.article_number.strip(),
             scale=require_scale(spec.scale),
@@ -714,13 +870,18 @@ class PartLibrary:
             lane_count=spec.lane_count,
             outline=[list(point) for point in spec.outline],
             slot_paths=encode_geometry(spec),
-            lineage_id=lineage_id or uuid4().hex,
+            lineage_id=lineage,
             revision=revision,
             is_current=True,
             origin=origin,
             catalog_key=catalog_key,
             manufacturer=manufacturer,
             description=spec.description.strip() or None,
+            source_id=spec.source_id,
+            piece_key=spec.piece_key,
+            systems=",".join(spec.systems),
+            selectable=spec.selectable,
+            legacy=False,
         )
         self._assign_attachment(definition, spec)
         session.add(definition)
@@ -741,6 +902,14 @@ class PartLibrary:
                     kind=connector.kind,
                     lanes=list(connector.lanes),
                     sort_order=index,
+                    target_source_id=connector.target_source_id,
+                    edge_types=",".join(connector.edge_types),
+                    exclusive=connector.exclusive,
+                    has_neighbor=connector.has_neighbor,
+                    neighbor_x=connector.neighbor_x,
+                    neighbor_y=connector.neighbor_y,
+                    neighbor_angle=connector.neighbor_angle,
+                    lane_points=[list(point) for point in connector.lane_points],
                 )
             )
 
@@ -777,6 +946,20 @@ class PartLibrary:
                     direction_deg=connector.direction_deg,
                     kind=connector.kind,
                     lanes=tuple(int(lane) for lane in connector.lanes),
+                    target_source_id=connector.target_source_id or "",
+                    edge_types=tuple(
+                        part for part in (connector.edge_types or "").split(",") if part
+                    ),
+                    exclusive=bool(connector.exclusive),
+                    has_neighbor=bool(connector.has_neighbor),
+                    neighbor_x=connector.neighbor_x or 0.0,
+                    neighbor_y=connector.neighbor_y or 0.0,
+                    neighbor_angle=connector.neighbor_angle or 0.0,
+                    lane_points=tuple(
+                        (float(point[0]), float(point[1]))
+                        for point in (connector.lane_points or [])
+                        if isinstance(point, (list, tuple)) and len(point) >= 2
+                    ),
                 )
                 for connector in connectors
             ),
@@ -787,6 +970,10 @@ class PartLibrary:
             border_edges=edges,
             manufacturer=definition.manufacturer or "",
             description=definition.description or "",
+            source_id=definition.source_id or "",
+            piece_key=definition.piece_key or "",
+            systems=tuple(part for part in (definition.systems or "").split(",") if part),
+            selectable=bool(definition.selectable),
         )
         return PartRecord(
             definition.id,
@@ -835,13 +1022,20 @@ class PartLibrary:
     def _reject_duplicate(
         self, session: Session, spec: PartSpec, *, except_id: int | None = None
     ) -> None:
-        key = identity_key(spec.name, spec.article_number)
         for row in session.scalars(select(TrackPartDefinition)):
             if not row.is_current:
                 continue
             if except_id is not None and row.id == except_id:
                 continue
-            if identity_key(row.name, row.article_number) == key:
+            if spec.source_id and row.source_id == spec.source_id:
+                raise self._duplicate(spec)
+            if spec.source_id or row.source_id:
+                continue
+            if (
+                identity_key(row.name, row.article_number)
+                == identity_key(spec.name, spec.article_number)
+                and (row.piece_key or "") == spec.piece_key
+            ):
                 raise self._duplicate(spec)
 
     def _current_of(self, session: Session, lineage_id: str) -> TrackPartDefinition:
@@ -873,6 +1067,10 @@ class PartLibrary:
         definition.origin = origin
         definition.manufacturer = spec.manufacturer.strip()
         definition.description = spec.description.strip() or None
+        definition.source_id = spec.source_id
+        definition.piece_key = spec.piece_key
+        definition.systems = ",".join(spec.systems)
+        definition.selectable = spec.selectable
         self._assign_attachment(definition, spec)
         session.execute(
             delete(TrackPartConnector).where(TrackPartConnector.part_id == definition.id)
@@ -927,9 +1125,12 @@ def _stored_catalog_keys(rows: Sequence[TrackPartDefinition]) -> set[tuple[str, 
 
 
 def _catalog_by_key() -> dict[str, PartSpec]:
-    return {
+    found = {
         catalog_storage_key(spec.name, spec.article_number): spec for spec in standard_catalog()
     }
+    for spec in load_carrera_library().parts:
+        found[spec.source_id] = spec
+    return found
 
 
 def _layouts() -> Any:
@@ -1012,18 +1213,27 @@ def _require_package_spec(spec: PackageSpec) -> PackageSpec:
     article = spec.article_number.strip() if isinstance(spec.article_number, str) else ""
     if not manufacturer or not name or not article or not spec.contents:
         raise ValidationError("error.planner.package")
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     contents: list[PackageContentSpec] = []
     for line in spec.contents:
         amount = line.quantity
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
             raise ValidationError("error.planner.package")
-        key = identity_key(line.part_name, line.article_number)
+        if line.source_id:
+            key = line.source_id
+        else:
+            part_name, part_article = identity_key(line.part_name, line.article_number)
+            key = f"{part_name}\t{part_article}"
         if key in seen:
             raise ValidationError("error.planner.package")
         seen.add(key)
         contents.append(
-            PackageContentSpec(line.part_name.strip(), line.article_number.strip(), amount)
+            PackageContentSpec(
+                line.part_name.strip(),
+                line.article_number.strip(),
+                amount,
+                source_id=line.source_id,
+            )
         )
     return PackageSpec(manufacturer, article, name, tuple(contents))
 

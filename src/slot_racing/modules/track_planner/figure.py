@@ -229,13 +229,18 @@ def _sector(
 
 
 def _strip(spec: PartSpec) -> TrackFigure:
-    """A border or support piece is not a rail. No slots are invented for it."""
+    """A border or support piece is not a rail. No slots are invented for it.
+
+    An imported border keeps the clip from its source file. A catalogue strip
+    without that clip still uses the stored outline.
+    """
+    edges = spec.contours if spec.source_id and spec.contours else _outline_edges(spec.outline)
     return TrackFigure(
         roadway=spec.outline,
         road_arc=None,
         slots=(),
         centerlines=(),
-        edges=_outline_edges(spec.outline),
+        edges=edges,
     )
 
 

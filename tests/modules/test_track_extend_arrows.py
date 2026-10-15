@@ -358,7 +358,12 @@ def test_free_joints_show_local_arrows_and_occupied_joints_do_not(qtbot: QtBot, 
     )
     assert after == pytest.approx(sorted((heading + 90) % 360 for heading in before))
 
+    from tests.modules.catalog_fixtures import ensure_article
+
+    ensure_article(page._planner, "20020560")
+    page._load_parts()
     straight = _instances(page)[0]
+    _select_instance(page, straight.item_id)
     page.add_accessory(straight.item_id, "left")
     assert _arrows(page) == []
     _place(page, "20030341", x=900, y=-400)
@@ -367,13 +372,13 @@ def test_free_joints_show_local_arrows_and_occupied_joints_do_not(qtbot: QtBot, 
 
 def test_clicking_an_arrow_extends_selects_and_undoes_in_one_step(qtbot: QtBot, env: Env) -> None:
     page = _open(qtbot, env, "Bau")
-    original = _place(page, STANDARD_STRAIGHT_ARTICLE)
+    original = _place(page, "20509")
     straight = _arrow_facing(page, EXTEND_STRAIGHT, 0)
     _click(qtbot, page, straight)
     assert len(page.plan().instances) == 2
     created = page.plan().instances[-1]
     assert page.canvas.selected_ids() == [created.id]
-    assert page._parts[created.part_id].article_number == STANDARD_STRAIGHT_ARTICLE
+    assert page._parts[created.part_id].article_number == "20509"
     source = page._parts[original.part_id]
     joint = source.connectors[straight.connector_index]
     pose = extend_pose(original, joint, page._parts[created.part_id], EXTEND_STRAIGHT)
@@ -424,22 +429,22 @@ def test_clicking_an_arrow_extends_selects_and_undoes_in_one_step(qtbot: QtBot, 
     _click(qtbot, page, left)
     curve = page.plan().instances[-1]
     curve_spec = page._parts[curve.part_id]
-    assert curve_spec.article_number == STANDARD_CURVE_ARTICLE
+    assert curve_spec.article_number == "20571"
     assert page.canvas.selected_ids() == [curve.id]
     assert placed_continuation_delta_deg(
         original, source.connectors[left.connector_index], curve, curve_spec
-    ) == pytest.approx(-(curve_spec.angle_deg or 0), abs=0.05)
+    ) == pytest.approx(-60, abs=0.05)
     right = _arrow_facing(page, EXTEND_RIGHT, 0)
     _click(qtbot, page, right)
     other = page.plan().instances[-1]
     other_spec = page._parts[other.part_id]
-    assert other_spec.article_number == STANDARD_CURVE_ARTICLE
+    assert other_spec.article_number == "20571"
     assert other.part_id == curve.part_id
     host = next(instance for instance in page.plan().instances if instance.id == right.instance_id)
     host_spec = page._parts[host.part_id]
     assert placed_continuation_delta_deg(
         host, host_spec.connectors[right.connector_index], other, other_spec
-    ) == pytest.approx(other_spec.angle_deg or 0, abs=0.05)
+    ) == pytest.approx(60, abs=0.05)
     assert page.canvas.selected_ids() == [other.id]
     assert _arrows(page)
     page.copy_selection()
@@ -473,7 +478,7 @@ def test_arrows_follow_a_rotated_curve_and_stay_clickable_when_zoomed(
     qtbot: QtBot, env: Env
 ) -> None:
     page = _open(qtbot, env, "Drehung")
-    curve = _place(page, STANDARD_CURVE_ARTICLE)
+    curve = _place(page, "20571")
     page.rotation_free.setValue(90)
     curve = next(instance for instance in page.plan().instances if instance.id == curve.id)
     right = _arrows(page)
@@ -483,10 +488,10 @@ def test_arrows_follow_a_rotated_curve_and_stay_clickable_when_zoomed(
     created = page.plan().instances[-1]
     created_spec = page._parts[created.part_id]
     host_spec = page._parts[curve.part_id]
-    assert created_spec.article_number == STANDARD_CURVE_ARTICLE
+    assert created_spec.article_number == "20571"
     assert placed_continuation_delta_deg(
         curve, host_spec.connectors[chosen.connector_index], created, created_spec
-    ) == pytest.approx(created_spec.angle_deg or 0, abs=0.05)
+    ) == pytest.approx(60, abs=0.05)
 
     page.canvas.scene().clearSelection()
     for item in _instances(page):
@@ -504,7 +509,7 @@ def test_arrows_follow_a_rotated_curve_and_stay_clickable_when_zoomed(
     assert isinstance(hit, ExtendArrow)
     _click(qtbot, page, next(item for item in _arrows(page) if item.direction == EXTEND_STRAIGHT))
     added = page.plan().instances[-1]
-    assert page._parts[added.part_id].article_number == STANDARD_STRAIGHT_ARTICLE
+    assert page._parts[added.part_id].article_number == "20509"
     assert page.canvas.selected_ids() == [added.id]
 
 

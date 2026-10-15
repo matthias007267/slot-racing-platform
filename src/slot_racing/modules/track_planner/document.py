@@ -29,15 +29,14 @@ from slot_racing.modules.track_planner.parts import (
     Pose,
     connector_occupied,
     connectors_compatible,
-    extend_article,
     extend_pose,
-    find_catalog_part,
     is_plate_draft,
     is_start_finish_part,
     join_pose,
     rotate_xy,
     snap_pose,
     snap_selection,
+    standard_extend_parts,
 )
 
 _POSITION_LIMIT_MM = 100_000.0
@@ -571,7 +570,7 @@ def extend_from_connector(
     target = current_spec.connectors[connector_index]
     if connector_occupied(current, target, _placed(plan, catalog)):
         raise ValidationError("error.planner.extend")
-    found = find_catalog_part(catalog, extend_article(direction))
+    found = standard_extend_parts(catalog).get(direction)
     if found is None:
         raise ValidationError("error.planner.extend")
     part_id, spec = found
@@ -643,6 +642,35 @@ def with_instances(plan: TrackPlan, instances: tuple[PartInstance, ...]) -> Trac
     return _replace(plan, instances=instances)
 
 
+def place_template(
+    plan: TrackPlan,
+    members: Sequence[tuple[int, float, float, float]],
+    x_mm: float,
+    y_mm: float,
+    rotation_z_deg: float,
+) -> TrackPlan:
+    """Place every member of a template. The template itself is not an instance."""
+    if not members:
+        raise ValidationError("error.planner.part")
+    group_id = new_id() if len(members) > 1 else None
+    created: list[PartInstance] = []
+    for part_id, dx_mm, dy_mm, angle_deg in members:
+        if isinstance(part_id, bool) or not isinstance(part_id, int) or part_id < 1:
+            raise ValidationError("error.planner.part")
+        moved_x, moved_y = rotate_xy(dx_mm, dy_mm, rotation_z_deg)
+        created.append(
+            PartInstance(
+                id=new_id(),
+                part_id=part_id,
+                x_mm=x_mm + moved_x,
+                y_mm=y_mm + moved_y,
+                rotation_z_deg=(rotation_z_deg + angle_deg) % 360.0,
+                group_id=group_id,
+            )
+        )
+    return _replace(plan, instances=(*plan.instances, *created))
+
+
 def place_instance(
     plan: TrackPlan,
     part_id: int,
@@ -671,11 +699,7 @@ def place_instance(
         rotation_z_deg=pose.rotation_z_deg,
     )
     plan = add_instance(plan, instance)
-    if not is_start_finish_part(spec):
-        return plan
-    known = dict(catalog)
-    known[part_id] = spec
-    return set_start_straight(plan, instance.id, True, known)
+    return plan
 
 
 def attach_accessory(
@@ -833,6 +857,9 @@ def _instance_document(instance: PartInstance) -> dict[str, Any]:
     if instance.host_id is not None:
         document["host_id"] = instance.host_id
         document["attachment_slot"] = instance.attachment_slot
+        document["host_dx"] = instance.host_dx
+        document["host_dy"] = instance.host_dy
+        document["host_da"] = instance.host_da
     return document
 
 
@@ -856,6 +883,9 @@ def _parse_instance(payload: object) -> PartInstance:
         group_id=None if group_id is None else _identity(group_id),
         host_id=_optional_identity(payload.get("host_id")),
         attachment_slot=_optional_identity(payload.get("attachment_slot")),
+        host_dx=_millimetre(payload.get("host_dx", 0)),
+        host_dy=_millimetre(payload.get("host_dy", 0)),
+        host_da=_angle(payload.get("host_da", 0)),
     )
 
 
@@ -879,11 +909,11 @@ def _check_instance(instance: PartInstance) -> None:
         _identity(instance.group_id)
     host_id = instance.host_id
     slot = instance.attachment_slot
-    if (host_id is None) != (slot is None):
+    if host_id is None and slot is not None:
         raise ValidationError("error.planner.part")
     if host_id is not None:
         _identity(host_id)
-        if host_id == instance.id or slot not in ATTACHMENT_SLOTS:
+        if host_id == instance.id or (slot is not None and slot not in ATTACHMENT_SLOTS):
             raise ValidationError("error.planner.part")
 
 

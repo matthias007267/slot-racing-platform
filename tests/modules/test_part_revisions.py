@@ -33,7 +33,8 @@ def test_a_rename_keeps_the_lineage_and_does_not_reseed_the_catalogue(env: Env) 
     again = [
         record
         for record in planner.list_parts()
-        if record.spec.article_number == STANDARD_STRAIGHT_ARTICLE
+        if record.spec.article_number == straight.spec.article_number
+        and record.spec.piece_key == straight.spec.piece_key
     ]
     assert len(again) == 1
     assert again[0].spec.name == "Umbenannt"
@@ -146,13 +147,14 @@ def test_an_unused_geometry_edit_stays_on_the_same_row(env: Env) -> None:
 
 def test_shared_article_numbers_stay_separate(env: Env) -> None:
     planner = _planner(env)
-    matches = planner.library.current_with_article("20020563")
+    matches = planner.library.current_with_article("20509")
     assert len(matches) == 2
     assert len({record.lineage_id for record in matches}) == 2
     assert {record.spec.name for record in matches} == {
-        "Außenrandstreifen Kurve 3/30°",
-        "Endstück Kurve 3/30°",
+        "Standardgerade 34,5cm",
+        "Standardgerade mit Start",
     }
+    assert {record.spec.piece_key for record in matches} == {"", "20509.2"}
 
 
 def test_migration_assigns_a_lineage_without_changing_a_placed_part(env: Env) -> None:
@@ -171,8 +173,13 @@ def test_migration_assigns_a_lineage_without_changing_a_placed_part(env: Env) ->
 
 
 def _article(planner: TrackPlannerService, article: str) -> PartRecord:
-    planner.list_parts()
-    return next(record for record in planner.list_parts() if record.spec.article_number == article)
+    from tests.modules.catalog_fixtures import ensure_article, live_part
+
+    found = live_part(planner, article)
+    if found is not None:
+        return found
+    part_id = ensure_article(planner, article)
+    return next(record for record in planner.list_parts() if record.id == part_id)
 
 
 def _catalog(record: PartRecord) -> dict[int, PartSpec]:

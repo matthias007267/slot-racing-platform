@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -208,44 +209,37 @@ def test_name_and_article_identify_a_part_and_scale_stays_a_property(env: Env) -
 
 def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
     planner = _planner(env)
-    by_article = {record.spec.article_number: record.spec for record in planner.list_parts()}
-    straight = by_article["20020601"]
+    records = planner.list_parts()
+    by_source = {record.spec.source_id: record.spec for record in records}
+    straight = next(
+        spec for spec in by_source.values() if spec.article_number == "20509" and not spec.piece_key
+    )
     assert straight.category == STRAIGHT
     assert straight.length_mm == pytest.approx(345)
     assert straight.radius_mm is None
-    assert straight.angle_deg == pytest.approx(0)
+    assert straight.angle_deg is None
     assert straight.scale == "1:24"
-    assert {spec.scale for spec in by_article.values()} == {"1:24"}
-    assert by_article["20020611"].length_mm == pytest.approx(115)
-    assert by_article["20020612"].length_mm == pytest.approx(86)
-    curve = by_article["20020572"]
+    assert {spec.scale for spec in by_source.values()} == {"1:24"}
+    curve = next(spec for spec in by_source.values() if spec.article_number == "20577")
     assert curve.category == CURVE
-    assert curve.radius_mm == pytest.approx(500)
-    assert curve.angle_deg == pytest.approx(30)
-    assert curve.length_mm is None
-    assert {by_article[article].category for article in ("20030343", "20030345", "20030347")} == {
-        LANE_CHANGE
+    assert curve.radius_mm is None
+    assert curve.angle_deg is None
+    k1 = by_source["cc253612-a0cb-4b17-b940-18460c337acb"]
+    assert k1.category == CURVE
+    assert k1.article_number == "20571"
+    switches = {
+        spec.category
+        for spec in by_source.values()
+        if spec.article_number in {"20517", "30343", "30345", "30347"}
     }
-    assert by_article["20020587"].category == CROSSING
-    assert len(by_article["20020587"].connectors) == 4
-    assert by_article["20020517"].category == SWITCH
-    assert by_article["20030341"].category == PITLANE
-    assert by_article["20030341"].lane_count == 1
-    assert by_article["20030356-E"].category == PITLANE
-    assert by_article["20030356-A"].category == PITLANE
-    assert by_article["20030350"].category == SPECIAL
-    assert by_article["20020574"].radius_mm == pytest.approx(300)
-    assert by_article["20020560"].category == BORDER
-    assert by_article["20020560"].connectors == ()
-    assert by_article["20020560"].attachment is not None
-    outer = next(
-        record.spec
-        for record in planner.list_parts()
-        if record.spec.article_number == "20020563" and record.spec.attachment is not None
-    )
-    assert outer.attachment is not None
-    assert outer.name == "Außenrandstreifen Kurve 3/30°"
-    assert by_article["20020592"].attachment is not None
+    assert switches == {SWITCH}
+    assert any(spec.category == LANE_CHANGE for spec in by_source.values())
+    assert any(spec.category == PITLANE for spec in by_source.values())
+    assert any(spec.category == SPECIAL for spec in by_source.values())
+    borders = [spec for spec in by_source.values() if spec.category == BORDER]
+    assert borders
+    assert all(spec.lane_count == 0 and spec.attachment is None for spec in borders)
+    assert all(spec.radius_mm is None for spec in borders)
     assert SUPPORT in CATEGORIES
     assert set(CATEGORIES) >= {
         STRAIGHT,
@@ -259,8 +253,8 @@ def test_the_seeded_catalogue_covers_the_part_categories(env: Env) -> None:
         SUPPORT,
     }
     again = planner.list_parts()
-    assert [record.id for record in again] == [record.id for record in planner.list_parts()]
-    assert len(again) == len(standard_catalog())
+    assert [record.id for record in again] == [record.id for record in records]
+    assert len(again) == 51
 
 
 def test_the_same_part_can_be_placed_twice_without_changing_the_definition(env: Env) -> None:
@@ -515,7 +509,7 @@ def test_parts_and_plans_survive_reopening_the_database(tmp_path: Path) -> None:
         seeded = next(
             record.spec
             for record in planner.list_parts()
-            if record.spec.article_number == "20020601"
+            if record.spec.article_number == "20509" and not record.spec.piece_key
         )
         assert seeded.scale == "1:24"
         loaded = planner.load(track_id)
@@ -575,7 +569,7 @@ def test_backup_restores_the_library_and_the_plan(tmp_path: Path) -> None:
         seeded = next(
             record.spec
             for record in planner.list_parts()
-            if record.spec.article_number == "20020601"
+            if record.spec.article_number == "20509" and not record.spec.piece_key
         )
         assert seeded.scale == "1:24"
         assert restored.spec.lane_count == 3
@@ -684,7 +678,7 @@ def test_the_identity_index_is_the_normalised_name_and_article(env: Env) -> None
     assert "uq_track_part_definitions_identity" in combined
     assert "lower(trim(name))" in combined
     assert "trim(article_number)" in combined
-    assert "system" not in str(table)
+    assert re.search(r"\bsystem\b", str(table)) is None
     assert "uq_track_part_definitions_system_article_number_scale" not in str(table)
 
 
@@ -726,10 +720,24 @@ def _select(page: PlannerPage, track_id: TrackId) -> None:
 
 
 def _library_row(page: PlannerPage, article: str) -> int:
+    found = _library_row_matching(page, article)
+    if found is not None:
+        return found
+    from tests.modules.catalog_fixtures import ensure_article
+
+    ensure_article(page._planner, article)
+    page._load_parts()
+    found = _library_row_matching(page, article)
+    if found is None:
+        raise AssertionError(article)
+    return found
+
+
+def _library_row_matching(page: PlannerPage, article: str) -> int | None:
     for row in range(page.library.count()):
         item = page.library.item(row)
         card = None if item is None else page.library.itemWidget(item)
         label = None if card is None else card.findChild(QLabel, "planner-part-article")
-        if label is not None and article in label.text():
+        if label is not None and label.text() == article:
             return row
-    raise AssertionError(article)
+    return None

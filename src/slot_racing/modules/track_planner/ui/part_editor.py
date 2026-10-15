@@ -8,6 +8,7 @@ valid paths and consistent lane joints.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -193,6 +194,8 @@ class PartDialog(FormDialog):
             self.graphic.show_issues(issues)
             if issues:
                 raise ValidationError(issues[0][0])
+        if self._duplicate:
+            spec = replace(spec, source_id="", piece_key="", selectable=True)
         return spec
 
     def _preview_spec(self) -> PartSpec | None:

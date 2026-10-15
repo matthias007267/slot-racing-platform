@@ -109,7 +109,7 @@ def test_the_new_carrera_parts_match_the_verified_catalogue() -> None:
     assert rail.length_mm == pytest.approx(345)
     assert rail.lane_count == 2
     assert len(rail.connectors) == 2
-    assert is_start_finish_part(rail)
+    assert not is_start_finish_part(rail)
     assert not is_start_finish_part(by_article["20020601"])
     assert rail.article_number != "20020601"
 
@@ -131,38 +131,35 @@ def test_the_bottleneck_and_steep_curves_have_a_real_lane_length() -> None:
     assert lengths[1] == pytest.approx(550 * math.pi / 6)
 
 
-def test_placing_the_connecting_rail_does_not_spend_a_standard_straight(env: Env) -> None:
+def test_placing_the_start_straight_does_not_spend_a_standard_straight(env: Env) -> None:
     planner = _planner(env)
-    records = {record.spec.article_number: record for record in planner.list_parts()}
-    straight = records["20020601"]
-    rail = records["20020518"]
+    records = planner.list_parts()
+    straight = next(
+        record
+        for record in records
+        if record.spec.article_number == "20509" and not record.spec.piece_key
+    )
+    start = next(record for record in records if record.spec.piece_key == "20509.2")
     planner.set_stock(straight.id, 10)
-    planner.set_stock(rail.id, 1)
-    track = env.track("Anschluss", lanes=2)
-    catalog = {straight.id: straight.spec, rail.id: rail.spec}
-    plan = place_instance(empty_plan(track.id), rail.id, rail.spec, 0, 0, 0, catalog)
-    assert plan.instances[0].start_straight
-    assert plan.instances[0].part_id == rail.id
+    planner.set_stock(start.id, 1)
+    track = env.track("Start", lanes=2)
+    catalog = {straight.id: straight.spec, start.id: start.spec}
+    plan = place_instance(empty_plan(track.id), start.id, start.spec, 0, 0, 0, catalog)
+    assert not plan.instances[0].start_straight
+    assert plan.instances[0].part_id == start.id
     plan = place_instance(plan, straight.id, straight.spec, 2000, 0, 0, catalog)
     assert not plan.instances[1].start_straight
     planner.save(plan)
     loaded = planner.load(track.id)
-    assert loaded.instances[0].start_straight
-    assert loaded.instances[0].part_id == rail.id
+    assert [item.part_id for item in loaded.instances] == [start.id, straight.id]
+    assert all(not item.start_straight for item in loaded.instances)
     owned = planner.stock_quantities()
     report = analyze_inventory(loaded.instances, owned)
     assert report.balance(straight.id).owned == 10
     assert report.balance(straight.id).used == 1
-    assert report.balance(rail.id).owned == 1
-    assert report.balance(rail.id).used == 1
-    assert report.balance(rail.id).available == 0
-    rotated = loaded.instances[0]
-    assert rotated.start_straight
-    planner.save(place_instance(loaded, rail.id, rail.spec, 0, 800, 90, catalog))
-    again = planner.load(track.id)
-    marked = [item for item in again.instances if item.start_straight]
-    assert len(marked) == 1
-    assert marked[0].part_id == rail.id
+    assert report.balance(start.id).owned == 1
+    assert report.balance(start.id).used == 1
+    assert report.balance(start.id).available == 0
 
 
 def test_a_new_plan_uses_the_grid_and_snap_defaults_and_keeps_saved_values(env: Env) -> None:
@@ -297,15 +294,15 @@ def test_toolbar_buttons_stay_readable_when_the_window_shrinks(qtbot: QtBot, env
 def test_deleting_an_unused_catalog_part_does_not_reseed_it(env: Env) -> None:
     planner = _planner(env)
     before = planner.list_parts()
-    crossing = next(record for record in before if record.spec.article_number == "20020587")
+    crossing = next(record for record in before if record.spec.article_number == "30342")
     planner.delete_part(crossing.id)
     after = planner.list_parts()
     assert [record.id for record in after] == [
         record.id for record in before if record.id != crossing.id
     ]
-    assert all(record.spec.article_number != "20020587" for record in after)
+    assert all(record.spec.article_number != "30342" for record in after)
     restarted = TrackPlannerService(env.runtime.database, env.tracks)
-    assert all(record.spec.article_number != "20020587" for record in restarted.list_parts())
+    assert all(record.spec.article_number != "30342" for record in restarted.list_parts())
     with env.runtime.database.session() as session:
         row = session.get(TrackPartDefinition, crossing.id)
         assert row is not None and row.suppressed
@@ -344,7 +341,7 @@ def test_an_unused_custom_part_is_deleted_and_a_used_part_is_kept(env: Env) -> N
 def test_suppressing_a_catalog_part_keeps_its_stock_and_hides_it(qtbot: QtBot, env: Env) -> None:
     planner = _planner(env)
     crossing = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20020587"
+        record for record in planner.list_parts() if record.spec.article_number == "30342"
     )
     planner.set_stock(crossing.id, 4)
     track = env.track("Manager", lanes=2)
@@ -352,7 +349,7 @@ def test_suppressing_a_catalog_part_keeps_its_stock_and_hides_it(qtbot: QtBot, e
     window.show()
     assert isinstance(page, PlannerPage)
     _select(page, track.id)
-    assert _library_row(page, "20020587") >= 0
+    assert _library_row(page, "30342") >= 0
     manager = LibraryManager(env.runtime.translator, planner)
     qtbot.addWidget(manager)
     manager.select_part(crossing.id)
@@ -361,8 +358,8 @@ def test_suppressing_a_catalog_part_keeps_its_stock_and_hides_it(qtbot: QtBot, e
     assert all(row.part_id != crossing.id for row in manager._rows)
     page._load_parts()
     with pytest.raises(AssertionError):
-        _library_row(page, "20020587")
-    assert all(record.spec.article_number != "20020587" for record in planner.list_parts())
+        _library_row(page, "30342")
+    assert all(record.spec.article_number != "30342" for record in planner.list_parts())
     with env.runtime.database.session() as session:
         row = session.get(TrackPartDefinition, crossing.id)
         stock = session.get(TrackPartStock, crossing.id)
@@ -383,7 +380,7 @@ def test_a_removed_catalog_part_stays_removed_after_backup(tmp_path: Path) -> No
     try:
         planner = source.services.get(TrackPlannerService)
         crossing = next(
-            record for record in planner.list_parts() if record.spec.article_number == "20020587"
+            record for record in planner.list_parts() if record.spec.article_number == "30342"
         )
         planner.set_stock(crossing.id, 6)
         planner.delete_part(crossing.id)
@@ -406,14 +403,16 @@ def test_a_removed_catalog_part_stays_removed_after_backup(tmp_path: Path) -> No
             backup_directory=other_dir / "backups",
         )
         planner = TrackPlannerService(runtime.database, runtime.services.get(TrackService))
-        assert all(record.spec.article_number != "20020587" for record in planner.list_parts())
+        assert all(record.spec.article_number != "30342" for record in planner.list_parts())
         straight = next(
-            record for record in planner.list_parts() if record.spec.article_number == "20020601"
+            record
+            for record in planner.list_parts()
+            if record.spec.article_number == "20509" and not record.spec.piece_key
         )
-        assert straight.spec.name == "Standardgerade"
+        assert straight.spec.name == "Standardgerade 34,5cm"
         with runtime.database.session() as session:
             row = session.scalars(
-                select(TrackPartDefinition).where(TrackPartDefinition.article_number == "20020587")
+                select(TrackPartDefinition).where(TrackPartDefinition.article_number == "30342")
             ).one()
             assert row.suppressed
             stock = session.get(TrackPartStock, row.id)

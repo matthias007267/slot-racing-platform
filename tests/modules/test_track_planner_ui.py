@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+import pytest
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QDropEvent, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
+from shiboken6 import Shiboken
 
 from slot_racing.core.domain import TrackId
 from slot_racing.modules.track_planner.document import (
@@ -18,7 +21,8 @@ from slot_racing.modules.track_planner.document import (
     instances_center,
     rotate_instances_around,
 )
-from slot_racing.modules.track_planner.parts import STRAIGHT, PartInstance, build_part
+from slot_racing.modules.track_planner.library import TemplateView
+from slot_racing.modules.track_planner.parts import STRAIGHT, PartInstance, PartRecord, build_part
 from slot_racing.modules.track_planner.ui.canvas import (
     InstanceItem,
     rect_fully_inside,
@@ -285,8 +289,8 @@ def test_group_rotation_handle_and_both_directions(qtbot: QtBot, env: Env) -> No
     page._rotated([item.id for item in selected], center[0], center[1], -35)
     turned = page.plan().instances
     assert turned[0].rotation_z_deg == (-35) % 360
-    assert _distance(selected[0], center) == _distance(turned[0], center)
-    assert _distance(selected[1], center) == _distance(turned[1], center)
+    assert math.isclose(_distance(selected[0], center), _distance(turned[0], center), abs_tol=1e-6)
+    assert math.isclose(_distance(selected[1], center), _distance(turned[1], center), abs_tol=1e-6)
     page._rotated([item.id for item in turned], center[0], center[1], 82)
     again = page.plan().instances
     assert again[0].rotation_z_deg == (-35 + 82) % 360
@@ -385,6 +389,138 @@ def test_a_rubber_band_drag_selects_only_parts_inside_it(qtbot: QtBot, env: Env)
     click = canvas.mapFromScene(inside.sceneBoundingRect().center())
     qtbot.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=click)  # type: ignore[no-untyped-call]
     assert canvas.selected_ids() == [inside.item_id]
+
+
+def test_a_closed_planner_does_not_leave_its_tools_behind(env: Env) -> None:
+    from slot_racing.app.main_window import MainWindow
+
+    track = env.track("Fenster", lanes=2)
+    window = MainWindow(env.runtime)
+    window.show()
+    window.select("track_planner")
+    page = window.current_page()
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    assert page.place_part.parent() is page
+    before = _widget_count()
+    assert before > 0
+    window.close()
+    window.deleteLater()
+    _flush_deleted_widgets()
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    names = {widget.objectName() for widget in app.topLevelWidgets()}
+    assert "planner-place" not in names
+    assert "planner-add-start" not in names
+    assert _widget_count() < before
+
+
+def test_an_unchanged_selection_keeps_the_same_library_cards(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Karten", lanes=2)
+    _window, page = open_page(qtbot, env, "track_planner")
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    card = _card_at(page, 0)
+    page._show_selection()
+    assert _card_at(page, 0) is card
+    assert page.library.count() > 1
+
+
+def test_a_changed_stock_note_replaces_only_the_stale_cards(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Bestand", lanes=2)
+    _window, page = open_page(qtbot, env, "track_planner")
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    records = page._records
+    templates = tuple(page._templates.values())
+    kept = _card_at(page, 0)
+    page.library.set_records(records, None, templates)
+    _flush_deleted_widgets()
+    assert _card_at(page, 0) is kept
+    before = _widget_count()
+    note = "2 übrig"
+    page.library.set_records(records, {records[0].id: note}, templates)
+    _flush_deleted_widgets()
+    replacement = _card_at(page, 0)
+    assert replacement is not kept
+    assert not Shiboken.isValid(kept)
+    label = replacement.findChild(QLabel, "planner-part-remaining")
+    assert label is not None and label.text() == note
+    for index in range(3):
+        page.library.set_records(records, {records[0].id: note}, templates)
+        page.library.set_records(records, {records[0].id: f"{index} übrig"}, templates)
+    _flush_deleted_widgets()
+    assert _widget_count() < before + 80
+    shown = _card_at(page, 0).findChild(QLabel, "planner-part-remaining")
+    assert shown is not None and shown.text() == "2 übrig"
+
+
+def test_drawing_a_plan_does_not_rebuild_cards_while_the_scene_loads(
+    qtbot: QtBot, env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    track = env.track("Aufbau", lanes=2)
+    _window, page = open_page(qtbot, env, "track_planner")
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    page.library.setCurrentRow(0)
+    page.place_part.click()
+    page.x_mm.setValue(400)
+    page.place_part.click()
+    assert len(page.plan().instances) == 2
+    seen: list[bool] = []
+    original = page.library.set_records
+
+    def spy(
+        records: Sequence[PartRecord],
+        remaining: Mapping[int, str] | None = None,
+        templates: Sequence[TemplateView] | None = None,
+    ) -> None:
+        seen.append(page.canvas._loading)
+        original(records, remaining, templates)
+
+    monkeypatch.setattr(page.library, "set_records", spy)
+    page._draw({instance.id for instance in page.plan().instances})
+    assert seen == [False]
+
+
+def test_refreshing_selection_after_the_scene_is_gone_does_nothing(qtbot: QtBot, env: Env) -> None:
+    track = env.track("Szene", lanes=2)
+    window, page = open_page(qtbot, env, "track_planner")
+    window.show()
+    assert isinstance(page, PlannerPage)
+    _select(page, track.id)
+    page.library.setCurrentRow(0)
+    page.place_part.click()
+    scene = page.canvas.scene()
+    assert scene is not None
+    scene.deleteLater()
+    _flush_deleted_widgets()
+    assert not Shiboken.isValid(scene)
+    page._show_selection()
+    window.close()
+    _flush_deleted_widgets()
+
+
+def _card_at(page: PlannerPage, row: int) -> QWidget:
+    item = page.library.item(row)
+    assert item is not None
+    card = page.library.itemWidget(item)
+    assert isinstance(card, QWidget)
+    return card
+
+
+def _widget_count() -> int:
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    return len(app.allWidgets())
+
+
+def _flush_deleted_widgets() -> None:
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
 
 
 def _key(

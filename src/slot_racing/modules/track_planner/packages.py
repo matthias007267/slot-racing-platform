@@ -20,6 +20,7 @@ class PackageContentSpec:
     part_name: str
     article_number: str
     quantity: int
+    source_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

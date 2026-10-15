@@ -33,7 +33,7 @@ from slot_racing.modules.track_planner.inventory import (
     PhysicalStock,
     analyze_inventory,
 )
-from slot_racing.modules.track_planner.library import PartLibrary
+from slot_racing.modules.track_planner.library import PartLibrary, TemplateView
 from slot_racing.modules.track_planner.packages import PackageSpec, PackageView
 from slot_racing.modules.track_planner.parts import PartInstance, PartRecord, PartSpec
 
@@ -55,7 +55,14 @@ class TrackPlannerService:
         with self._database.session() as session:
             stored = self.library.read_instances(session, int(track_id))
         if stored:
-            return with_instances(plan, stored)
+            known = self.library.known_part_ids()
+            stored_ids = {instance.id for instance in stored}
+            unknown = tuple(
+                instance
+                for instance in plan.instances
+                if instance.part_id not in known and instance.id not in stored_ids
+            )
+            return with_instances(plan, (*stored, *unknown))
         return plan
 
     def save(self, plan: TrackPlan) -> TrackPlan:
@@ -123,6 +130,9 @@ class TrackPlannerService:
 
     def list_packages(self) -> tuple[PackageView, ...]:
         return self.library.list_packages()
+
+    def list_templates(self) -> tuple[TemplateView, ...]:
+        return self.library.list_templates()
 
     def add_package(self, spec: PackageSpec) -> PackageView:
         return self.library.add_package(spec)

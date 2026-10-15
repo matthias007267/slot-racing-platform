@@ -315,45 +315,58 @@ def test_pit_entry_and_exit_keep_their_identity_and_draw_a_spur() -> None:
 
 
 def test_stored_slot_paths_survive_and_empty_rows_still_derive(env: Env) -> None:
+    from tests.modules.catalog_fixtures import ensure_article
+
     planner = _planner(env)
-    switch = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20020517"
-    )
-    loaded = planner.library.require(switch.id).spec
-    assert _branch(track_figure(loaded)).spans
     straight = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20020601"
+        record
+        for record in planner.list_parts()
+        if record.spec.article_number == "20509" and not record.spec.piece_key
     )
-    plain = planner.library.require(straight.id).spec
+    loaded = planner.library.require(straight.id).spec
+    assert loaded.slot_paths
+    assert loaded.source_id
+    plain_id = ensure_article(planner, "20020601")
+    plain = planner.library.require(plain_id).spec
     assert plain.slot_paths == ()
     assert len(track_figure(plain).slots) == 2
-    entry = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20030356-E"
-    )
-    assert planner.library.require(entry.id).spec.slot_paths == ()
-    assert len(track_figure(planner.library.require(entry.id).spec).slots) == 3
+    entry_id = ensure_article(planner, "20030356-E")
+    entry = planner.library.require(entry_id).spec
+    assert entry.slot_paths == ()
+    assert len(track_figure(entry).slots) == 3
 
 
-def test_a_missing_groove_on_an_old_row_is_filled_from_the_catalogue(env: Env) -> None:
+def test_ensure_seed_does_not_rewrite_stored_source_geometry(env: Env) -> None:
     planner = _planner(env)
     planner.list_parts()
     from sqlalchemy import select
 
     from slot_racing.modules.track_planner.models import TrackPartDefinition
+    from slot_racing.modules.track_planner.parts import ACTIVE_STRAIGHT_SOURCE
 
     with env.runtime.database.session() as session:
         row = session.scalar(
-            select(TrackPartDefinition).where(TrackPartDefinition.article_number == "20020517")
+            select(TrackPartDefinition).where(
+                TrackPartDefinition.source_id == ACTIVE_STRAIGHT_SOURCE
+            )
         )
         assert row is not None
-        row.slot_paths = None
+        stored = row.slot_paths
         outline = list(row.outline)
     planner.library.ensure_seed()
     loaded = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20020517"
+        record for record in planner.list_parts() if record.spec.source_id == ACTIVE_STRAIGHT_SOURCE
     )
     assert loaded.spec.slot_paths
     assert [list(point) for point in loaded.spec.outline] == outline
+    with env.runtime.database.session() as session:
+        again = session.scalar(
+            select(TrackPartDefinition).where(
+                TrackPartDefinition.source_id == ACTIVE_STRAIGHT_SOURCE
+            )
+        )
+        assert again is not None
+        assert again.slot_paths == stored
 
 
 def test_colour_coding_defaults_off_and_an_old_file_still_loads(tmp_path: Path) -> None:

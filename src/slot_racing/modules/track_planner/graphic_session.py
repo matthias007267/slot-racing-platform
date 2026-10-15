@@ -526,7 +526,13 @@ class GraphicSession:
             )
             + preserved
         )
-        lane_count = max((item.lane or 0 for item in self.lanes()), default=1)
+        lane_elements = self.lanes()
+        if lane_elements:
+            lane_count = max(item.lane or 1 for item in lane_elements)
+        elif self._source is not None:
+            lane_count = self._source.lane_count
+        else:
+            lane_count = 1
         bounds = _bounds(self.elements)
         length = None if bounds is None else bounds[2] - bounds[0]
         width = None if bounds is None else bounds[3] - bounds[1]
@@ -544,7 +550,7 @@ class GraphicSession:
             height_mm=height,
             radius_mm=None,
             angle_deg=None,
-            lane_count=max(1, lane_count),
+            lane_count=lane_count,
             connectors=connectors,
             outline=outline,
             slot_paths=lanes + starts,
