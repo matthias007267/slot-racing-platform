@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import func, select
 
+from slot_racing.core.storage import Database
 from slot_racing.modules.track_planner.catalog_import import HELPER_SOURCE, load_carrera_library
 from slot_racing.modules.track_planner.document import empty_plan, place_instance, to_document
 from slot_racing.modules.track_planner.graphic_session import GraphicSession
@@ -27,6 +28,7 @@ from slot_racing.modules.track_planner.parts import (
     TRACK,
     ConnectorSpec,
     PartInstance,
+    PartSpec,
     Pose,
     connectors_compatible,
     extend_pose,
@@ -37,6 +39,7 @@ from slot_racing.modules.track_planner.parts import (
     snap_pose,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.tracks.service import TrackService
 from tests.database import migrated_database
 from tests.modules.conftest import Env
 from tests.modules.test_track_parts import _planner, _straight_spec
@@ -85,7 +88,8 @@ def test_retiring_the_old_catalogue_keeps_plans_and_stock(env: Env) -> None:
     kept = planner.records_for([old.id])
     assert kept[0].spec.article_number == "ALT-1"
     with env.runtime.database.session() as session:
-        assert session.get(TrackPartStock, old.id).quantity == 4
+        kept_stock = session.get(TrackPartStock, old.id)
+        assert kept_stock is not None and kept_stock.quantity == 4
     again = planner.library.import_carrera_library()
     assert len(again.parts) == len(draft.parts)
     assert len(planner.library.list_active()) == 51
@@ -140,8 +144,8 @@ def test_straights_curves_borders_and_switches_keep_the_source_geometry(env: Env
     assert len(slots) == 2
     assert straight.radius_mm is None
     ys = sorted(span.y0 for path in slots for span in path.spans[:1])
-    assert ys[0] == pytest_approx(-49.5)
-    assert ys[1] == pytest_approx(49.5)
+    assert ys[0] == pytest.approx(-49.5)
+    assert ys[1] == pytest.approx(49.5)
     rails = [connector for connector in straight.connectors if connector.kind == TRACK]
     assert {round(connector.neighbor_x, 1) for connector in rails} == {-345.0, 345.0}
     curve = by_source["cc253612-a0cb-4b17-b940-18460c337acb"]
@@ -206,8 +210,8 @@ def test_placement_snaps_on_attach_points_and_plain_rail_ends(env: Env) -> None:
         snap_mm=30,
         grid_mm=None,
     )
-    assert seated.x_mm == pytest_approx(345)
-    assert seated.y_mm == pytest_approx(0)
+    assert seated.x_mm == pytest.approx(345)
+    assert seated.y_mm == pytest.approx(0)
     curve = records["cc253612-a0cb-4b17-b940-18460c337acb"].spec
     pair = _compatible_pair(straight, curve)
     assert pair is not None
@@ -215,8 +219,8 @@ def test_placement_snaps_on_attach_points_and_plain_rail_ends(env: Env) -> None:
     expected = join_pose(host, source, target)
     near = Pose(expected.x_mm + 8, expected.y_mm - 3, expected.rotation_z_deg)
     snapped = snap_pose(curve, near, ((host, straight),), snap_mm=40, grid_mm=None)
-    assert snapped.x_mm == pytest_approx(expected.x_mm)
-    assert snapped.y_mm == pytest_approx(expected.y_mm)
+    assert snapped.x_mm == pytest.approx(expected.x_mm)
+    assert snapped.y_mm == pytest.approx(expected.y_mm)
     border_joint = next(
         connector for connector in straight.connectors if connector.kind == BORDER_JOINT
     )
@@ -229,8 +233,8 @@ def test_placement_snaps_on_attach_points_and_plain_rail_ends(env: Env) -> None:
         snap_mm=20,
         grid_mm=None,
     )
-    assert border_pose.x_mm == pytest_approx(border_joint.neighbor_x)
-    assert border_pose.y_mm == pytest_approx(border_joint.neighbor_y)
+    assert border_pose.x_mm == pytest.approx(border_joint.neighbor_x)
+    assert border_pose.y_mm == pytest.approx(border_joint.neighbor_y)
     assert border.radius_mm is None
     meeting = _meeting_rails(straight, curve)
     assert meeting is not None
@@ -271,7 +275,7 @@ def test_a_plan_round_trips_and_keeps_an_unknown_part(env: Env) -> None:
     loaded = planner.load(track.id)
     assert {item.part_id for item in loaded.instances} == {straight.id, 999999}
     missing_item = next(item for item in loaded.instances if item.part_id == 999999)
-    assert missing_item.x_mm == pytest_approx(40)
+    assert missing_item.x_mm == pytest.approx(40)
     planner.save(loaded)
     again = planner.load(track.id)
     assert {item.part_id for item in again.instances} == {straight.id, 999999}
@@ -300,10 +304,8 @@ def test_an_unedited_import_keeps_its_identity_in_the_editor(env: Env) -> None:
     assert saved.spec.source_id == record.spec.source_id
 
 
-def _tracks(database: object) -> object:
-    from slot_racing.modules.tracks.service import TrackService
-
-    return TrackService(database)  # type: ignore[arg-type]
+def _tracks(database: Database) -> TrackService:
+    return TrackService(database)
 
 
 def _row(env: Env, *, piece_key: str = "", source_id: str = "") -> TrackPartDefinition:
@@ -332,28 +334,28 @@ def _source_count(env: Env) -> int:
         )
 
 
-def _types(spec: object) -> tuple[str, ...]:
+def _types(spec: PartSpec) -> tuple[str, ...]:
     found: list[str] = []
-    for connector in spec.connectors:  # type: ignore[attr-defined]
+    for connector in spec.connectors:
         found.extend(connector.edge_types)
     return tuple(found)
 
 
-def _typed(spec: object) -> ConnectorSpec:
+def _typed(spec: PartSpec) -> ConnectorSpec:
     return next(
-        connector
-        for connector in spec.connectors  # type: ignore[attr-defined]
-        if connector.exclusive and connector.edge_types
+        connector for connector in spec.connectors if connector.exclusive and connector.edge_types
     )
 
 
-def _meeting_rails(straight: object, curve: object) -> tuple[ConnectorSpec, ConnectorSpec] | None:
+def _meeting_rails(
+    straight: PartSpec, curve: PartSpec
+) -> tuple[ConnectorSpec, ConnectorSpec] | None:
     host = PartInstance("host", 1, 0.0, 0.0)
     best: tuple[float, ConnectorSpec, ConnectorSpec] | None = None
-    for source in straight.connectors:  # type: ignore[attr-defined]
+    for source in straight.connectors:
         if source.exclusive:
             continue
-        for target in curve.connectors:  # type: ignore[attr-defined]
+        for target in curve.connectors:
             if target.exclusive:
                 continue
             pose = join_pose(host, source, target)
@@ -375,28 +377,24 @@ def _meeting_rails(straight: object, curve: object) -> tuple[ConnectorSpec, Conn
     return best[1], best[2]
 
 
-def _turn(host: PartInstance, joint: ConnectorSpec, pose: Pose, spec: object) -> float:
+def _turn(host: PartInstance, joint: ConnectorSpec, pose: Pose, spec: PartSpec) -> float:
     seated = PartInstance("next", 2, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg)
-    delta = placed_continuation_delta_deg(host, joint, seated, spec)  # type: ignore[arg-type]
+    delta = placed_continuation_delta_deg(host, joint, seated, spec)
     assert delta is not None
     return delta
 
 
-def _compatible_pair(left: object, right: object) -> tuple[ConnectorSpec, ConnectorSpec] | None:
-    for source in left.connectors:  # type: ignore[attr-defined]
-        for target in right.connectors:  # type: ignore[attr-defined]
+def _compatible_pair(left: PartSpec, right: PartSpec) -> tuple[ConnectorSpec, ConnectorSpec] | None:
+    for source in left.connectors:
+        for target in right.connectors:
             if connectors_compatible(
                 source,
                 target,
-                left_source=left.source_id,  # type: ignore[attr-defined]
-                right_source=right.source_id,  # type: ignore[attr-defined]
+                left_source=left.source_id,
+                right_source=right.source_id,
             ):
                 return source, target
     return None
-
-
-def pytest_approx(value: float) -> float:
-    return pytest.approx(value)  # type: ignore[no-any-return]
 
 
 def test_suppressed_old_packages_are_not_recreated(env: Env) -> None:

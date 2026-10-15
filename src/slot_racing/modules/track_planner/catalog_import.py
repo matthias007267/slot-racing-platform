@@ -92,11 +92,11 @@ class LibraryDraft:
 
 def load_carrera_library() -> LibraryDraft:
     """Both source files. A part that cannot be read is listed and left out."""
-    evolution = _payload(EVOLUTION_FILE)
-    digital = _payload(DIGITAL_FILE)
-    raw = {**evolution["parts"], **digital["parts"]}
-    evolution_ids = set(evolution["parts"])
-    digital_ids = set(digital["parts"])
+    evolution = _part_table(_payload(EVOLUTION_FILE), EVOLUTION_FILE)
+    digital = _part_table(_payload(DIGITAL_FILE), DIGITAL_FILE)
+    raw = {**evolution, **digital}
+    evolution_ids = set(evolution)
+    digital_ids = set(digital)
     referenced = _referenced(raw)
     skipped: list[ImportNote] = []
     notes: list[ImportNote] = []
@@ -134,6 +134,7 @@ def load_carrera_library() -> LibraryDraft:
                 )
             )
     known = {spec.source_id for spec in specs}
+    imported = tuple(specs)
     templates: list[TemplateDraft] = []
     for source_id, part in shells.items():
         members, missing = _members(part, known)
@@ -150,11 +151,11 @@ def load_carrera_library() -> LibraryDraft:
                 members=members,
             )
         )
-    notes.extend(_type_notes(specs))
+    notes.extend(_type_notes(imported))
     return LibraryDraft(
-        parts=tuple(specs),
+        parts=imported,
         templates=tuple(templates),
-        packages=_packages(specs),
+        packages=_packages(imported),
         skipped=tuple(skipped),
         notes=tuple(notes),
     )
@@ -173,6 +174,24 @@ def _payload(filename: str) -> dict[str, object]:
     if not isinstance(decoded, dict) or not isinstance(decoded.get("parts"), dict):
         raise ValueError(filename)
     return decoded
+
+
+def _part_table(document: Mapping[str, object], filename: str) -> dict[str, dict[str, object]]:
+    """UUID to part object. A file whose parts are not objects is rejected."""
+    raw = document.get("parts")
+    if not isinstance(raw, dict):
+        raise ValueError(filename)
+    parts: dict[str, dict[str, object]] = {}
+    for source_id, part in raw.items():
+        if not isinstance(source_id, str) or not isinstance(part, dict):
+            raise ValueError(filename)
+        body: dict[str, object] = {}
+        for key, value in part.items():
+            if not isinstance(key, str):
+                raise ValueError(filename)
+            body[key] = value
+        parts[source_id] = body
+    return parts
 
 
 def _referenced(parts: Mapping[str, dict[str, object]]) -> dict[str, set[str]]:
@@ -374,7 +393,10 @@ def _connectors(
     center_y = float(center.get("y") or 0.0) if isinstance(center, dict) else 0.0
     points = _slot_endpoints(slots)
     connectors: list[ConnectorSpec] = []
-    rows = part.get("attachPoints") if isinstance(part.get("attachPoints"), list) else []
+    attached = part.get("attachPoints")
+    rows: list[object] = []
+    if isinstance(attached, list):
+        rows.extend(attached)
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
