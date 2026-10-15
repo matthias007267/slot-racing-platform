@@ -68,7 +68,7 @@ def test_navigation_records_each_page_change_once(
         window.select("tracks")
         window.select("track_planner")
         window.select("races")
-        window.select("timing")
+        window.select("statistics")
         steps = [
             (dict(item.fields).get("from"), dict(item.fields).get("to"))
             for item in service.breadcrumbs.snapshot()
@@ -77,7 +77,7 @@ def test_navigation_records_each_page_change_once(
         assert ("", "dashboard") in steps or ("dashboard", "tracks") in steps
         assert ("tracks", "track_planner") in steps
         assert ("track_planner", "races") in steps
-        assert ("races", "timing") in steps
+        assert ("races", "statistics") in steps
         assert steps.count(("tracks", "tracks")) == 0
         assert sum(1 for _from, to in steps if to == "tracks") == 1
     finally:

@@ -50,7 +50,6 @@ def test_navigation_is_built_from_enabled_modules(qtbot: QtBot, runtime: Runtime
         "tracks",
         "races",
         "championships",
-        "timing",
         "statistics",
         "track_planner",
         "settings",
@@ -62,24 +61,42 @@ def test_navigation_is_built_from_enabled_modules(qtbot: QtBot, runtime: Runtime
         "Strecken",
         "Rennen",
         "Meisterschaften",
-        "Sensor-Zeitmessung",
         "Statistiken",
         "Streckenplaner",
         "Einstellungen",
     ]
+    assert window.navigation_titles().count("Sensor-Zeitmessung") == 0
     assert window.windowTitle() == "Slot-Racing Platform"
     assert window.current_id() == "dashboard"
 
 
-def test_timing_menus_name_sensor_and_camera_and_keep_their_places(
+def test_sensor_timing_is_one_module_and_opens_the_sensor_page(
     qtbot: QtBot, runtime: Runtime
 ) -> None:
+    from slot_racing.core.timing import TimingSourceFactory
     from slot_racing.modules.timing_camera.ui.page import CameraSetupPage
+    from slot_racing.modules.timing_sensor.ui.page import SensorTimingPage
+    from slot_racing.uikit.icons import nav_icon
 
-    runtime.plugins.enable("timing_camera")
     window = make_window(qtbot, runtime)
+    window.select("settings")
+    sensor_boxes = [
+        box.text()
+        for box in window.current_page().findChildren(QCheckBox)
+        if box.text().startswith("Sensor-Zeitmessung")
+    ]
+    assert sensor_boxes == ["Sensor-Zeitmessung (nicht aktiviert)"]
+    names = [box.text() for box in window.current_page().findChildren(QCheckBox)]
+    assert "Timing (aktiv)" in names
+    assert runtime.plugins.is_enabled("timing")
+    assert "simulation" in {
+        factory.provider_id for factory in runtime.services.find_all(TimingSourceFactory)
+    }
+    runtime.plugins.enable("timing_sensor")
+    runtime.plugins.enable("timing_camera")
     ids = window.navigation_ids()
     titles = window.navigation_titles()
+    assert titles.count("Sensor-Zeitmessung") == 1
     timing = ids.index("timing")
     camera = ids.index("camera_setup")
     assert titles[timing] == "Sensor-Zeitmessung"
@@ -89,21 +106,43 @@ def test_timing_menus_name_sensor_and_camera_and_keep_their_places(
     camera_button = window.findChild(QPushButton, "nav-camera_setup")
     assert sensor_button is not None and not sensor_button.icon().isNull()
     assert camera_button is not None and not camera_button.icon().isNull()
+    assert (
+        sensor_button.icon().pixmap(16, 16).toImage()
+        == nav_icon("timing", active=False).pixmap(16, 16).toImage()
+    )
+    assert (
+        sensor_button.icon().pixmap(16, 16).toImage()
+        != nav_icon("missing", active=False).pixmap(16, 16).toImage()
+    )
     window.select("timing")
     title = window.findChild(QLabel, "shell-title")
     assert title is not None and title.text() == "Sensor-Zeitmessung"
-    assert "noch nicht implementiert" in page_texts(window)
-    assert "nav.timing" not in page_texts(window)
+    assert isinstance(window.current_page(), SensorTimingPage)
+    assert "noch nicht implementiert" not in page_texts(window)
+    assert "sensor" in {
+        factory.provider_id for factory in runtime.services.find_all(TimingSourceFactory)
+    }
     window.select("camera_setup")
     assert window.current_id() == "camera_setup"
     assert title.text() == "Kamera-Zeitmessung"
     assert isinstance(window.current_page(), CameraSetupPage)
 
 
-def test_modules_without_a_page_show_a_placeholder(qtbot: QtBot, runtime: Runtime) -> None:
-    window = make_window(qtbot, runtime)
-    window.select("timing")
-    assert "noch nicht implementiert" in page_texts(window)
+class _BarePagePlugin(Plugin):
+    manifest: ClassVar[PluginManifest] = PluginManifest(name="bare", version="1", title="Bare")
+
+    def activate(self, context: PluginContext) -> None:
+        context.add_navigation(NavigationItem(id="bare", title_key="nav.bare"))
+
+
+def test_modules_without_a_page_show_a_placeholder(qtbot: QtBot) -> None:
+    runtime = Runtime.create(AppConfig(), database=migrated_database(), plugins=[_BarePagePlugin()])
+    try:
+        window = make_window(qtbot, runtime)
+        window.select("bare")
+        assert "noch nicht implementiert" in page_texts(window)
+    finally:
+        runtime.shutdown()
 
 
 def test_navigation_follows_module_activation(qtbot: QtBot, runtime: Runtime) -> None:

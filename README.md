@@ -9,7 +9,9 @@ later as optional, separate timing providers; the core, race engine, track model
 abstraction do not depend on any manufacturer.
 
 The long-term scope covers drivers and vehicles, tracks and layout planning, races, lap and
-sector times, camera and Raspberry Pi based timing, statistics, audio and race presentation.
+sector times, camera and sensor timing, statistics, audio and race presentation. A sensor
+reader (USB, Raspberry Pi or another device) is a transport of the sensor module, not a
+separate timing model.
 The software is a building-block system: a small core plus optional modules (plugins) that can be
 developed, enabled, disabled, replaced or removed independently. Modules never import each other;
 they communicate through standardized events and core interfaces.
@@ -45,7 +47,10 @@ shell with a sidebar and dynamic navigation. Usable in the application:
 Open work, in the existing order. Finished work is not listed again.
 
 1. Automatic vehicle detection
-2. Raspberry Pi / GPIO
+2. **Sensor-Hardware.** The sensor module (provider `sensor`, off by default) maps physical
+   sensors per track and runs a provisional simulator. A real USB or serial reader, device
+   firmware and clock synchronization against the controller are still open. A Raspberry Pi
+   reader would be another transport of the same module.
 3. Manufacturer-specific hardware
 4. Audio and animations
 5. Time-limited races
