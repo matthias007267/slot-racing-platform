@@ -562,20 +562,12 @@ def test_the_editor_saves_cancels_and_refreshes_the_library(qtbot: QtBot, env: E
         dialog.name.setText("Dialogteil")
         dialog.manufacturer.setText("Eigen")
         dialog.description.setPlainText("Notiz")
-        dialog.length.setValue(210)
-        assert dialog.preview._spec is not None
-        before = dialog.preview._spec.length_mm
-        dialog.length.setValue(260)
-        dialog.preview.repaint()
-        assert dialog.preview._spec is not None
-        assert dialog.preview._spec.length_mm == pytest.approx(260)
-        assert before != dialog.preview._spec.length_mm
-        dialog.length.setValue(0)
-        dialog.preview.repaint()
-        assert dialog.preview._spec.length_mm == pytest.approx(260)
+        from tests.modules.test_graphic_session import draw_straight
+
+        draw_straight(dialog.graphic.session, length=210, lanes=2)
+        assert dialog.graphic.session.release_issues() == ()
         save = dialog.findChild(QPushButton, "part-editor-save")
         assert isinstance(save, QPushButton)
-        dialog.length.setValue(210)
         save.click()
 
     QTimer.singleShot(0, create)
@@ -592,7 +584,7 @@ def test_the_editor_saves_cancels_and_refreshes_the_library(qtbot: QtBot, env: E
     def rename() -> None:
         dialog = QApplication.activeModalWidget()
         assert isinstance(dialog, PartDialog)
-        assert dialog.length.value() == pytest.approx(210)
+        assert dialog.graphic.session.lanes()
         dialog.name.setText("Dialogteil neu")
         button = dialog.findChild(QPushButton, "part-editor-save")
         assert isinstance(button, QPushButton)
@@ -651,12 +643,20 @@ def test_the_editor_reports_validation_and_keeps_a_locked_preview(qtbot: QtBot, 
     dialog.name.setText("Standardgerade")
     dialog.accept()
     assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "Bodenplatte" in dialog.message.text()
+    from tests.modules.test_graphic_session import draw_straight
+
+    draw_straight(dialog.graphic.session, length=180, lanes=2)
+    dialog.accept()
     assert "existiert bereits" in dialog.message.text()
-    dialog.length.setValue(0)
     dialog.name.setText("Kurz")
     dialog.article.setText("EB-VAL")
+    dialog.graphic.session.select_ids(
+        frozenset(item.id for item in dialog.graphic.session.elements)
+    )
+    dialog.graphic.session.delete_selection()
     dialog.accept()
-    assert "Länge" in dialog.message.text()
+    assert "Bodenplatte" in dialog.message.text()
 
     def discard() -> None:
         box = QApplication.activeModalWidget()
@@ -672,9 +672,8 @@ def test_the_editor_reports_validation_and_keeps_a_locked_preview(qtbot: QtBot, 
     editor = PartDialog(env.runtime.translator, planner, switch)
     qtbot.addWidget(editor)
     editor.show()
-    assert not editor.length.isEnabled()
-    assert editor.notice.isVisible()
-    assert "nicht verändert" in editor.notice.text()
+    assert editor.graphic.editable
+    assert not editor.notice.isVisible()
     editor.preview.repaint()
     assert editor.preview._spec is not None
     assert editor.preview._spec.slot_paths == switch.spec.slot_paths

@@ -1,4 +1,4 @@
-"""Parametric part editor, kept at the import path the library already uses."""
+"""Part editor, kept at the import path the library already uses."""
 
 from __future__ import annotations
 

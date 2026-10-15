@@ -21,5 +21,6 @@
 | [0017](0017-shared-path-geometry.md) | Shared path geometry for lines, arcs and cubic Bézier curves |
 | [0018](0018-parametric-part-editor.md) | Parametric editor for straights, curves and borders |
 | [0019](0019-graphical-part-editor.md) | Point-and-click floor plate with open lanes of lines and arcs |
+| [0020](0020-element-part-editor.md) | Element editor for plates, lanes, arcs, Bézier curves and joints |
 
 New decisions get the next number. Format: Context, Decision, Consequences.

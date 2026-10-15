@@ -1,4 +1,4 @@
-"""The drawing tab is gone. Parametric editing, plans and revisions stay."""
+"""The parametric form is gone. Drawing, plans and revisions stay."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
 from slot_racing.modules.track_planner.ui.part_editor import PartDialog
 from slot_racing.modules.tracks.models import TrackLayout
 from tests.modules.conftest import Env
+from tests.modules.test_graphic_session import draw_straight
 from tests.modules.test_parametric_editor import _draft, _save_draft
 from tests.modules.test_part_revisions import _article, _catalog
 from tests.modules.test_track_parts import _planner
@@ -52,24 +53,19 @@ def test_removed_editor_modules_are_not_imported() -> None:
         assert not Path(f"src/slot_racing/modules/track_planner/ui/{name}.py").exists()
 
 
-def test_the_part_dialog_is_parametric_and_has_no_drawing_tab(qtbot: QtBot, env: Env) -> None:
-    """Test B: parametric editing stays, and the old drawing tab does not return."""
+def test_the_part_dialog_draws_and_has_no_parameter_tab(qtbot: QtBot, env: Env) -> None:
+    """Test B: the element editor is the only surface, and the old tools stay gone."""
     dialog = PartDialog(env.runtime.translator, _planner(env))
     qtbot.addWidget(dialog)
     dialog.show()
-    assert dialog.tabs.count() == 2
-    assert dialog.tabs.tabText(0) == "Parameter"
-    assert dialog.tabs.tabText(1) == "Grafisch"
-    assert "Zeichnen" not in dialog.tabs.tabText(1)
+    assert dialog.findChild(QPushButton, "graphic-plate") is not None
+    assert dialog.findChild(QPushButton, "graphic-lane") is not None
+    assert dialog.findChild(QPushButton, "graphic-bezier") is not None
+    assert dialog.findChild(QPushButton, "plate-center") is None
+    assert not hasattr(dialog, "length")
+    assert not hasattr(dialog, "tabs")
     assert dialog.article.objectName() == "part-article"
-    assert dialog.length.isEnabled()
     assert dialog.category.isEnabled()
-    assert dialog.findChild(QPushButton, "plate-floor") is not None
-    assert dialog.findChild(QPushButton, "plate-lane") is not None
-    lane = dialog.findChild(QPushButton, "plate-lane")
-    assert lane is not None and lane.isEnabled()
-    center = dialog.findChild(QPushButton, "plate-center")
-    assert center is not None and not center.isEnabled()
     dialog._dismissed = True
     dialog.close()
 
@@ -82,17 +78,18 @@ def test_a_new_parametric_part_saves_and_reopens(qtbot: QtBot, env: Env) -> None
     dialog.show()
     dialog.article.setText("EB-CLEAN")
     dialog.name.setText("Saubere Gerade")
-    dialog.length.setValue(220.0)
+    draw_straight(dialog.graphic.session, length=220.0, lanes=2)
     dialog.accept()
     assert dialog.saved is not None
     stored = planner.library.require(dialog.saved.id)
-    assert stored.spec.length_mm == 220.0
+    assert stored.spec.lane_count == 2
+    assert len(stored.spec.connectors) == 2
     again = PartDialog(env.runtime.translator, planner, stored)
     qtbot.addWidget(again)
     again.show()
-    assert again.length.value() == 220.0
-    assert again.length.isEnabled()
-    assert same_geometry(again._preview_spec() or stored.spec, stored.spec)
+    again.preview.repaint()
+    assert again.preview._spec is not None
+    assert same_geometry(again.preview._spec, stored.spec)
     again._dismissed = True
     again.close()
 
@@ -127,12 +124,9 @@ def test_a_complex_part_cannot_be_simplified_by_the_form(qtbot: QtBot, env: Env)
         dialog = PartDialog(env.runtime.translator, planner, record)
         qtbot.addWidget(dialog)
         dialog.show()
-        assert not dialog.length.isEnabled()
-        assert dialog.notice.isVisible()
-        assert "nicht verändert" in dialog.notice.text()
-        dialog.tabs.setCurrentIndex(1)
-        assert "nicht punktweise" in dialog.plate.issue.text()
-        dialog.length.setValue(120.0)
+        dialog.preview.repaint()
+        assert dialog.graphic.editable
+        assert dialog.graphic.session.elements
         dialog.description.setPlainText("Nur Text")
         dialog.accept()
         kept = planner.library.require(record.id)
