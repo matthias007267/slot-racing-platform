@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
@@ -12,6 +14,7 @@ from slot_racing.core.clock import NANOS_PER_SECOND, format_duration
 from slot_racing.core.domain import RaceStatus
 from slot_racing.modules.races.hud import (
     RANKING_COLUMN_IDS,
+    assign_column_share,
     factory_ranking_widths,
     ranking_column_pixels,
 )
@@ -33,6 +36,8 @@ from slot_racing.modules.races.ui.hud_widgets import (
     RaceHeaderWidget,
     RaceMessageWidget,
     RaceStatusWidget,
+    ranking_paint_font,
+    ranking_shown_text,
 )
 from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
@@ -209,44 +214,92 @@ def _fill_narrow_ranking(ranking: LiveRankingWidget) -> list[str]:
     return names
 
 
-def _assert_names_and_lap_counts_fit(ranking: LiveRankingWidget, names: list[str]) -> None:
-    """Names and lap counts stay whole. The panel keeps the narrow rectangle."""
-    assert ranking.width() == 226
-    assert ranking.height() == 155
+def _visible_ids(ranking: LiveRankingWidget) -> tuple[str, ...]:
     table = ranking.table
-    assert table.horizontalScrollBar().maximum() == 0
-    bold = table.font()
-    bold.setBold(True)
-    name_need = max(QFontMetrics(bold).horizontalAdvance(name) for name in names) + 16
-    assert table.columnWidth(COLUMN_DRIVER) >= name_need - 2
-    assert not table.isColumnHidden(COLUMN_LAPS)
-    lap_need = 0
-    for row in range(table.rowCount()):
-        item = table.item(row, COLUMN_LAPS)
-        assert item is not None
-        lap_need = max(lap_need, table.fontMetrics().horizontalAdvance(item.text()))
-    assert table.columnWidth(COLUMN_LAPS) >= lap_need + 16
-    visible = tuple(
+    return tuple(
         RANKING_COLUMN_IDS[column]
         for column in range(table.columnCount())
         if not table.isColumnHidden(column)
     )
-    expected = dict(
-        ranking_column_pixels(visible, factory_ranking_widths(), table.viewport().width())
+
+
+def _assert_columns_follow(ranking: LiveRankingWidget, widths: tuple[tuple[str, int], ...]) -> None:
+    """Saved shares, not the measured text, decide every visible column."""
+    table = ranking.table
+    assert table.horizontalScrollBar().maximum() == 0
+    visible = _visible_ids(ranking)
+    expected = dict(ranking_column_pixels(visible, widths, table.viewport().width()))
+    header = table.horizontalHeader()
+    edges: list[tuple[int, int]] = []
+    for column, column_id in enumerate(RANKING_COLUMN_IDS):
+        if table.isColumnHidden(column):
+            continue
+        assert table.columnWidth(column) == pytest.approx(expected[column_id], abs=2)
+        left = header.sectionViewportPosition(column)
+        edges.append((left, left + header.sectionSize(column)))
+    edges.sort()
+    for (_start, end), (following, _following_end) in itertools.pairwise(edges):
+        assert following >= end - 1
+
+
+def _shown_cell(ranking: LiveRankingWidget, row: int, column: int) -> str:
+    table = ranking.table
+    item = table.item(row, column)
+    assert item is not None
+    font = ranking_paint_font(
+        item.font(),
+        column,
+        leader=bool(item.data(LEADER_ROLE)),
+        row_height=table.rowHeight(row),
     )
+    return ranking_shown_text(item.text(), font, table.columnWidth(column))
+
+
+def _assert_narrow_ranking_stays_readable(ranking: LiveRankingWidget, names: list[str]) -> None:
+    """The panel keeps its size. Long names ellipsize; lap digits stay whole."""
+    assert ranking.width() == 226
+    assert ranking.height() == 155
+    table = ranking.table
+    _assert_columns_follow(ranking, factory_ranking_widths())
+    assert not table.isColumnHidden(COLUMN_LAPS)
     assert not table.isColumnHidden(COLUMN_BEST)
-    assert table.columnWidth(COLUMN_BEST) == pytest.approx(expected["best_lap"], abs=2)
+    clipped = False
+    for row, name in enumerate(names):
+        item = table.item(row, COLUMN_DRIVER)
+        assert item is not None and item.text() == name
+        shown = _shown_cell(ranking, row, COLUMN_DRIVER)
+        metrics = QFontMetrics(
+            ranking_paint_font(
+                item.font(),
+                COLUMN_DRIVER,
+                leader=bool(item.data(LEADER_ROLE)),
+                row_height=table.rowHeight(row),
+            )
+        )
+        assert metrics.horizontalAdvance(shown) <= table.columnWidth(COLUMN_DRIVER)
+        if shown != name:
+            clipped = True
+            assert item.toolTip() == name
+        else:
+            assert item.toolTip() == ""
+        lap = table.item(row, COLUMN_LAPS)
+        assert lap is not None and lap.text() != ""
+        assert _shown_cell(ranking, row, COLUMN_LAPS) == lap.text()
+        assert lap.toolTip() == ""
+    assert clipped
 
 
 def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
     ranking = LiveRankingWidget(_translator())
     qtbot.addWidget(ranking)
     names = _fill_narrow_ranking(ranking)
+    font_size = ranking.table.font().pixelSize()
     ranking.show()
     ranking.resize(226, 155)
     QApplication.processEvents()
     ranking.present()
-    _assert_names_and_lap_counts_fit(ranking, names)
+    assert ranking.table.font().pixelSize() == font_size
+    _assert_narrow_ranking_stays_readable(ranking, names)
 
     wide = LiveRankingWidget(_translator())
     qtbot.addWidget(wide)
@@ -258,7 +311,64 @@ def test_narrow_ranking_keeps_names_and_the_lap_count(qtbot: QtBot) -> None:
     wide.resize(226, 155)
     QApplication.processEvents()
     wide.present()
-    _assert_names_and_lap_counts_fit(wide, wide_names)
+    assert wide.table.font().pixelSize() == 18
+    _assert_narrow_ranking_stays_readable(wide, wide_names)
+
+
+def test_custom_ranking_widths_survive_content_resize_and_reload(qtbot: QtBot) -> None:
+    shown = ("position", "driver", "laps", "best_lap")
+    wide_driver = assign_column_share(factory_ranking_widths(), shown, "driver", 60)
+    ranking = LiveRankingWidget(_translator())
+    qtbot.addWidget(ranking)
+    names = _fill_narrow_ranking(ranking)
+    font_size = ranking.table.font().pixelSize()
+    ranking.set_column_widths(wide_driver)
+    ranking.show()
+    ranking.resize(226, 155)
+    QApplication.processEvents()
+    ranking.present()
+    assert ranking.table.font().pixelSize() == font_size
+    _assert_columns_follow(ranking, wide_driver)
+    wide_width = ranking.table.columnWidth(COLUMN_DRIVER)
+    assert wide_width > ranking.table.columnWidth(COLUMN_LAPS)
+
+    narrow_driver = assign_column_share(factory_ranking_widths(), shown, "driver", 8)
+    ranking.set_column_widths(narrow_driver)
+    QApplication.processEvents()
+    ranking.present()
+    assert ranking.table.font().pixelSize() == font_size
+    _assert_columns_follow(ranking, narrow_driver)
+    assert ranking.table.columnWidth(COLUMN_DRIVER) < wide_width
+    driver = ranking.table.item(0, COLUMN_DRIVER)
+    assert driver is not None and driver.text() == names[0]
+    assert driver.toolTip() == names[0]
+
+    ranking.resize(1100, 320)
+    QApplication.processEvents()
+    ranking.present()
+    _assert_columns_follow(ranking, narrow_driver)
+    total = RANKING_COLUMN_IDS.index("total_time")
+    assert not ranking.table.isColumnHidden(total)
+    total_item = ranking.table.item(0, total)
+    assert total_item is not None
+    total_item.setText("Gesamtzeit 123:45:67.890 und noch mehr Text")
+    ranking.present()
+    _assert_columns_follow(ranking, narrow_driver)
+    if _shown_cell(ranking, 0, total) != total_item.text():
+        assert total_item.toolTip() == total_item.text()
+
+    reloaded = LiveRankingWidget(_translator())
+    qtbot.addWidget(reloaded)
+    _fill_narrow_ranking(reloaded)
+    reloaded.set_column_widths(narrow_driver)
+    reloaded.show()
+    reloaded.resize(1100, 320)
+    QApplication.processEvents()
+    reloaded.present()
+    _assert_columns_follow(reloaded, narrow_driver)
+    assert reloaded.table.columnWidth(COLUMN_DRIVER) == pytest.approx(
+        ranking.table.columnWidth(COLUMN_DRIVER), abs=2
+    )
 
 
 def test_short_highlight_keeps_the_driver_name(qtbot: QtBot) -> None:

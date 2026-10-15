@@ -604,8 +604,9 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     dialog.article.setText("EB-DLG")
     dialog.scale.setCurrentIndex(dialog.scale.findData("1:43"))
     dialog.name.setText("Dialoggerade")
-    dialog.length.setValue(180)
-    dialog.lanes.setValue(4)
+    from tests.modules.test_graphic_session import draw_straight
+
+    draw_straight(dialog.graphic.session, length=180, lanes=4)
     dialog.accept()
     assert dialog.result() == dialog.DialogCode.Accepted
     created = dialog.created
@@ -644,7 +645,7 @@ def test_the_library_dialog_adds_a_part_that_the_planner_can_place(qtbot: QtBot,
     qtbot.addWidget(carrera)
     carrera.article.setText("20577")
     carrera.name.setText("Carrera aus Dialog")
-    carrera.length.setValue(200)
+    draw_straight(carrera.graphic.session, length=200, lanes=2)
     carrera.accept()
     assert carrera.created is not None
     assert carrera.created.scale == "1:24"

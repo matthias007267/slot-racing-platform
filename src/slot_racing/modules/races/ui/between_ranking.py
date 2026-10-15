@@ -36,6 +36,7 @@ from slot_racing.modules.races.hud import (
 )
 from slot_racing.modules.races.runner import RaceSnapshot
 from slot_racing.modules.races.ui.formatting import ranking_cells
+from slot_racing.modules.races.ui.hud_widgets import ranking_shown_text
 from slot_racing.modules.races.ui.race_briefing import BriefingBoard
 from slot_racing.uikit import fill_table
 from slot_racing.uikit.theme import set_role
@@ -141,6 +142,18 @@ class ConfiguredRanking(QFrame):
         for index, column_id in enumerate(self._column_ids):
             header.setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(index, max(pixels[column_id], 1))
+        self._sync_tooltips()
+
+    def _sync_tooltips(self) -> None:
+        """Clipped cells keep the full value as a tooltip. Shares stay as saved."""
+        font = self.table.font()
+        for row in range(self.table.rowCount()):
+            for column in range(len(self._column_ids)):
+                item = self.table.item(row, column)
+                if item is None:
+                    continue
+                shown = ranking_shown_text(item.text(), font, self.table.columnWidth(column))
+                item.setToolTip(item.text() if shown != item.text() else "")
 
 
 class BetweenSurface(QWidget):

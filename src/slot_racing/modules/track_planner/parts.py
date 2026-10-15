@@ -123,6 +123,7 @@ PATH_SLOT = "slot"
 PATH_CENTER = "center"
 PATH_CONTOUR = "contour"
 PATH_BORDER = "border"
+PATH_START = "start"
 BORDER_SLOTS = frozenset({"left", "right", "inner", "outer"})
 
 
@@ -1268,7 +1269,7 @@ def decode_geometry(
         slot = entry.get("slot")
         lane_no = lane if isinstance(lane, int) and not isinstance(lane, bool) else None
         slot_name = slot if isinstance(slot, str) else None
-        if kind in {PATH_SLOT, PATH_CENTER}:
+        if kind in {PATH_SLOT, PATH_CENTER, PATH_START}:
             slots.append(SlotPath(tuple(spans), str(kind), lane_no, slot_name))
         elif kind == PATH_CONTOUR:
             contours.append(SlotPath(tuple(spans), PATH_CONTOUR))

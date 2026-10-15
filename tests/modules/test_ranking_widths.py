@@ -28,9 +28,11 @@ from slot_racing.modules.races.hud import (
     visible_ranking_columns,
 )
 from slot_racing.modules.races.hud_scene import HudColumn, HudViewport, build_hud_scene
+from slot_racing.modules.races.runner import LiveRow
 from slot_racing.modules.races.types import HeatBriefing
 from slot_racing.modules.races.ui.between_ranking import ConfiguredRanking
 from slot_racing.modules.races.ui.hud_editor import HudEditor, PlacementHandle
+from slot_racing.modules.races.ui.hud_widgets import ranking_shown_text
 from tests.database import migrated_database
 from tests.modules.test_hud_editor import _mouse, _shown, _translator
 from tests.modules.test_hud_scene import _presentation, _snapshot
@@ -248,6 +250,38 @@ def test_saved_widths_reach_the_preview_the_race_table_and_the_scene(qtbot: QtBo
     _assert_scene_shares(live_scene.ranking.columns, visible, kept.ranking_widths)
     assert live_scene.ranking.fit_columns is False
     assert between_scene.ranking.fit_columns is False
+
+
+def test_a_narrow_between_ranking_keeps_shares_and_tips_the_full_name(qtbot: QtBot) -> None:
+    name = "Maximilian Mustermann"
+    frame = replace(
+        BetweenRanking(),
+        widths=assign_column_share(
+            factory_ranking_widths(),
+            visible_ranking_columns(BetweenRanking()),
+            "driver",
+            12,
+        ),
+    )
+    ranking = ConfiguredRanking(_translator())
+    qtbot.addWidget(ranking)
+    ranking.resize(280, 160)
+    ranking.show()
+    ranking.show_standings(
+        _snapshot(
+            RaceStatus.RUNNING,
+            rows=(LiveRow(1, 1, name, "Porsche", 7, 1, 3, None, None, None, False, ()),),
+        ),
+        frame,
+    )
+    QApplication.processEvents()
+    column_ids = visible_ranking_columns(frame)
+    _assert_table_follows(ranking.table, column_ids, frame.widths)
+    index = column_ids.index("driver")
+    item = ranking.table.item(0, index)
+    assert item is not None and item.text() == name
+    assert ranking_shown_text(name, ranking.table.font(), ranking.table.columnWidth(index)) != name
+    assert item.toolTip() == name
 
 
 def test_dragging_the_ranking_body_still_moves_the_element(qtbot: QtBot) -> None:

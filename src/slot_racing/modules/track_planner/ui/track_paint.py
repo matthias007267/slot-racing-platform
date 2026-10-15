@@ -36,11 +36,13 @@ from slot_racing.modules.track_planner.appearance import (
 )
 from slot_racing.modules.track_planner.figure import RoadArc, TrackFigure, track_figure
 from slot_racing.modules.track_planner.parts import (
+    PATH_START,
     SPAN_ARC,
     SPAN_BEZIER,
     PartSpec,
     SlotPath,
     SlotSpan,
+    as_segment,
 )
 from slot_racing.uikit.theme import COLORS
 
@@ -82,6 +84,27 @@ def paint_part(
         part_width=spec.width_mm or 0.0,
         shortage=shortage and not accessory,
     )
+    _paint_start_paths(painter, spec)
+
+
+def _paint_start_paths(painter: QPainter, spec: PartSpec) -> None:
+    """The optional start/finish stroke stored on the part, not the plan marker band."""
+    pen = QPen(QColor(START_DARK))
+    pen.setCosmetic(True)
+    pen.setWidthF(2.4)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for path in spec.slot_paths:
+        if path.kind != PATH_START:
+            continue
+        for span in path.spans:
+            segment = as_segment(span)
+            steps = 16
+            previous = segment.point_at(0.0)
+            for index in range(1, steps + 1):
+                point = segment.point_at(index / steps)
+                painter.drawLine(QPointF(*previous), QPointF(*point))
+                previous = point
 
 
 def paint_figure(
