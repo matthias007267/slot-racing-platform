@@ -40,11 +40,7 @@ from slot_racing.modules.races.hud import (
     normalize_ranking_widths,
     ranking_column_pixels,
 )
-from slot_racing.modules.races.hud_scene import (
-    RANKING_BEST_RESERVE,
-    RANKING_CELL_PAD,
-    ranking_width_hidden,
-)
+from slot_racing.modules.races.hud_scene import ranking_width_hidden
 from slot_racing.modules.races.ui.formatting import EMPTY_DISPLAY, format_lap_progress
 from slot_racing.uikit.theme import COLORS, SPACE, set_role, set_tone
 from slot_racing.uikit.widgets import StatusLabel, make_table
@@ -55,7 +51,6 @@ _PLACEHOLDER_MAX_FONT = 22
 _MIN_TEXT_FONT = 6
 _STATUS_CAPTION_HEIGHT = 56
 _MESSAGE_CAPTION_HEIGHT = 64
-_CELL_PAD = RANKING_CELL_PAD
 _TEXT_INSET = 2
 LEADER_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -64,7 +59,6 @@ COLUMN_DRIVER = 1
 COLUMN_VEHICLE = 2
 COLUMN_LAPS = 5
 COLUMN_BEST = 8
-_PRIMARY_COLUMNS = frozenset({COLUMN_POSITION, COLUMN_DRIVER, COLUMN_LAPS})
 
 
 def _wrap_rows(
@@ -105,6 +99,40 @@ def _metrics_at(font: QFont, size: int | None) -> QFontMetrics:
     sized = QFont(font)
     sized.setPixelSize(size)
     return QFontMetrics(sized)
+
+
+def ranking_cell_insets(column_width: int) -> tuple[int, int]:
+    """Horizontal padding inside a ranking cell.
+
+    A wide column keeps the usual inset. A narrow one gives the digit the room
+    the column itself still has, without changing the saved share.
+    """
+    if column_width >= 48:
+        return (8, 6)
+    return (2, 2)
+
+
+def ranking_paint_font(base: QFont, column: int, *, leader: bool, row_height: int) -> QFont:
+    """The face the ranking cell paints. The table font size stays as given."""
+    font = QFont(base)
+    if column == COLUMN_POSITION or (leader and column == COLUMN_DRIVER):
+        font.setBold(True)
+    if column == COLUMN_POSITION:
+        fitted = font.pixelSize()
+        if fitted <= 0:
+            fitted = QFontInfo(font).pixelSize()
+        if fitted >= 13:
+            font.setPixelSize(max(fitted, min(22, row_height - 10)))
+        elif fitted > 0:
+            font.setPixelSize(fitted)
+    return font
+
+
+def ranking_shown_text(text: str, font: QFont, column_width: int) -> str:
+    """The cell text after the same ellipsis the painter uses."""
+    left, right = ranking_cell_insets(column_width)
+    inner = max(column_width - left - right, 0)
+    return QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideRight, inner)
 
 
 class HudWidget(QFrame):
@@ -380,7 +408,6 @@ class LiveRankingWidget(HudWidget):
         header.setStretchLastSection(False)
         # The style's default minimum would force a section wider than the lap text.
         header.setMinimumSectionSize(1)
-        self._base_font: QFont | None = None
         header.setTextElideMode(Qt.TextElideMode.ElideRight)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setStyleSheet("QHeaderView::section { padding: 4px 6px; }")
@@ -397,8 +424,10 @@ class LiveRankingWidget(HudWidget):
         self.body.addWidget(self.table, 1)
 
     def set_column_widths(self, widths: tuple[tuple[str, int], ...]) -> None:
-        """Relative weights. ``present`` applies them and does not measure the text instead."""
+        """Relative weights. They are applied as saved and are not refit to the text."""
         self._widths = normalize_ranking_widths(widths)
+        if self.isVisible():
+            self.present()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -406,79 +435,25 @@ class LiveRankingWidget(HudWidget):
         self.present()
 
     def present(self) -> None:
-        """Fit columns and row height to this panel. The row order is left untouched."""
+        """Apply the saved column shares and row height. The row order stays."""
         if self._fitting:
             return
         self._fitting = True
         try:
             self._fit_rows()
             self._reserve_vertical_bar()
-            self._fit_table_font()
             self._apply_columns()
             mark_leader(self.table)
+            self._sync_tooltips()
         finally:
             self._fitting = False
 
-    def _fit_table_font(self) -> None:
-        """Shrink the table font until place, name and lap count share the viewport.
-
-        The check uses the table's own font metrics after ``setFont``. A detached
-        ``QFontMetrics`` is narrower than that on Windows, so it used to keep a font
-        whose lap column could no longer hold the digits. The first font seen stays
-        the baseline, so a wider panel can grow the type back up.
-        """
-        if self._base_font is None:
-            self._base_font = QFont(self.table.font())
-        if self._column_budget() < 40:
-            return
-        # Prefer a size that also leaves room for the best-lap text. The saved
-        # column shares still decide the widths; this only chooses the font.
-        if not self._apply_fitting_font(keep_best=True):
-            self._apply_fitting_font(keep_best=False)
-
-    def _apply_fitting_font(self, *, keep_best: bool) -> bool:
-        base = self._base_font
-        if base is None:
-            return False
-        sizes: list[int | None] = [None]
-        sizes.extend(range(_pixel_size(base) - 1, _MIN_TEXT_FONT - 1, -1))
-        for size in sizes:
-            font = QFont(base)
-            if size is not None:
-                font.setPixelSize(size)
-            self.table.setFont(font)
-            self._reserve_vertical_bar()
-            extra = RANKING_BEST_RESERVE if keep_best else 0
-            if self._primary_width() + extra <= self._column_budget():
-                return True
-        return False
-
-    def _primary_width(self) -> int:
-        return sum(self._cell_need(column) for column in _PRIMARY_COLUMNS)
-
-    def _cell_need(self, column: int) -> int:
-        """Text advance plus the padding the narrow-panel checks require."""
-        if column in (COLUMN_POSITION, COLUMN_DRIVER):
-            font = QFont(self.table.font())
-            font.setBold(True)
-            metrics = QFontMetrics(font)
-        else:
-            metrics = self.table.fontMetrics()
-        widest = 0
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, column)
-            if item is not None and item.text():
-                widest = max(widest, metrics.horizontalAdvance(item.text()))
-        if widest <= 0:
-            return _CELL_PAD
-        return widest + _CELL_PAD
-
-    def _column_budget(self) -> int:
+    def _viewport_width(self) -> int:
         self.table.updateGeometries()
         width = self.table.viewport().width()
         if width <= 0:
             width = self.table.width() or self.width()
-        return max(width - 2, 1)
+        return max(width, 1)
 
     def _reserve_vertical_bar(self) -> None:
         """Keep the vertical bar's width out of the column budget before columns are set."""
@@ -498,7 +473,7 @@ class LiveRankingWidget(HudWidget):
 
     def _apply_columns(self) -> None:
         """Hide columns with the shared width rule, then apply the saved shares."""
-        width = self._column_budget()
+        width = self._viewport_width()
         hidden = ranking_width_hidden(width)
         if hidden is None:
             return
@@ -509,6 +484,16 @@ class LiveRankingWidget(HudWidget):
             for column in range(self.table.columnCount())
             if not self.table.isColumnHidden(column)
         ]
+        self._set_share_widths(visible, width)
+        self.table.updateGeometries()
+        overflow = self.table.horizontalScrollBar().maximum()
+        if overflow > 0 and visible:
+            # The bar reports leftover pixels. Recompute the same shares on the
+            # usable width instead of taking the space from the widest column.
+            self._set_share_widths(visible, max(width - overflow, len(visible)))
+            self.table.updateGeometries()
+
+    def _set_share_widths(self, visible: list[int], width: int) -> None:
         ids = tuple(RANKING_COLUMN_IDS[column] for column in visible)
         pixels = dict(ranking_column_pixels(ids, self._widths, width))
         header = self.table.horizontalHeader()
@@ -517,18 +502,22 @@ class LiveRankingWidget(HudWidget):
         for column in visible:
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, max(pixels[RANKING_COLUMN_IDS[column]], 1))
-        self.table.updateGeometries()
-        overflow = self.table.horizontalScrollBar().maximum()
-        guard = 0
-        while overflow > 0 and guard < 8 and visible:
-            guard += 1
-            donor = max(visible, key=self.table.columnWidth)
-            current = self.table.columnWidth(donor)
-            if current <= 1:
-                break
-            self.table.setColumnWidth(donor, current - min(current - 1, overflow))
-            self.table.updateGeometries()
-            overflow = self.table.horizontalScrollBar().maximum()
+
+    def _sync_tooltips(self) -> None:
+        """A clipped cell keeps its full text on the item and offers it as a tooltip."""
+        for row in range(self.table.rowCount()):
+            for column in range(self.table.columnCount()):
+                item = self.table.item(row, column)
+                if item is None or self.table.isColumnHidden(column):
+                    continue
+                font = ranking_paint_font(
+                    item.font(),
+                    column,
+                    leader=bool(item.data(LEADER_ROLE)),
+                    row_height=self.table.rowHeight(row),
+                )
+                shown = ranking_shown_text(item.text(), font, self.table.columnWidth(column))
+                item.setToolTip(item.text() if shown != item.text() else "")
 
     def _fit_rows(self) -> None:
         count = self.table.rowCount()
@@ -568,28 +557,15 @@ class RankingDelegate(QStyledItemDelegate):
         painter.setPen(QColor(COLORS.border))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
         text = index.data(Qt.ItemDataRole.DisplayRole)
-        font = QFont(option.font)
         column = index.column()
-        if column == COLUMN_POSITION or (leader and column == COLUMN_DRIVER):
-            font.setBold(True)
-        if column == COLUMN_POSITION:
-            fitted = option.font.pixelSize()
-            if fitted <= 0:
-                fitted = QFontInfo(option.font).pixelSize()
-            # A narrow panel already shrank the table font. Do not paint the place
-            # larger than that font, or the digit is clipped by the column.
-            if fitted >= 13:
-                font.setPixelSize(max(fitted, min(22, rect.height() - 10)))
-            elif fitted > 0:
-                font.setPixelSize(fitted)
+        font = ranking_paint_font(option.font, column, leader=leader, row_height=rect.height())
         color = COLORS.text_secondary if column == COLUMN_VEHICLE else COLORS.text
         painter.setFont(font)
         painter.setPen(QColor(color))
         shown = "" if text is None else str(text)
-        inner = rect.adjusted(8, 0, -6, 0)
-        shown = QFontMetrics(font).elidedText(
-            shown, Qt.TextElideMode.ElideRight, max(inner.width(), 0)
-        )
+        left, right = ranking_cell_insets(rect.width())
+        inner = rect.adjusted(left, 0, -right, 0)
+        shown = ranking_shown_text(shown, font, rect.width())
         painter.drawText(inner, option.displayAlignment, shown)
         painter.restore()
 
@@ -922,8 +898,7 @@ def mark_leader(table: QTableWidget) -> None:
             if item is None:
                 continue
             item.setData(LEADER_ROLE, leader)
-            # Start from the table font. An item font taken from the default would ignore
-            # the size chosen for a narrow panel and paint the name past the column.
+            # Start from the table font. The painter clips what does not fit the column.
             font = QFont(table.font())
             font.setBold(leader and column in (COLUMN_POSITION, COLUMN_DRIVER))
             item.setFont(font)

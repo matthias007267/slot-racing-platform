@@ -949,7 +949,9 @@ _HUD_HTML = """<!DOCTYPE html>
       for (column = 0; column < columns.length; column += 1) {
         var spec = columns[column];
         var td = ensure(tr, "cell-" + spec.column.id, "td");
-        setText(td, cells[spec.index] == null ? "" : String(cells[spec.index]));
+        var cellText = cells[spec.index] == null ? "" : String(cells[spec.index]);
+        setText(td, cellText);
+        td.title = cellText;
         td.style.color = roleColor(spec.column.color_role);
         var bold = spec.column.bold === "always" || (spec.column.bold === "leader" && row.leader);
         td.style.fontWeight = bold ? "700" : "400";
