@@ -43,7 +43,6 @@ def test_all_modules_are_discovered_and_hardware_modules_are_opt_in() -> None:
             "tracks",
             "races",
             "championships",
-            "timing",
             "statistics",
             "track_planner",
         ]
@@ -61,7 +60,8 @@ def test_config_override_enables_or_disables_modules() -> None:
         assert current["statistics"] is PluginState.REGISTERED
         ids = nav_ids(runtime)
         assert "statistics" not in ids
-        assert ids.index("camera_setup") == ids.index("timing") + 1
+        assert "timing" not in ids
+        assert ids.index("camera_setup") == ids.index("championships") + 1
     finally:
         runtime.shutdown()
 

@@ -125,9 +125,9 @@ class SensorTimingPlugin(Plugin):
 
         context.add_navigation(
             NavigationItem(
-                id="sensor_timing",
+                id="timing",
                 title_key="nav.sensor_timing",
-                order=56,
+                order=50,
                 page_factory=sensor_page,
             )
         )

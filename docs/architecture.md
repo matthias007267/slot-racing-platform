@@ -51,7 +51,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `drivers_vehicles` | Models, `DriverService`, `VehicleService` (implement the catalogs), driver and vehicle pages |
 | `tracks` | Models (`Track`, `TrackLayout`), `TrackService` (implements `TrackCatalog`), track page and the **timing configuration** (editor, wizard, test mode). Optionally uses `timing` |
 | `races` | Models, **race engine**, `RaceService`, `RaceRecorder`, `RaceController`/`RaceRunner`, `RaceOverview` (`RaceCatalog`), race pages (list, 6-step flow, live HUD, results) and the saved race-HUD layout. Requires `drivers_vehicles` and `tracks`, optionally `timing` |
-| `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider) |
+| `timing` | Models, **`TimingSetupManager`** (stores a track's timing setup), **`SimulationTimingProvider`** and its `TimingSourceFactory` (provider id `simulation`, the reference provider). No sidebar page |
 | `statistics` | Placeholder plugin with navigation entry |
 | `track_planner` | Part library, plans, stock and packages. Lines, arcs and cubic Bézier curves share one path model (ADR 0017). A parametric editor creates and edits simple straights, curves and borders without dropping geometry it cannot edit (ADR 0018). A second tab draws one floor plate and up to four open lanes of lines and arcs, stored as a draft the planner cannot place (ADR 0019). Bézier curves, joints and complex parts stay locked there. A geometry edit of a used part forks a revision so saved plans keep their shape (ADR 0016) |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Zeitmessung** page that edits that document on the live picture. Zones are not stored per track |
@@ -462,9 +462,10 @@ data can be deactivated but not deleted.
   by plugins. The races module adds **Renn-HUD** there. The shell does not import the module:
   the section factory is registered at activation and returns a widget.
 - Navigation order used by modules: Dashboard (shell), Fahrer 10, Fahrzeuge 20, Strecken 30,
-  Rennen 40, Sensor-Zeitmessung 50 (timing placeholder), Kamera-Zeitmessung 55 (only when the
-  camera plugin is enabled), Sensor-Zeitmessung 56 (only when the sensor plugin is enabled),
-  Statistiken 60, Streckenplaner 70, Einstellungen (shell).
+  Rennen 40, Meisterschaften 45, Sensor-Zeitmessung 50 (only when the sensor plugin is enabled;
+  the stopwatch icon is the navigation id `timing`), Kamera-Zeitmessung 55 (only when the camera
+  plugin is enabled), Statistiken 60, Streckenplaner 70, Einstellungen (shell). The `timing`
+  plugin registers the simulation provider and the timing layout and has no page of its own.
 
 ## Race HUD
 
