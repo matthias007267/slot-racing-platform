@@ -130,6 +130,28 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.mode.unlimited": "Unbegrenzt",
         "planner.mode.collection": "Eigene Sammlung",
         "planner.stock.manage": "Meine Bauteilsammlung",
+        "planner.stock.search": "Bezeichnung, Artikelnummer oder Kategorie",
+        "planner.stock.hide_sets": "Sets/Packungen ausblenden",
+        "planner.stock.reset": "Bibliothek zurücksetzen",
+        "planner.stock.reset.title": "Bibliothek zurücksetzen?",
+        "planner.stock.reset.intro": "Der mitgelieferte Katalog wird so abgeglichen:",
+        "planner.stock.reset.added": "Ergänzt ({count})",
+        "planner.stock.reset.updated": "Aktualisiert ({count})",
+        "planner.stock.reset.removed": "Entfernt ({count})",
+        "planner.stock.reset.retired": "Ausgemustert ({count})",
+        "planner.stock.reset.keep": (
+            "Eigenbauten bleiben. Bestände und Zuordnungen weiterhin vorhandener "
+            "Bauteile bleiben an ihrer Kennung. Ein ausgemusterter Eintrag bleibt "
+            "gespeichert, solange eine Sammlung, eine Packung oder eine Strecke "
+            "ihn noch verwendet, und verschwindet aus der Auswahl. "
+            "Rennen und andere unabhängige Daten bleiben."
+        ),
+        "planner.stock.reset.none": (
+            "Die Bibliothek entspricht bereits dem mitgelieferten Katalog. Es ändert sich nichts."
+        ),
+        "planner.stock.reset.accept": "Zurücksetzen",
+        "planner.stock.reset.cancel": "Abbrechen",
+        "planner.stock.reset.done": "Die Bibliothek wurde auf den mitgelieferten Katalog gesetzt.",
         "planner.stock.remaining": "Noch {count}",
         "planner.stock.short": "Fehlt {count}",
         "planner.stock.show_all": "Alle Bauteile anzeigen",
