@@ -66,6 +66,15 @@ class TrackPartDefinition(Base):
     catalog_key: Mapped[str | None] = mapped_column(String(200))
     manufacturer: Mapped[str] = mapped_column(String(80), default="", server_default="")
     description: Mapped[str | None] = mapped_column(String(500))
+    # Source UUID. Empty for a part created in this application.
+    source_id: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    # Internal piece key. Empty when this article has a single body.
+    piece_key: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    # Comma-separated system names. evolution, digital, or both.
+    systems: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    selectable: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    # Kept for a saved plan. Hidden from the active library and from new plans.
+    legacy: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class TrackPartConnector(Base):
@@ -83,6 +92,14 @@ class TrackPartConnector(Base):
     kind: Mapped[str] = mapped_column(String(16))
     lanes: Mapped[list[Any]] = mapped_column(JSON)
     sort_order: Mapped[int] = mapped_column(default=0)
+    target_source_id: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    edge_types: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    exclusive: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    has_neighbor: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    neighbor_x: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    neighbor_y: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    neighbor_angle: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    lane_points: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class TrackPlanInstance(Base):
@@ -108,6 +125,36 @@ class TrackPlanInstance(Base):
     # The rail this instance rides on. Empty for every ordinary track piece.
     host_instance_id: Mapped[str | None] = mapped_column(String(40))
     attachment_slot: Mapped[str | None] = mapped_column(String(16))
+    host_dx: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    host_dy: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    host_da: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+
+class TrackPartTemplate(Base):
+    """A placement recipe. It is not a physical part and has no stock of its own."""
+
+    __tablename__ = "track_part_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    article_number: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(120))
+
+
+class TrackPartTemplateMember(Base):
+    __tablename__ = "track_part_template_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(
+        ForeignKey("track_part_templates.id", ondelete="CASCADE")
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("track_part_definitions.id", ondelete="RESTRICT")
+    )
+    x_mm: Mapped[float] = mapped_column(Float)
+    y_mm: Mapped[float] = mapped_column(Float)
+    angle_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class TrackPartStock(Base):
@@ -174,8 +221,17 @@ Index(
     "uq_track_part_definitions_identity",
     func.lower(func.trim(TrackPartDefinition.name)),
     func.trim(TrackPartDefinition.article_number),
+    func.trim(TrackPartDefinition.piece_key),
     unique=True,
-    sqlite_where=TrackPartDefinition.is_current.is_(True),
+    sqlite_where=(TrackPartDefinition.is_current.is_(True))
+    & (TrackPartDefinition.source_id == ""),
+)
+Index(
+    "uq_track_part_source_current",
+    TrackPartDefinition.source_id,
+    unique=True,
+    sqlite_where=(TrackPartDefinition.is_current.is_(True))
+    & (TrackPartDefinition.source_id != ""),
 )
 Index(
     "uq_track_part_lineage_revision",

@@ -23,6 +23,8 @@ from slot_racing.modules.track_planner.parts import (
     SlotSpan,
     arc_outline,
     curve_bends_left,
+    normalize_deg,
+    rotate_xy,
 )
 
 HOST_STRAIGHT = "straight"
@@ -139,6 +141,19 @@ def follow_hosts(instances: tuple[PartInstance, ...]) -> tuple[PartInstance, ...
 
 
 def _pose_of(instance: PartInstance, host: PartInstance) -> PartInstance:
+    if instance.attachment_slot is None:
+        moved_x, moved_y = rotate_xy(instance.host_dx, instance.host_dy, host.rotation_z_deg)
+        return replace(
+            instance,
+            x_mm=host.x_mm + moved_x,
+            y_mm=host.y_mm + moved_y,
+            z_mm=host.z_mm,
+            rotation_x_deg=host.rotation_x_deg,
+            rotation_y_deg=host.rotation_y_deg,
+            rotation_z_deg=normalize_deg(host.rotation_z_deg + instance.host_da),
+            start_straight=False,
+            group_id=None,
+        )
     return replace(
         instance,
         x_mm=host.x_mm,

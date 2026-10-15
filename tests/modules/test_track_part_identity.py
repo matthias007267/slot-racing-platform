@@ -76,15 +76,21 @@ def test_editing_keeps_the_part_and_rejects_another_identity(env: Env) -> None:
     )
     assert recategorised.id == created.id
     assert recategorised.spec.category == CURVE
+    shared = planner.update_part(
+        created.id, replace(recategorised.spec, name="Eigen", article_number="20509")
+    )
+    assert shared.id == created.id
+    assert shared.spec.article_number == "20509"
+    planner.add_part(_named(name="Standardgerade", article="EB-KEEP", scale="1:24"))
     with pytest.raises(ValidationError) as clash:
         planner.update_part(
             created.id,
-            replace(recategorised.spec, name="Standardgerade", article_number="20020601"),
+            replace(shared.spec, name="Standardgerade", article_number="EB-KEEP"),
         )
     assert clash.value.key == "error.planner.part_exists"
     kept = planner.library.require(created.id).spec
     assert kept.name == "Eigen"
-    assert kept.article_number == "EB-9"
+    assert kept.article_number == "20509"
     assert kept.scale == "1:43"
 
 
@@ -223,7 +229,13 @@ def test_old_rows_merge_on_identity_and_evolution_scale_becomes_one_to_twenty_fo
             if identity_key(record.spec.name, record.spec.article_number)
             == ("standardgerade", "20020601")
         ]
-        assert len(again) == 1
+        assert again == []
+        visible = [
+            record
+            for record in planner.list_parts()
+            if record.spec.article_number == "20509" and not record.spec.piece_key
+        ]
+        assert len(visible) == 1
     finally:
         runtime.shutdown()
 

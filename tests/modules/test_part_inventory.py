@@ -408,20 +408,20 @@ def test_undo_redo_copy_and_extend_follow_the_stock(qtbot: QtBot, env: Env) -> N
     page = _open(qtbot, env, "Aenderungen")
     page.announce_stock_problem = lambda: None
     planner = _planner(env)
-    straight = _part(planner, STRAIGHT_ARTICLE)
+    straight = _part(planner, "20509")
     planner.set_stock(straight, 1)
     _reload(page)
     page.mode_collection.click()
-    first = _place(page, STRAIGHT_ARTICLE, x=0)
+    first = _place(page, "20509", x=0)
     with pytest.raises(AssertionError):
-        _library_row(page, STRAIGHT_ARTICLE)
+        _library_row(page, "20509")
     page.undo()
     assert page.plan().instances == ()
-    assert _remaining(page, STRAIGHT_ARTICLE) == "Noch 1"
+    assert _remaining(page, "20509") == "Noch 1"
     page.redo()
     assert page.plan().instances[0].id == first.id
     with pytest.raises(AssertionError):
-        _library_row(page, STRAIGHT_ARTICLE)
+        _library_row(page, "20509")
     _select_instance(page, first.id)
     page.copy_selection()
     page.paste_selection()
@@ -569,10 +569,9 @@ def _planner(env: Env) -> TrackPlannerService:
 
 
 def _part(planner: TrackPlannerService, article: str) -> int:
-    for record in planner.list_parts():
-        if record.spec.article_number == article:
-            return record.id
-    raise AssertionError(article)
+    from tests.modules.catalog_fixtures import ensure_article
+
+    return ensure_article(planner, article)
 
 
 def _record_spec(planner: TrackPlannerService, part_id: int) -> PartSpec:

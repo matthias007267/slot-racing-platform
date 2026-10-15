@@ -65,6 +65,7 @@ from slot_racing.modules.track_planner.document import (
     next_origin,
     place_instance,
     place_start_finish,
+    place_template,
     remove_instances,
     remove_marker,
     remove_piece,
@@ -80,7 +81,9 @@ from slot_racing.modules.track_planner.document import (
 )
 from slot_racing.modules.track_planner.inventory import InventoryReport, analyze_inventory
 from slot_racing.modules.track_planner.lane_length import display_lane_lengths, format_length_m
+from slot_racing.modules.track_planner.library import TemplateView
 from slot_racing.modules.track_planner.parts import (
+    CATALOG_SCALE,
     DEFAULT_GRID_MM,
     DEFAULT_SNAP_MM,
     SCALES,
@@ -89,6 +92,7 @@ from slot_racing.modules.track_planner.parts import (
     PartSpec,
     can_dock,
     is_plate_draft,
+    is_start_finish_part,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
 from slot_racing.modules.track_planner.trace import trace
@@ -222,6 +226,7 @@ class PlannerPage(QWidget):
         self._filling = False
         self._parts: dict[int, PartSpec] = {}
         self._records: tuple[PartRecord, ...] = ()
+        self._templates: dict[int, TemplateView] = {}
         self._history: list[TrackPlan] = []
         self._future: list[TrackPlan] = []
         self._clipboard: tuple[PartInstance, ...] = ()
@@ -626,13 +631,19 @@ class PlannerPage(QWidget):
         self.status.show_info(self._translator.translate("planner.saved_as"))
 
     def jump_to_start(self) -> None:
-        start = next(
-            (instance for instance in self._plan.instances if instance.start_straight), None
-        )
+        start = self._placed_start()
         if start is None:
             self.status.show_info(self._translator.translate("planner.start_straight.missing"))
             return
         self.canvas.center_on_mm(start.x_mm, start.y_mm)
+
+    def _placed_start(self) -> PartInstance | None:
+        """The placed start straight. The old start marking is not consulted."""
+        for instance in self._plan.instances:
+            spec = self._parts.get(instance.part_id)
+            if spec is not None and is_start_finish_part(spec):
+                return instance
+        return None
 
     def discard(self) -> None:
         track_id = self._current_track()
@@ -957,6 +968,7 @@ class PlannerPage(QWidget):
         self._fit_toolbar()
         self._set_enabled(True)
         self._draw()
+        self._warn_missing()
 
     def _current_track(self) -> TrackId | None:
         value = self.track_combo.currentData()
@@ -1118,9 +1130,7 @@ class PlannerPage(QWidget):
         )
         self.direction_button.setText(self._translator.translate(key))
         self._fit_toolbar()
-        self.jump_button.setEnabled(
-            any(instance.start_straight for instance in self._plan.instances)
-        )
+        self.jump_button.setEnabled(self._placed_start() is not None)
         one = isinstance(selected, PartInstance) and len(self.canvas.selected_ids()) == 1
         self.compatible.setEnabled(one)
         self._apply_filters()
@@ -1183,9 +1193,7 @@ class PlannerPage(QWidget):
         ):
             widget.setEnabled(enabled)
         if enabled:
-            self.jump_button.setEnabled(
-                any(instance.start_straight for instance in self._plan.instances)
-            )
+            self.jump_button.setEnabled(self._placed_start() is not None)
 
     def _load_parts(self) -> None:
         trace("LIBRARY_VIEW_OPEN", result="started")
@@ -1198,6 +1206,7 @@ class PlannerPage(QWidget):
         )
         merged = {record.id: record for record in (*referenced, *records)}
         self._parts = {part_id: record.spec for part_id, record in merged.items()}
+        self._templates = {template.id: template for template in self._planner.list_templates()}
         self._stock = self._planner.stock_quantities()
         self._current_of = self._planner.current_part_ids()
         trace("LIBRARY_DATA_LOAD_COMPLETE", result="complete", part_count=len(records))
@@ -1222,25 +1231,60 @@ class PlannerPage(QWidget):
         part_id = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(part_id, bool) or not isinstance(part_id, int):
             return
+        origin_y = self._plan.instances[-1].y_mm if self._plan.instances else 0.0
+        if part_id < 0:
+            self._place_template(-part_id, self._next_origin_x(), origin_y)
+            return
         spec = self._parts.get(part_id)
         if spec is None:
             return
-        origin_x = 0.0
-        origin_y = 0.0
-        if self._plan.instances:
-            last = self._plan.instances[-1]
-            gap = (spec.length_mm or 200.0) + self._plan.snap_mm + 10
-            origin_x = last.x_mm + gap
-            origin_y = last.y_mm
         try:
             updated = place_instance(
-                self._plan, part_id, spec, origin_x, origin_y, 0.0, self._parts
+                self._plan,
+                part_id,
+                spec,
+                self._next_origin_x(spec),
+                origin_y,
+                0.0,
+                self._parts,
             )
         except Exception as error:
             self._report(error)
             return
         created = updated.instances[-1].id if updated.instances else None
         self._commit(updated, created)
+
+    def _next_origin_x(self, spec: PartSpec | None = None) -> float:
+        if not self._plan.instances:
+            return 0.0
+        last = self._plan.instances[-1]
+        length = 200.0 if spec is None or spec.length_mm is None else spec.length_mm
+        return last.x_mm + length + self._plan.snap_mm + 10
+
+    def _place_template(self, template_id: int, x_mm: float, y_mm: float) -> None:
+        template = self._templates.get(template_id)
+        if template is None or not template.members:
+            return
+        members = tuple(
+            (member.part_id, member.x_mm, member.y_mm, member.angle_deg)
+            for member in template.members
+        )
+        try:
+            updated = place_template(self._plan, members, x_mm, y_mm, 0.0)
+        except Exception as error:
+            self._report(error)
+            return
+        created = updated.instances[-1].id if updated.instances else None
+        self._commit(updated, created)
+
+    def _warn_missing(self) -> None:
+        missing = sum(
+            1 for instance in self._plan.instances if instance.part_id not in self._parts
+        )
+        if missing:
+            self.status.show_error(
+                self._translator.format("planner.missing_parts", count=missing)
+            )
 
     def _add_part(self) -> None:
         self._open_part_editor(None)
@@ -1301,6 +1345,9 @@ class PlannerPage(QWidget):
 
     def _dropped(self, part_id: int, x_mm: float, y_mm: float) -> None:
         if self._lane_count < 1:
+            return
+        if part_id < 0:
+            self._place_template(-part_id, x_mm, y_mm)
             return
         spec = self._parts.get(part_id)
         if spec is None:
@@ -1440,9 +1487,11 @@ class PlannerPage(QWidget):
         remaining = None
         if self._collection_mode():
             remaining = {record.id: self._remaining_text(report, record.id) for record in records}
+        compatible = self.compatible.isEnabled() and self.compatible.isChecked()
+        templates = self._visible_templates(scale, compatible=compatible)
         current = self.library.currentItem()
         current_id = None if current is None else current.data(Qt.ItemDataRole.UserRole)
-        self.library.set_records(records, remaining)
+        self.library.set_records(records, remaining, templates)
         if not self.library.count():
             return
         row = 0
@@ -1453,6 +1502,16 @@ class PlannerPage(QWidget):
                     row = index
                     break
         self.library.setCurrentRow(row)
+
+    def _visible_templates(
+        self, scale: object, *, compatible: bool
+    ) -> tuple[TemplateView, ...]:
+        """Recipes beside the parts. A compatibility filter has no single body to match."""
+        if compatible or not self._templates:
+            return ()
+        if isinstance(scale, str) and scale != CATALOG_SCALE:
+            return ()
+        return tuple(self._templates.values())
 
     def _ask_track_name(self) -> str | None:
         text, accepted = QInputDialog.getText(

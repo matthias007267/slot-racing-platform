@@ -46,6 +46,7 @@ from slot_racing.modules.track_planner.parts import (
     world_xy,
 )
 from slot_racing.modules.track_planner.service import TrackPlannerService
+from slot_racing.modules.track_planner.ui.page import PlannerPage
 from slot_racing.modules.tracks.service import TrackInput, TrackService
 from tests.modules.conftest import Env
 from tests.modules.test_track_extend_arrows import _open, _place, _select_instance
@@ -54,13 +55,13 @@ from tests.modules.test_track_parts import _planner
 
 def test_a_parent_stores_each_slot_and_reloads_it(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Bindung", lanes=2)
     straight = _id(planner, "20020601")
     curve = _id(planner, "20020573")
     left = _id(planner, "20020560")
     outer = _id(planner, "20020563")
     inner = _id(planner, "20020592")
+    catalog = _catalog(planner)
 
     bare = place_instance(empty_plan(track.id), straight, catalog[straight], 0, 0, 0, catalog)
     assert bare.instances[0].host_id is None
@@ -129,10 +130,10 @@ def test_reference_strips_fit_only_their_host(env: Env) -> None:
 
 def test_parent_move_and_rotation_are_copied_without_drift(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Folge", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    catalog = _catalog(planner)
     plan = place_instance(empty_plan(track.id), straight, catalog[straight], 0, 0, 0, catalog)
     parent_id = plan.instances[0].id
     plan = attach_accessory(plan, parent_id, side, catalog[side], "left", catalog)
@@ -163,6 +164,7 @@ def test_deleting_the_parent_removes_the_accessory_and_undo_restores_both(
     qtbot: QtBot, env: Env
 ) -> None:
     page = _open(qtbot, env, "Loeschen")
+    _load_legacy(page, "20020560", "20020601")
     parent = _place(page, "20020601")
     page.add_accessory(parent.id, "left")
     accessory_id = _accessory(page.plan()).id
@@ -181,10 +183,10 @@ def test_deleting_the_parent_removes_the_accessory_and_undo_restores_both(
 
 def test_copy_points_at_the_new_parent(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Kopie", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    catalog = _catalog(planner)
     plan = place_instance(empty_plan(track.id), straight, catalog[straight], 10, 20, 0, catalog)
     parent_id = plan.instances[0].id
     plan = attach_accessory(plan, parent_id, side, catalog[side], "right", catalog)
@@ -204,10 +206,10 @@ def test_copy_points_at_the_new_parent(env: Env) -> None:
 
 def test_a_group_moves_the_accessory_once(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Gruppe", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    catalog = _catalog(planner)
     plan = place_instance(empty_plan(track.id), straight, catalog[straight], 0, 0, 0, catalog)
     plan = place_instance(plan, straight, catalog[straight], 5000, 0, 0, catalog)
     parent_id = plan.instances[0].id
@@ -231,10 +233,11 @@ def test_a_group_moves_the_accessory_once(env: Env) -> None:
 
 def test_lane_lengths_ignore_border_strips(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Laenge", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    stored = _catalog(planner)
+    catalog = {straight: stored[straight], side: stored[side]}
     plan = place_instance(empty_plan(track.id), straight, catalog[straight], 0, 0, 0, catalog)
     for _index in range(3):
         plan = extend_from_connector(plan, plan.instances[-1].id, 1, "straight", catalog)
@@ -247,10 +250,10 @@ def test_lane_lengths_ignore_border_strips(env: Env) -> None:
 
 def test_attached_parts_are_not_track_joints(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Snap", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    catalog = _catalog(planner)
     spec = catalog[straight]
     plan = place_instance(empty_plan(track.id), straight, spec, 0, 0, 0, catalog)
     parent = plan.instances[0]
@@ -287,10 +290,10 @@ def test_attached_parts_are_not_track_joints(env: Env) -> None:
 
 def test_stock_counts_one_strip_and_does_not_expand_a_box(env: Env) -> None:
     planner = _planner(env)
-    catalog = _catalog(planner)
     track = env.track("Bestand", lanes=2)
     straight = _id(planner, "20020601")
     side = _id(planner, "20020560")
+    catalog = _catalog(planner)
     planner.set_stock(side, 1)
     plan = place_instance(empty_plan(track.id), straight, catalog[straight], 0, 0, 0, catalog)
     plan = attach_accessory(plan, plan.instances[0].id, side, catalog[side], "left", catalog)
@@ -343,6 +346,7 @@ def test_accessory_actions_are_breadcrumbs_without_article_text(
     service = install(tmp_path)
     try:
         page = _open(qtbot, env, "Log")
+        _load_legacy(page, "20020560", "20020601")
         parent = _place(page, "20020601")
         page.add_accessory(parent.id, "left")
         page.add_accessory(parent.id, "left")
@@ -373,6 +377,7 @@ def test_the_menu_offers_only_compatible_sides(qtbot: QtBot, env: Env) -> None:
     from PySide6.QtGui import QAction
 
     page = _open(qtbot, env, "Menue")
+    _load_legacy(page, "20020560", "20020563", "20020592", "20020601", "20020572")
     parent = _place(page, "20020601")
     menu = page.accessory_menu(parent.id)
     assert menu is not None
@@ -388,6 +393,7 @@ def test_the_menu_offers_only_compatible_sides(qtbot: QtBot, env: Env) -> None:
     assert taken is not None and not taken.isEnabled()
 
     curve = _id(_planner(env), "20020572")
+    page._load_parts()
     updated = place_instance(page.plan(), curve, page._parts[curve], 4000, 0, 0, page._parts)
     page._commit(updated, updated.instances[-1].id)
     host = next(instance for instance in page.plan().instances if instance.part_id == curve)
@@ -401,6 +407,7 @@ def test_the_menu_offers_only_compatible_sides(qtbot: QtBot, env: Env) -> None:
 def test_collection_mode_uses_the_existing_stock_rule(qtbot: QtBot, env: Env) -> None:
     page = _open(qtbot, env, "Sammlung")
     page.announce_stock_problem = lambda: None
+    _load_legacy(page, "20020560", "20020601")
     parent = _place(page, "20020601")
     side = _id(page._planner, "20020560")
     straight = _id(page._planner, "20020601")
@@ -416,7 +423,7 @@ def test_collection_mode_uses_the_existing_stock_rule(qtbot: QtBot, env: Env) ->
     assert _accessory(page.plan()).host_id == parent.id
 
 
-def test_an_old_border_row_refreshes_without_moving_instances(env: Env) -> None:
+def test_ensure_seed_leaves_a_stored_border_and_its_instance(env: Env) -> None:
     planner = _planner(env)
     border_id = _id(planner, "20020560")
     track = env.track("Alt", lanes=2)
@@ -445,8 +452,8 @@ def test_an_old_border_row_refreshes_without_moving_instances(env: Env) -> None:
         )
     planner.library.ensure_seed()
     stored = planner.library.require(border_id).spec
-    assert stored.connectors == ()
-    assert stored.attachment is not None
+    assert len(stored.connectors) == 1
+    assert stored.attachment is None
     assert stored.name == "Randstreifen Standardgerade"
     loaded = planner.load(track.id)
     assert loaded.instances[0].id == "legacy-strip"
@@ -456,10 +463,12 @@ def test_an_old_border_row_refreshes_without_moving_instances(env: Env) -> None:
     assert loaded.instances[0].host_id is None
     with env.runtime.database.session() as session:
         assert (
-            session.scalars(
-                select(TrackPartConnector).where(TrackPartConnector.part_id == border_id)
-            ).all()
-            == []
+            len(
+                session.scalars(
+                    select(TrackPartConnector).where(TrackPartConnector.part_id == border_id)
+                ).all()
+            )
+            == 1
         )
 
 
@@ -474,16 +483,10 @@ def test_backup_restores_the_parent_link(tmp_path: Path) -> None:
         tracks = source.services.get(TrackService)
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Backup", lane_count=2))
+        straight = _id(planner, "20020601")
+        side = _id(planner, "20020563")
+        curve = _id(planner, "20020573")
         catalog = {record.id: record.spec for record in planner.list_parts()}
-        straight = next(
-            record.id for record in planner.list_parts() if record.spec.article_number == "20020601"
-        )
-        side = next(
-            record.id for record in planner.list_parts() if record.spec.article_number == "20020563"
-        )
-        curve = next(
-            record.id for record in planner.list_parts() if record.spec.article_number == "20020573"
-        )
         plan = place_instance(empty_plan(track.id), curve, catalog[curve], 5, 6, 0, catalog)
         plan = attach_accessory(plan, plan.instances[0].id, side, catalog[side], "outer", catalog)
         plan = place_instance(plan, straight, catalog[straight], 800, 0, 0, catalog)
@@ -522,19 +525,29 @@ def test_backup_restores_the_parent_link(tmp_path: Path) -> None:
         runtime.shutdown()
 
 
+def _load_legacy(page: PlannerPage, *articles: str) -> None:
+    from tests.modules.catalog_fixtures import ensure_article
+
+    for article in articles:
+        ensure_article(page._planner, article)
+    page._load_parts()
+
+
 def _catalog(planner: TrackPlannerService) -> dict[int, PartSpec]:
     return {record.id: record.spec for record in planner.list_parts()}
 
 
 def _id(planner: TrackPlannerService, article: str) -> int:
-    for record in planner.list_parts():
-        if record.spec.article_number == article:
-            return record.id
-    raise AssertionError(article)
+    from tests.modules.catalog_fixtures import ensure_article, ensure_named
+
+    if article == "20020563":
+        return ensure_named(planner, "Außenrandstreifen Kurve 3/30°", article)
+    return ensure_article(planner, article)
 
 
 def _spec(planner: TrackPlannerService, article: str) -> PartSpec:
-    return _catalog(planner)[_id(planner, article)]
+    part_id = _id(planner, article)
+    return _catalog(planner)[part_id]
 
 
 def _article(article: str) -> PartSpec:

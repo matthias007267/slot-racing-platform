@@ -12,7 +12,6 @@ from pytestqt.qtbot import QtBot
 from shiboken6 import Shiboken
 
 from slot_racing.core.diagnostics import current, install
-from slot_racing.modules.track_planner.parts import STANDARD_STRAIGHT_ARTICLE
 from slot_racing.modules.track_planner.ui.collection_dialog import CollectionDialog
 from slot_racing.modules.track_planner.ui.library_dialog import PartDialog
 from slot_racing.modules.track_planner.ui.library_manager import LibraryManager
@@ -28,7 +27,7 @@ def test_the_collection_dialog_survives_repeated_open_and_close(
     service = install(tmp_path)
     try:
         page = _open(qtbot, env, "Sammlung")
-        part_id = _part_id(page, STANDARD_STRAIGHT_ARTICLE)
+        part_id = _part_id(page, "20509")
         seen: list[str] = []
 
         def close_without_editing() -> None:

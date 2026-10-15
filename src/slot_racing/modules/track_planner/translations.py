@@ -94,7 +94,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.jump_start": "Zur Startgeraden springen",
         "planner.color_coding": "Farbcodierung",
         "planner.start_straight": "Startgerade",
-        "planner.start_straight.missing": "Es ist keine Startgerade markiert.",
+        "planner.start_straight.missing": "Es ist keine Startgerade platziert.",
+        "planner.missing_parts": (
+            "{count} Bauteile dieser Strecke fehlen in der Bibliothek. "
+            "Sie bleiben als Platzhalter erhalten und werden beim Speichern nicht gelöscht."
+        ),
         "planner.filter.scale": "Maßstab",
         "planner.filter.all": "Alle",
         "planner.filter.compatible": "Nur kompatible Bauteile anzeigen",
@@ -109,7 +113,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Dieses Bauteil wird noch von {count} Platzierungen verwendet "
             "und kann nicht gelöscht werden."
         ),
-        "error.planner.start_straight": "Nur die Anschlussgerade kann Start und Ziel sein.",
+        "error.planner.start_straight": "Nur die Startgerade kann Start und Ziel sein.",
         "error.planner.stock": "Der Bestand muss eine ganze Zahl ab 0 sein.",
         "error.planner.stock_adjustment": (
             "Die Korrektur würde den physischen Bestand unter 0 setzen."

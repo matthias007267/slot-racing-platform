@@ -250,20 +250,23 @@ def test_a_selection_does_not_dock_into_the_middle_of_a_track() -> None:
 
 def test_continue_arrows_use_the_same_free_joints(qtbot: QtBot, env: Env) -> None:
     page = _open(qtbot, env, "Pfeile")
-    _place(page, STANDARD_STRAIGHT_ARTICLE)
+    _place(page, "20509")
     current = page.plan().instances[-1].id
     for _ in range(2):
-        page._extended(current, 1, EXTEND_STRAIGHT)
+        page._extended(current, 0, EXTEND_STRAIGHT)
         current = page.plan().instances[-1].id
     end = page.plan().instances[-1]
     placed = [(item, page._parts[item.part_id]) for item in page.plan().instances]
     free = free_connector_indexes(end, page._parts[end.part_id], placed)
-    assert free == (1,)
-    assert {arrow.connector_index for arrow in _arrows(page)} == set(free)
+    assert 0 in free
+    assert 3 not in free
+    assert {arrow.connector_index for arrow in _arrows(page)} == {0}
     middle = page.plan().instances[1]
     _select_one(page, middle.id)
     assert _arrows(page) == []
-    assert free_connector_indexes(middle, page._parts[middle.part_id], placed) == ()
+    middle_free = free_connector_indexes(middle, page._parts[middle.part_id], placed)
+    assert 0 not in middle_free
+    assert 3 not in middle_free
 
 
 def test_the_page_docks_a_dragged_selection_as_one_body(qtbot: QtBot, env: Env) -> None:
@@ -273,11 +276,11 @@ def test_the_page_docks_a_dragged_selection_as_one_body(qtbot: QtBot, env: Env) 
     assert isinstance(page, PlannerPage)
     _select(page, track.id)
     page.grid.setChecked(False)
-    _place(page, STANDARD_STRAIGHT_ARTICLE)
+    _place(page, "20509")
     current = page.plan().instances[-1].id
-    page._extended(current, 1, EXTEND_STRAIGHT)
-    page._extended(page.plan().instances[-1].id, 1, EXTEND_STRAIGHT)
-    _place(page, STANDARD_STRAIGHT_ARTICLE, x=4000, y=0)
+    page._extended(current, 0, EXTEND_STRAIGHT)
+    page._extended(page.plan().instances[-1].id, 0, EXTEND_STRAIGHT)
+    _place(page, "20509", x=4000, y=0)
     page.rotation_free.setValue(90)
     chain = page.plan().instances[:3]
     target = page.plan().instances[3]

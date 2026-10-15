@@ -273,7 +273,9 @@ def test_borders_use_side_edges_and_follow_rotation() -> None:
 def test_a_used_bezier_edit_forks_and_the_plan_keeps_the_old_geometry(env: Env) -> None:
     planner = _planner(env)
     straight = next(
-        record for record in planner.list_parts() if record.spec.article_number == "20020601"
+        record
+        for record in planner.list_parts()
+        if record.spec.article_number == "20509" and not record.spec.piece_key
     )
     track = env.track("Alt", lanes=2)
     fresh = env.track("Neu", lanes=2)
@@ -291,7 +293,8 @@ def test_a_used_bezier_edit_forks_and_the_plan_keeps_the_old_geometry(env: Env) 
     assert revised.id != straight.id
     assert revised.lineage_id == straight.lineage_id
     frozen = planner.library.require(straight.id)
-    assert frozen.spec.slot_paths == ()
+    assert frozen.spec.slot_paths == straight.spec.slot_paths
+    assert frozen.spec.slot_paths
     assert frozen.spec.length_mm == pytest.approx(345.0)
     assert revised.spec.slot_paths[0].spans[0] == bow
     assert planner.load(track.id).instances[0].part_id == straight.id

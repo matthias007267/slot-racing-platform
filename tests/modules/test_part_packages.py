@@ -94,28 +94,20 @@ def test_adjustment_adds_to_derived_stock_and_clamps_at_zero() -> None:
     assert lines[7].adjustment == -5
 
 
-def test_seeded_border_package_reuses_the_strip_and_adds_an_end_piece(env: Env) -> None:
+def test_the_imported_packages_replace_the_old_border_box(env: Env) -> None:
     planner = _planner(env)
     packages = {package.article_number: package for package in planner.list_packages()}
-    border = packages[OUTER_BORDER_K3_ARTICLE]
-    assert border.manufacturer == "Carrera"
-    assert border.name == OUTER_BORDER_K3_NAME
-    assert border.quantity == 0
-    by_name = {line.part_name: line for line in border.contents}
-    assert by_name[OUTER_BORDER_K3_NAME].quantity == 6
-    assert by_name[END_PIECE_K3_NAME].quantity == 2
-    strip = _named(planner, OUTER_BORDER_K3_NAME)
-    end = _named(planner, END_PIECE_K3_NAME)
-    assert strip.spec.article_number == OUTER_BORDER_K3_ARTICLE
-    assert end.spec.article_number == OUTER_BORDER_K3_ARTICLE
-    assert strip.spec.attachment is not None
-    assert end.spec.attachment is None
-    assert strip.id != end.id
-    assert by_name[OUTER_BORDER_K3_NAME].part_id == strip.id
-    assert by_name[END_PIECE_K3_NAME].part_id == end.id
-    straight = packages[STANDARD_STRAIGHT_ARTICLE]
+    assert OUTER_BORDER_K3_ARTICLE not in packages
+    assert STANDARD_STRAIGHT_ARTICLE not in packages
+    straight = packages["20509"]
+    assert straight.manufacturer == "Carrera"
+    assert straight.quantity == 0
+    assert len(straight.contents) == 1
     assert straight.contents[0].quantity == 1
-    assert straight.contents[0].part_id == _part(planner, STANDARD_STRAIGHT_ARTICLE)
+    assert packages["20509.2"].contents[0].quantity == 1
+    switch = packages["30343"]
+    assert len(switch.contents) == 2
+    assert {line.quantity for line in switch.contents} == {1}
     formula = Path("src/slot_racing/modules/track_planner/inventory.py").read_text(encoding="utf-8")
     library = Path("src/slot_racing/modules/track_planner/library.py").read_text(encoding="utf-8")
     assert OUTER_BORDER_K3_ARTICLE not in formula
@@ -174,7 +166,7 @@ def test_migration_keeps_a_stored_quantity_as_physical_stock() -> None:
             f"('legacy-1', {int(track_id)}, {int(part_id)}, 10, 20, 0, 0, 0, 0)"
         )
     database.migrate()
-    assert database.schema_revision() == "0022"
+    assert database.schema_revision() == "0023"
     with database.engine.connect() as connection:
         stored = connection.execute(text("SELECT quantity FROM track_part_stock")).scalar_one()
         packages = connection.execute(
@@ -217,9 +209,9 @@ def test_planner_availability_follows_physical_stock(env: Env) -> None:
 def test_attached_parts_use_the_same_physical_stock(env: Env) -> None:
     planner = _planner(env)
     track = env.track("Rand", lanes=2)
-    catalog = {record.id: record.spec for record in planner.list_parts()}
     curve = _part(planner, "20020573")
     outer = _named(planner, OUTER_BORDER_K3_NAME).id
+    catalog = {record.id: record.spec for record in planner.list_parts()}
     box = _package(planner, OUTER_BORDER_K3_ARTICLE)
     planner.set_package_stock(box.id, 1)
     plan = empty_plan(track.id)
@@ -525,13 +517,22 @@ def test_a_legacy_plan_still_loads_edits_and_saves(env: Env) -> None:
 
 
 def _package(planner: TrackPlannerService, article: str) -> PackageView:
-    for package in planner.list_packages():
-        if package.article_number == article:
-            return package
-    raise AssertionError(article)
+    from tests.modules.catalog_fixtures import ensure_package
+
+    return ensure_package(planner, article)
 
 
 def _named(planner: TrackPlannerService, name: str) -> PartRecord:
+    from slot_racing.modules.track_planner.parts import standard_catalog
+    from tests.modules.catalog_fixtures import ensure_article
+
+    for record in planner.list_parts():
+        if record.spec.name == name:
+            return record
+    for spec in standard_catalog():
+        if spec.name == name:
+            ensure_article(planner, spec.article_number)
+            break
     for record in planner.list_parts():
         if record.spec.name == name:
             return record

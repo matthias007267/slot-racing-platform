@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSceneMouseEvent,
     QGraphicsView,
@@ -200,6 +201,9 @@ class PlanCanvas(QGraphicsView):
         for instance in plan.instances:
             spec = catalog.get(instance.part_id)
             if spec is None:
+                missing = MissingItem(instance)
+                self._scene.addItem(missing)
+                missing.setSelected(missing.item_id in chosen)
                 continue
             placed = InstanceItem(instance, spec, self._report_group)
             placed.set_color_coding(self._color_coding)
@@ -229,7 +233,7 @@ class PlanCanvas(QGraphicsView):
     def selected_ids(self) -> list[str]:
         found: list[str] = []
         for item in self._scene.selectedItems():
-            if isinstance(item, (PieceItem, StartItem, InstanceItem)):
+            if isinstance(item, (PieceItem, StartItem, InstanceItem, MissingItem)):
                 found.append(item.item_id)
         return found
 
@@ -237,7 +241,7 @@ class PlanCanvas(QGraphicsView):
         """Select every part whose bounds lie completely inside ``area``."""
         self._scene.clearSelection()
         for item in self._scene.items():
-            if not isinstance(item, (InstanceItem, PieceItem, StartItem)):
+            if not isinstance(item, (InstanceItem, PieceItem, StartItem, MissingItem)):
                 continue
             if rect_fully_inside(item.sceneBoundingRect(), area):
                 item.setSelected(True)
@@ -712,6 +716,21 @@ def _snap(value: QPointF, width: int, height: int) -> QPointF:
     x = min(max(x, 0), (GRID_LIMIT - width) * CELL)
     y = min(max(y, 0), (GRID_LIMIT - height) * CELL)
     return QPointF(x, y)
+
+
+class MissingItem(QGraphicsRectItem):
+    """A saved part whose definition is no longer in the library."""
+
+    def __init__(self, instance: PartInstance) -> None:
+        super().__init__(-80 * MM, -40 * MM, 160 * MM, 80 * MM)
+        self.item_id = instance.id
+        self.setPos(instance.x_mm * MM, instance.y_mm * MM)
+        self.setRotation(instance.rotation_z_deg)
+        self.setPen(QPen(QColor(COLORS.warning), 2))
+        self.setBrush(QColor(COLORS.warning))
+        self.setOpacity(0.35)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setZValue(3)
 
 
 class InstanceItem(QGraphicsItem):

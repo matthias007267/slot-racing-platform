@@ -59,7 +59,7 @@ def test_the_open_plan_can_be_stored_as_a_new_track(qtbot: QtBot, env: Env) -> N
     assert page.delete_button.isHidden()
     assert page.place_part.isHidden()
     page.add_start.click()
-    page.library.setCurrentRow(_library_row(page, "20020518"))
+    page.library.setCurrentRow(_library_row(page, "20509.2"))
     page.place_part.click()
     page.x_mm.setValue(40)
     page.y_mm.setValue(15)
@@ -77,7 +77,7 @@ def test_the_open_plan_can_be_stored_as_a_new_track(qtbot: QtBot, env: Env) -> N
     assert _planner(env).list_parts() == before
     stored = _planner(env).load(track.id)
     assert stored.instances[0].x_mm == pytest.approx(40)
-    assert stored.instances[0].start_straight
+    assert not stored.instances[0].start_straight
     copy_id = page.track_combo.findText("Kopie")
     assert copy_id >= 0
     copied_track = page.track_combo.itemData(copy_id)
@@ -90,7 +90,7 @@ def test_the_open_plan_can_be_stored_as_a_new_track(qtbot: QtBot, env: Env) -> N
     assert copied.instances[0].x_mm == pytest.approx(original.instances[0].x_mm)
     assert copied.instances[0].y_mm == pytest.approx(original.instances[0].y_mm)
     assert copied.instances[0].rotation_z_deg == pytest.approx(12)
-    assert copied.instances[0].start_straight
+    assert not copied.instances[0].start_straight
     assert copied.start_finish() is not None
     assert copied.markers[0].x == original.markers[0].x
     info = env.tracks.get_track(copied.track_id)
@@ -110,7 +110,7 @@ def test_only_the_connecting_rail_can_be_start_and_finish(qtbot: QtBot, env: Env
     assert page.plan().instances == ()
     assert not hasattr(page, "start_straight")
 
-    page.library.setCurrentRow(_library_row(page, "20020572"))
+    page.library.setCurrentRow(_library_row(page, "20572"))
     page.place_part.click()
     curve = page.plan().instances[0]
     assert page._parts[curve.part_id].category == CURVE
@@ -120,28 +120,31 @@ def test_only_the_connecting_rail_can_be_start_and_finish(qtbot: QtBot, env: Env
     assert caught.value.key == "error.planner.start_straight"
     page.delete_selected()
 
-    page.library.setCurrentRow(_library_row(page, "20020601"))
+    page.library.setCurrentRow(_library_row(page, "20509"))
     page.place_part.click()
     straight = page.plan().instances[0]
-    assert page._parts[straight.part_id].article_number == "20020601"
+    assert page._parts[straight.part_id].article_number == "20509"
+    assert page._parts[straight.part_id].piece_key == ""
     assert not straight.start_straight
     with pytest.raises(ValidationError) as rejected:
         set_start_straight(page.plan(), straight.id, True, page._parts)
     assert rejected.value.key == "error.planner.start_straight"
     assert not page.plan().instances[0].start_straight
+    assert not page.jump_button.isEnabled()
     page.delete_selected()
 
-    page.library.setCurrentRow(_library_row(page, "20020518"))
+    page.library.setCurrentRow(_library_row(page, "20509.2"))
     page.place_part.click()
     page.x_mm.setValue(0)
     page.y_mm.setValue(0)
-    assert page.plan().instances[0].start_straight
-    assert page._parts[page.plan().instances[0].part_id].article_number == "20020518"
+    assert not page.plan().instances[0].start_straight
+    assert page._parts[page.plan().instances[0].part_id].piece_key == "20509.2"
+    assert page.jump_button.isEnabled()
     page.place_part.click()
     page.x_mm.setValue(800)
     page.y_mm.setValue(0)
-    assert sum(instance.start_straight for instance in page.plan().instances) == 1
-    assert page.plan().instances[1].start_straight
+    assert sum(instance.start_straight for instance in page.plan().instances) == 0
+    assert page.jump_button.isEnabled()
     first = page.plan().instances[0]
     page._commit(set_start_straight(page.plan(), first.id, True, page._parts))
     flags = {instance.id: instance.start_straight for instance in page.plan().instances}
@@ -169,6 +172,11 @@ def test_only_the_connecting_rail_can_be_start_and_finish(qtbot: QtBot, env: Env
     _select_ids(page, {start.id})
     _key(qtbot, page, Qt.Key.Key_Delete)
     assert not any(instance.start_straight for instance in page.plan().instances)
+    assert page.jump_button.isEnabled()
+    for instance in tuple(page.plan().instances):
+        _select_ids(page, {instance.id})
+        _key(qtbot, page, Qt.Key.Key_Delete)
+    assert page.plan().instances == ()
     assert not page.jump_button.isEnabled()
 
 
@@ -203,7 +211,7 @@ def test_a_part_rotates_only_from_the_handle(qtbot: QtBot, env: Env) -> None:
     assert isinstance(page, PlannerPage)
     _select(page, track.id)
     page.grid.setChecked(False)
-    page.library.setCurrentRow(_library_row(page, "20020612"))
+    page.library.setCurrentRow(_library_row(page, "20612"))
     page.place_part.click()
     page.x_mm.setValue(0)
     page.y_mm.setValue(0)
@@ -236,7 +244,7 @@ def test_a_straight_arrow_extends_the_plan_and_undo_removes_it(qtbot: QtBot, env
     assert isinstance(page, PlannerPage)
     _select(page, track.id)
     page.grid.setChecked(False)
-    page.library.setCurrentRow(_library_row(page, "20020601"))
+    page.library.setCurrentRow(_library_row(page, "20509"))
     page.place_part.click()
     page.x_mm.setValue(0)
     page.y_mm.setValue(0)
@@ -285,18 +293,18 @@ def test_library_filters_follow_scale_compatibility_and_reset(qtbot: QtBot, env:
     assert "1:43" not in _scales(page)
     assert "1:32" in _scales(page)
     page.scale_filter.setCurrentIndex(page.scale_filter.findData("1:24"))
-    page.library.setCurrentRow(_library_row(page, "20020601"))
+    page.library.setCurrentRow(_library_row(page, "20509"))
     page.place_part.click()
     assert page.compatible.isEnabled()
     page.compatible.setChecked(True)
     articles = _articles(page)
-    assert _contains(articles, "20020601")
-    assert not _contains(articles, "20020560")
+    assert _contains(articles, "20509")
+    assert not _contains(articles, "20560")
     assert not _contains(articles, "EB-F1")
     assert not _contains(articles, "EB-F43")
     page.canvas.scene().clearSelection()
     assert not page.compatible.isEnabled()
-    assert _contains(_articles(page), "20020560")
+    assert _contains(_articles(page), "20560")
     page.reset_filter.click()
     assert page.scale_filter.currentData() is None
     assert not page.compatible.isChecked()
@@ -480,7 +488,9 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
         planner = source.services.get(TrackPlannerService)
         track = tracks.create_track(TrackInput(name="Gruppe", lane_count=2))
         part = next(
-            record for record in planner.list_parts() if record.spec.article_number == "20020518"
+            record
+            for record in planner.list_parts()
+            if record.spec.piece_key == "20509.2"
         )
         catalog = {part.id: part.spec}
         plan = set_plan_grid(empty_plan(track.id), enabled=False, grid_mm=100, snap_mm=25)
@@ -522,33 +532,44 @@ def test_backup_restores_groups_and_the_start_straight(tmp_path: Path) -> None:
 
 def test_carrera_rails_are_seeded_once_at_one_to_twenty_four(env: Env) -> None:
     planner = _planner(env)
-    by_article = {record.spec.article_number: record.spec for record in planner.list_parts()}
-    assert set(by_article) >= {
-        "20020601",
-        "20020611",
-        "20020612",
-        "20020577",
-        "20020571",
-        "20020572",
-        "20020573",
-        "20020578",
-        "20020587",
-        "20020560",
-        "20020517",
-        "20030343",
-        "20030341",
-        "20030356-E",
-    }
-    assert all(spec.scale == "1:24" for spec in by_article.values())
-    assert by_article["20020601"].name == "Standardgerade"
-    assert by_article["20020601"].category == STRAIGHT
-    assert by_article["20020601"].length_mm == pytest.approx(345)
-    assert by_article["20020571"].category == CURVE
-    assert by_article["20020571"].radius_mm == pytest.approx(300)
-    assert by_article["20020571"].angle_deg == pytest.approx(60)
-    assert by_article["20020560"].category == BORDER
+    records = planner.list_parts()
+    by_article = {record.spec.article_number for record in records}
+    assert {
+        "20509",
+        "20611",
+        "20612",
+        "20577",
+        "20571",
+        "20572",
+        "20573",
+        "20578",
+        "20560",
+        "20517",
+        "30343",
+        "30341",
+    } <= by_article
+    assert "20020601" not in by_article
+    assert all(record.spec.scale == "1:24" for record in records)
+    straight = next(
+        record.spec
+        for record in records
+        if record.spec.article_number == "20509" and not record.spec.piece_key
+    )
+    assert straight.name == "Standardgerade 34,5cm"
+    assert straight.category == STRAIGHT
+    assert straight.length_mm == pytest.approx(345)
+    assert straight.radius_mm is None
+    curve = next(record.spec for record in records if record.spec.article_number == "20571")
+    assert curve.category == CURVE
+    assert curve.radius_mm is None
+    assert curve.angle_deg is None
+    border = next(record.spec for record in records if record.spec.article_number == "20560")
+    assert border.category == BORDER
+    assert border.lane_count == 0
     straights = [
-        record for record in planner.list_parts() if record.spec.article_number == "20020601"
+        record
+        for record in records
+        if record.spec.article_number == "20509" and not record.spec.piece_key
     ]
     assert len(straights) == 1
     assert "system" not in straights[0].spec.__dataclass_fields__

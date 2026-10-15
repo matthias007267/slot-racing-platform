@@ -121,7 +121,7 @@ def test_migration_adds_an_empty_layout_column() -> None:
         info = list(connection.exec_driver_sql("PRAGMA table_info(time_measurements)"))
     column = next(row for row in info if row[1] == "track_layout_id")
     assert column[3] == 0
-    assert database.schema_revision() == "0022"
+    assert database.schema_revision() == "0023"
     database.dispose()
 
 
@@ -156,7 +156,7 @@ def test_an_existing_lap_stays_counted_when_the_exclusion_column_arrives() -> No
     assert stored[0] == 8_000_000_000
     assert stored[1] == 0
     assert {"statistics_excluded", "lap_id"} <= names
-    assert database.schema_revision() == "0022"
+    assert database.schema_revision() == "0023"
     database.dispose()
 
 

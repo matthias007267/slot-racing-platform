@@ -102,7 +102,13 @@ _EXTEND_TURN_DEG = 1.0
 
 @dataclass(frozen=True, slots=True)
 class ConnectorSpec:
-    """One joint in the part's own coordinates."""
+    """One joint in the part's own coordinates.
+
+    ``target_source_id`` is the part an ``attachPoint`` names. A typed joint is
+    ``exclusive``: it mates with that part, not with every joint that shares a
+    type string. ``has_neighbor`` stores the pose of that part's origin.
+    ``lane_points`` are the groove ends at this joint. Empty keeps the 100 mm pitch.
+    """
 
     name: str
     x_mm: float
@@ -111,6 +117,14 @@ class ConnectorSpec:
     direction_deg: float
     kind: str
     lanes: tuple[int, ...]
+    target_source_id: str = ""
+    edge_types: tuple[str, ...] = ()
+    exclusive: bool = False
+    has_neighbor: bool = False
+    neighbor_x: float = 0.0
+    neighbor_y: float = 0.0
+    neighbor_angle: float = 0.0
+    lane_points: tuple[tuple[float, float], ...] = ()
 
 
 # A slot path is geometry, not a paint special case. ``line`` uses the two endpoints.
@@ -241,6 +255,14 @@ class PartSpec:
     border_edges: tuple[BorderEdge, ...] = ()
     manufacturer: str = ""
     description: str = ""
+    # Stable id from the source file. Empty for a part drawn in this application.
+    source_id: str = ""
+    # Internal piece key such as 20509.2. Empty when the article has one body.
+    piece_key: str = ""
+    # evolution, digital, or both. Empty on a part that is not from that library.
+    systems: tuple[str, ...] = ()
+    # Hidden helpers stay in the library and out of the part picker.
+    selectable: bool = True
 
 
 # A catalogue row, a catalogue row the user changed, or a part they created.
@@ -290,6 +312,10 @@ class PartInstance:
     # Set together. The pose is copied from that instance; the slot is relative to it.
     host_id: str | None = None
     attachment_slot: str | None = None
+    # Local pose relative to the host. Used when the border has its own outline.
+    host_dx: float = 0.0
+    host_dy: float = 0.0
+    host_da: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,9 +519,27 @@ def crossing_connectors(length_mm: float, lane_count: int) -> tuple[ConnectorSpe
     )
 
 
-def connectors_compatible(left: ConnectorSpec, right: ConnectorSpec) -> bool:
-    """Same joint kind and the same lane order. A reversed lane list does not fit."""
-    return left.kind == right.kind and left.lanes == right.lanes and left.kind in CONNECTOR_KINDS
+def connectors_compatible(
+    left: ConnectorSpec,
+    right: ConnectorSpec,
+    *,
+    left_source: str = "",
+    right_source: str = "",
+) -> bool:
+    """Whether these two joints may meet.
+
+    Untyped rail ends share a lane list. A typed end mates only when an
+    attach point names the other part. Equal type strings are not enough.
+    """
+    if left.kind != right.kind or left.kind not in CONNECTOR_KINDS:
+        return False
+    if left.exclusive or right.exclusive:
+        if not (left.exclusive and right.exclusive):
+            return False
+        if not left_source or not right_source:
+            return False
+        return left.target_source_id == right_source or right.target_source_id == left_source
+    return left.lanes == right.lanes
 
 
 def rails_can_join(left: ConnectorSpec, right: ConnectorSpec) -> bool:
@@ -520,6 +564,7 @@ def connector_occupied(
     placed: Sequence[tuple[PartInstance, PartSpec]],
     *,
     tolerance_mm: float = 1.0,
+    source_id: str = "",
 ) -> bool:
     """True when another compatible joint already meets this one."""
     point = world_xy(instance, connector.x_mm, connector.y_mm)
@@ -528,7 +573,12 @@ def connector_occupied(
         if other.id == instance.id:
             continue
         for candidate in spec.connectors:
-            if not connectors_compatible(connector, candidate):
+            if not connectors_compatible(
+                connector,
+                candidate,
+                left_source=source_id,
+                right_source=spec.source_id,
+            ):
                 continue
             other_point = world_xy(other, candidate.x_mm, candidate.y_mm)
             distance = math.hypot(point[0] - other_point[0], point[1] - other_point[1])
@@ -547,13 +597,16 @@ def connector_is_free(
     placed: Sequence[tuple[PartInstance, PartSpec]],
     *,
     tolerance_mm: float = 1.0,
+    source_id: str = "",
 ) -> bool:
     """True when this joint is not already met by another compatible joint.
 
     Snap candidates and continue-build arrows both use this. A joint that is occupied for
     one of them is occupied for the other.
     """
-    return not connector_occupied(instance, connector, placed, tolerance_mm=tolerance_mm)
+    return not connector_occupied(
+        instance, connector, placed, tolerance_mm=tolerance_mm, source_id=source_id
+    )
 
 
 def free_connector_indexes(
@@ -565,7 +618,7 @@ def free_connector_indexes(
     return tuple(
         index
         for index, connector in enumerate(spec.connectors)
-        if connector_is_free(instance, connector, placed)
+        if connector_is_free(instance, connector, placed, source_id=spec.source_id)
     )
 
 
@@ -591,7 +644,30 @@ def find_catalog_part(
     matches = [
         (part_id, spec)
         for part_id, spec in catalog.items()
-        if normalize_article(spec.article_number) == wanted
+        if normalize_article(spec.article_number) == wanted and not spec.piece_key
+    ]
+    if not matches:
+        matches = [
+            (part_id, spec)
+            for part_id, spec in catalog.items()
+            if normalize_article(spec.article_number) == wanted
+        ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    return matches[0]
+
+
+ACTIVE_STRAIGHT_SOURCE = "4187668d-ee71-440a-9bb2-6e400e017416"
+ACTIVE_CURVE_SOURCE = "cc253612-a0cb-4b17-b940-18460c337acb"
+
+
+def find_source_part(
+    catalog: Mapping[int, PartSpec], source_id: str
+) -> tuple[int, PartSpec] | None:
+    """The current part with this source UUID."""
+    matches = [
+        (part_id, spec) for part_id, spec in catalog.items() if spec.source_id == source_id
     ]
     if not matches:
         return None
@@ -602,8 +678,12 @@ def find_catalog_part(
 def standard_extend_parts(catalog: Mapping[int, PartSpec]) -> dict[str, tuple[int, PartSpec]]:
     """Straight continues with the standard straight; both turns use the standard curve."""
     chosen: dict[str, tuple[int, PartSpec]] = {}
-    straight = find_catalog_part(catalog, STANDARD_STRAIGHT_ARTICLE)
-    curve = find_catalog_part(catalog, STANDARD_CURVE_ARTICLE)
+    straight = find_source_part(catalog, ACTIVE_STRAIGHT_SOURCE) or find_catalog_part(
+        catalog, STANDARD_STRAIGHT_ARTICLE
+    )
+    curve = find_source_part(catalog, ACTIVE_CURVE_SOURCE) or find_catalog_part(
+        catalog, STANDARD_CURVE_ARTICLE
+    )
     if straight is not None:
         chosen[EXTEND_STRAIGHT] = straight
     if curve is not None:
@@ -623,6 +703,20 @@ def arrow_heading_deg(outward_deg: float, direction: str) -> float:
     raise ValidationError("error.planner.part")
 
 
+def _turn_ends(spec: PartSpec) -> tuple[ConnectorSpec, ...]:
+    """The two rail ends that define a continuation.
+
+    Border joints stay on the part but are not a second driving end. A part with
+    exactly two connectors is unchanged.
+    """
+    rails = tuple(
+        joint for joint in spec.connectors if joint.kind == TRACK and not joint.exclusive
+    )
+    if len(rails) == 2:
+        return rails
+    return spec.connectors
+
+
 def continuation_delta_deg(
     target: PartInstance,
     target_joint: ConnectorSpec,
@@ -636,8 +730,9 @@ def continuation_delta_deg(
     """
     if not connectors_compatible(source_joint, target_joint):
         return None
-    others = [joint for joint in spec.connectors if joint.name != source_joint.name]
-    if len(others) != 1:
+    ends = _turn_ends(spec)
+    others = [joint for joint in ends if joint.name != source_joint.name]
+    if source_joint.name not in {joint.name for joint in ends} or len(others) != 1:
         return None
     pose = join_pose(target, target_joint, source_joint)
     # A second arc of the same radius keeps the circle centre and only changes rotation.
@@ -669,7 +764,14 @@ def extend_pose(
     spec: PartSpec,
     direction: str,
 ) -> Pose | None:
-    """Pose that seats ``spec`` on ``target_joint`` so the free end leaves in ``direction``."""
+    """Pose that seats ``spec`` on ``target_joint`` so the free end leaves in ``direction``.
+
+    An attach point that names this part wins. Its stored pose is the source
+    continuation. A generic rail join is only the fallback.
+    """
+    named = _named_extend_pose(target, target_joint, spec, direction)
+    if named is not None:
+        return named
     best: tuple[tuple[float, int], Pose] | None = None
     for index, source in enumerate(spec.connectors):
         delta = continuation_delta_deg(target, target_joint, spec, source)
@@ -715,14 +817,16 @@ def placed_continuation_delta_deg(
         return None
     point = world_xy(target, target_joint.x_mm, target_joint.y_mm)
     free: ConnectorSpec | None = None
-    for source in created_spec.connectors:
+    seated = False
+    for source in _turn_ends(created_spec):
         other = world_xy(created, source.x_mm, source.y_mm)
         if math.hypot(point[0] - other[0], point[1] - other[1]) <= 1.0:
+            seated = True
             continue
         if free is not None:
             return None
         free = source
-    if free is None:
+    if free is None or not seated:
         return None
     outward = normalize_deg(target_joint.direction_deg + target.rotation_z_deg)
     leaving = normalize_deg(free.direction_deg + created.rotation_z_deg)
@@ -737,10 +841,15 @@ def can_dock(
 ) -> bool:
     """Whether ``candidate`` can be joined to a free compatible joint of ``target``."""
     for connector in target_spec.connectors:
-        if connector_occupied(target, connector, placed):
+        if connector_occupied(target, connector, placed, source_id=target_spec.source_id):
             continue
         for source in candidate.connectors:
-            if not connectors_compatible(source, connector):
+            if not connectors_compatible(
+                source,
+                connector,
+                left_source=candidate.source_id,
+                right_source=target_spec.source_id,
+            ):
                 continue
             pose = join_pose(target, connector, source)
             if math.hypot(pose.x_mm - target.x_mm, pose.y_mm - target.y_mm) >= 1.0:
@@ -791,6 +900,79 @@ def snap_pose(
     return poses[instance.id]
 
 
+def _named_extend_pose(
+    target: PartInstance,
+    target_joint: ConnectorSpec,
+    spec: PartSpec,
+    direction: str,
+) -> Pose | None:
+    if (
+        not target_joint.has_neighbor
+        or not spec.source_id
+        or target_joint.target_source_id != spec.source_id
+    ):
+        return None
+    pose = neighbor_pose(target, target_joint)
+    created = PartInstance(
+        "named", 0, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg
+    )
+    delta = placed_continuation_delta_deg(target, target_joint, created, spec)
+    if delta is None or not _direction_matches(delta, direction):
+        return None
+    return pose
+
+
+def neighbor_pose(host: PartInstance, connector: ConnectorSpec) -> Pose:
+    """World pose of the part an attach point names."""
+    x_mm, y_mm = world_xy(host, connector.neighbor_x, connector.neighbor_y)
+    return Pose(x_mm, y_mm, normalize_deg(host.rotation_z_deg + connector.neighbor_angle))
+
+
+def _named_neighbor_pose(
+    proposed: Sequence[tuple[PartInstance, PartSpec]],
+    stationary: Sequence[tuple[PartInstance, PartSpec]],
+    snap_mm: float,
+    blockers: Sequence[tuple[PartInstance, PartSpec]],
+) -> dict[str, Pose] | None:
+    """Seat a part on the attach point that names it, when the drop is already close."""
+    best: tuple[tuple[float, float], PartInstance, Pose] | None = None
+    for moving, spec in proposed:
+        if not spec.source_id:
+            continue
+        for host, host_spec in stationary:
+            if host.id == moving.id:
+                continue
+            for connector in host_spec.connectors:
+                if not connector.has_neighbor or connector.target_source_id != spec.source_id:
+                    continue
+                if connector_occupied(host, connector, blockers, source_id=host_spec.source_id):
+                    continue
+                seated = neighbor_pose(host, connector)
+                distance = math.hypot(moving.x_mm - seated.x_mm, moving.y_mm - seated.y_mm)
+                if distance > snap_mm:
+                    continue
+                turn = abs(signed_delta_deg(moving.rotation_z_deg, seated.rotation_z_deg))
+                key = (distance, turn)
+                if best is None or key < best[0]:
+                    best = (key, moving, seated)
+    if best is None:
+        return None
+    _key, moving, seated = best
+    delta = signed_delta_deg(moving.rotation_z_deg, seated.rotation_z_deg)
+    poses: dict[str, Pose] = {}
+    for instance, _spec in proposed:
+        if instance.id == moving.id:
+            poses[instance.id] = seated
+            continue
+        dx, dy = rotate_xy(instance.x_mm - moving.x_mm, instance.y_mm - moving.y_mm, delta)
+        poses[instance.id] = Pose(
+            seated.x_mm + dx,
+            seated.y_mm + dy,
+            normalize_deg(instance.rotation_z_deg + delta),
+        )
+    return poses
+
+
 def snap_selection(
     proposed: Sequence[tuple[PartInstance, PartSpec]],
     stationary: Sequence[tuple[PartInstance, PartSpec]],
@@ -812,6 +994,9 @@ def snap_selection(
     """
     if snap_mm < 0 or not proposed or not any(instance.id == anchor_id for instance, _ in proposed):
         raise ValidationError("error.planner.part")
+    named = _named_neighbor_pose(proposed, stationary, snap_mm, target_blockers)
+    if named is not None:
+        return named
     original = {instance.id: instance for instance, _spec in source_blockers}
     best: tuple[tuple[float, str, int, int, str], _SnapJoin] | None = None
     for moving, spec in proposed:
@@ -826,7 +1011,12 @@ def snap_selection(
                 indexes = free_connector_indexes(target_instance, target_spec, target_blockers)
                 for target_index in indexes:
                     target = target_spec.connectors[target_index]
-                    if not connectors_compatible(source, target):
+                    if not connectors_compatible(
+                        source,
+                        target,
+                        left_source=spec.source_id,
+                        right_source=target_spec.source_id,
+                    ):
                         continue
                     target_point = world_xy(target_instance, target.x_mm, target.y_mm)
                     distance = math.hypot(
@@ -904,6 +1094,9 @@ def lane_world_point(
     if lane not in connector.lanes:
         raise ValidationError("error.planner.lane")
     index = connector.lanes.index(lane)
+    if connector.lane_points:
+        point = connector.lane_points[index]
+        return world_xy(instance, point[0], point[1])
     offset = (index - (len(connector.lanes) - 1) / 2) * LANE_PITCH_MM
     return world_xy(instance, connector.x_mm, connector.y_mm + offset)
 
@@ -1172,9 +1365,12 @@ def bottleneck_paths(length: float) -> tuple[SlotPath, ...]:
     return tuple(paths)
 
 
+START_PIECE_KEY = "20509.2"
+
+
 def is_start_finish_part(spec: PartSpec) -> bool:
-    """The connecting rail carries start and finish. A standard straight does not."""
-    return normalize_article(spec.article_number) == START_FINISH_ARTICLE
+    """The start straight is the only start and finish piece."""
+    return spec.piece_key == START_PIECE_KEY
 
 
 def chicane_paths(length: float) -> tuple[SlotPath, ...]:

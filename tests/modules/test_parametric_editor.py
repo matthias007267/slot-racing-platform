@@ -393,6 +393,8 @@ def test_a_locked_body_and_a_bezier_groove_survive_a_rename(env: Env) -> None:
             switch.spec,
             article_number="EB-BZ",
             name="Bézier",
+            source_id="",
+            piece_key="",
             slot_paths=(SlotPath((SlotSpan.bezier(0, 0, 40, 10, 80, -10, 120, 0),), lane=1),),
             connectors=straight_connectors(120.0, 2),
             length_mm=120.0,
@@ -412,6 +414,8 @@ def test_a_duplicate_is_a_new_lineage_and_later_edits_do_not_revise_the_original
             original.spec,
             name="Kopie der Geraden",
             article_number=original.spec.article_number,
+            source_id="",
+            piece_key="",
         )
     )
     assert copied.lineage_id != original.lineage_id
@@ -626,8 +630,11 @@ def test_the_editor_saves_cancels_and_refreshes_the_library(qtbot: QtBot, env: E
 
 
 def test_the_editor_reports_validation_and_keeps_a_locked_preview(qtbot: QtBot, env: Env) -> None:
+    from tests.modules.catalog_fixtures import ensure_article
+
     planner = _planner(env)
     planner.list_parts()
+    ensure_article(planner, STANDARD_STRAIGHT_ARTICLE)
     dialog = PartDialog(env.runtime.translator, planner)
     qtbot.addWidget(dialog)
     dialog.show()
