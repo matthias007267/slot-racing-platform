@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QWidget,
 )
+from shiboken6 import Shiboken
 
 _MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
@@ -45,11 +46,18 @@ class _EnterWatcher(QObject):
         self._action = action
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        root = self._root
+        if (
+            not Shiboken.isValid(self)
+            or not Shiboken.isValid(watched)
+            or not Shiboken.isValid(root)
+        ):
+            return False
         if event.type() != QEvent.Type.KeyPress or not isinstance(event, QKeyEvent):
             return False
         if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             return False
-        if not isinstance(watched, QWidget) or not _inside(self._root, watched):
+        if not isinstance(watched, QWidget) or not _inside(root, watched):
             return False
         if event.modifiers() & _MODIFIERS:
             return False

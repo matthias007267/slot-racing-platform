@@ -62,6 +62,7 @@ class PartLibrary(QListWidget):
         super().__init__()
         self._color_coding = False
         self._fitting = False
+        self._shown: tuple[object, ...] | None = None
         self.setObjectName("planner-library")
         self.setMinimumWidth(340)
         self.setUniformItemSizes(False)
@@ -78,7 +79,12 @@ class PartLibrary(QListWidget):
         templates: Sequence[TemplateView] | None = None,
     ) -> None:
         notes = {} if remaining is None else remaining
+        signature = _shown_signature(records, notes, templates)
+        if signature == self._shown:
+            return
+        self._discard_cards()
         self.clear()
+        self._shown = signature
         for record in records:
             spec = record.spec
             item = QListWidgetItem()
@@ -99,6 +105,20 @@ class PartLibrary(QListWidget):
             self.addItem(item)
             self.setItemWidget(item, card)
         self._fit_item_widths()
+
+    def _discard_cards(self) -> None:
+        """Drop the previous cards. ``clear()`` leaves them on the viewport."""
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None:
+                continue
+            widget = self.itemWidget(item)
+            if widget is None:
+                continue
+            self.removeItemWidget(item)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -157,6 +177,30 @@ class PartLibrary(QListWidget):
             preview = card.findChild(PartPreview)
             if preview is not None:
                 preview.set_color_coding(enabled)
+
+
+def _shown_signature(
+    records: Sequence[PartRecord],
+    notes: Mapping[int, str],
+    templates: Sequence[TemplateView] | None,
+) -> tuple[object, ...]:
+    """Identity of the visible cards. Order, stock text and revision are part of it."""
+    parts = tuple(
+        (
+            record.id,
+            record.revision,
+            record.spec.name,
+            record.spec.piece_key,
+            record.spec.article_number,
+            record.spec.scale,
+            notes.get(record.id),
+        )
+        for record in records
+    )
+    recipes = tuple(
+        (template.id, template.name, template.article_number) for template in (templates or ())
+    )
+    return (parts, recipes)
 
 
 def _card(record: PartRecord, *, color_coding: bool, remaining: str | None = None) -> QWidget:

@@ -100,6 +100,23 @@ def pytest_runtest_teardown(item: pytest.Item) -> Iterator[None]:
     if "qtbot" in getattr(item, "fixturenames", ()):
         _dismiss_part_editors()
     yield
+    # deleteLater() survives processEvents() here. A closed window otherwise
+    # stays alive, and a later theme restore walks every one of them until the
+    # per-test limit kills the worker.
+    if "qtbot" in getattr(item, "fixturenames", ()):
+        _drain_deferred_deletes()
+
+
+def _drain_deferred_deletes() -> None:
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        return
+    for _ in range(4):
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
 
 
 def _dismiss_part_editors() -> None:

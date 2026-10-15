@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import Shiboken
 
 from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.config import AppConfig, save_config
@@ -845,6 +846,8 @@ class PlannerPage(QWidget):
         super().hideEvent(event)  # type: ignore[arg-type]
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if not Shiboken.isValid(self) or not Shiboken.isValid(watched):
+            return False
         if (
             event.type() == QEvent.Type.KeyPress
             and self.isVisible()
@@ -895,7 +898,7 @@ class PlannerPage(QWidget):
         return False
 
     def _tool(self, object_name: str, key: str, slot: Callable[[], None]) -> QPushButton:
-        button = QPushButton(self._translator.translate(key))
+        button = QPushButton(self._translator.translate(key), self)
         button.setObjectName(object_name)
         set_role(button, "ghost")
         button.clicked.connect(slot)
@@ -1067,6 +1070,12 @@ class PlannerPage(QWidget):
         return None
 
     def _show_selection(self) -> None:
+        canvas = self.canvas
+        if not Shiboken.isValid(canvas) or canvas._loading:
+            return
+        scene = canvas.scene()
+        if scene is None or not Shiboken.isValid(scene):
+            return
         selected = self._selected()
         self._filling = True
         if selected is None:
