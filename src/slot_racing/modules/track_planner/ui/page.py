@@ -1509,8 +1509,12 @@ class PlannerPage(QWidget):
         self.library.setCurrentRow(row)
 
     def _visible_templates(self, scale: object, *, compatible: bool) -> tuple[TemplateView, ...]:
-        """Recipes beside the parts. A compatibility filter has no single body to match."""
-        if compatible or not self._templates:
+        """Recipes beside the parts. A compatibility filter has no single body to match.
+
+        The personal collection counts parts and packages. A template has no
+        stock of its own, so it stays in the unlimited library only.
+        """
+        if self._collection_mode() or compatible or not self._templates:
             return ()
         if isinstance(scale, str) and scale != CATALOG_SCALE:
             return ()

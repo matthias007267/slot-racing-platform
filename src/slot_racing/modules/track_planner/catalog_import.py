@@ -166,6 +166,20 @@ def load_carrera_library() -> LibraryDraft:
     )
 
 
+def source_ids_hidden_from_collection() -> frozenset[str]:
+    """Template shells and source bodies the catalogue does not offer on their own.
+
+    ``listed`` is the source's own flag. A placement template is a separate
+    entry, and an unlisted body exists only so that template can be placed.
+    Neither is a stock row. The test is the source id, not the designation
+    and not the selectable flag.
+    """
+    draft = load_carrera_library()
+    hidden = {spec.source_id for spec in draft.parts if not spec.catalog_listed}
+    hidden.update(template.source_id for template in draft.templates)
+    return frozenset(hidden)
+
+
 def _payload(filename: str) -> dict[str, object]:
     text = (files("slot_racing.modules.track_planner") / "data" / filename).read_text(
         encoding="utf-8"
@@ -335,6 +349,7 @@ def _part_spec(
         piece_key=piece_key,
         systems=systems,
         selectable=source_id != HELPER_SOURCE,
+        catalog_listed=part.get("listed") is not False,
     )
 
 

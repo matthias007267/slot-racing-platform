@@ -263,6 +263,9 @@ class PartSpec:
     systems: tuple[str, ...] = ()
     # Hidden helpers stay in the library and out of the part picker.
     selectable: bool = True
+    # False when the source catalogue does not offer this body on its own.
+    # Those pieces belong to a placement template. A part drawn here stays listed.
+    catalog_listed: bool = True
 
 
 # A catalogue row, a catalogue row the user changed, or a part they created.
