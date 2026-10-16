@@ -67,7 +67,15 @@ class TrackPartDefinition(Base):
     manufacturer: Mapped[str] = mapped_column(String(80), default="", server_default="")
     description: Mapped[str | None] = mapped_column(String(500))
     # Source UUID. Empty for a part created in this application.
+    # It identifies an original body. Centre and short label do not depend on it.
     source_id: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    # Source ``center``, in millimetres. ``center_angle_deg`` is that centre's
+    # rotation in degrees, the same unit as the file and as ``QPainter.rotate``.
+    # Copies and custom parts keep these values without a source UUID.
+    center_x_mm: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    center_y_mm: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    center_angle_deg: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    short_label: Mapped[str] = mapped_column(String(80), default="", server_default="")
     # Internal piece key. Empty when this article has a single body.
     piece_key: Mapped[str] = mapped_column(String(40), default="", server_default="")
     # Comma-separated system names. evolution, digital, or both.

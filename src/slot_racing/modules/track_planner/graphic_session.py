@@ -595,6 +595,11 @@ class GraphicSession:
             if self._edited
             else (None if self._source is None else self._source.attachment),
             border_edges=() if self._edited or self._source is None else self._source.border_edges,
+            # The editor does not draw these. An edit of the plate keeps them.
+            center_x_mm=0.0 if self._source is None else self._source.center_x_mm,
+            center_y_mm=0.0 if self._source is None else self._source.center_y_mm,
+            short_label="" if self._source is None else self._source.short_label,
+            center_angle_deg=0.0 if self._source is None else self._source.center_angle_deg,
         )
         if not as_draft:
             validate_path_group(spec)

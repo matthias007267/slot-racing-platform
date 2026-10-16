@@ -305,11 +305,12 @@ class PartSpec:
     # False when the source catalogue does not offer this body on its own.
     # Those pieces belong to a placement template. A part drawn here stays listed.
     catalog_listed: bool = True
-    # Source ``center``. Attach points and template placeholders name this point.
+    # Source ``center``, stored on the definition. Attach points and template
+    # placeholders name this point. The angle is degrees, as in the file.
     center_x_mm: float = 0.0
     center_y_mm: float = 0.0
-    # Paint only. The source file overlays both on read. Neither is geometry,
-    # and neither moves a joint, a hit target or a saved pose.
+    # Paint. Stored with the centre. Neither is body geometry: a change does
+    # not move a joint, a hit target or a pose already saved on a plan.
     short_label: str = ""
     center_angle_deg: float = 0.0
 

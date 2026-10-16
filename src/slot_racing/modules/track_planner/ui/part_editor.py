@@ -3,6 +3,9 @@
 Saving is explicit. Opening a part and leaving it unchanged does not rewrite
 its geometry. A draft may be incomplete. A usable part needs a closed plate,
 valid paths and consistent lane joints.
+
+The stored centre, its rotation and the short label are loaded with the part
+and written back when the part is saved. The editor has no fields for them.
 """
 
 from __future__ import annotations
