@@ -26,6 +26,11 @@ jobs:
         run: uv run mypy src tests
       - name: Import Linter
         run: uv run lint-imports
+      - name: Sensor firmware capture checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++
+          make -C firmware test
 
   tests:
     name: Tests (${{ matrix.os }})

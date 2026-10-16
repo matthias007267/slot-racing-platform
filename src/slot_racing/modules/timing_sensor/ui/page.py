@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -23,10 +24,16 @@ from slot_racing.core.timing import TimingSetupService
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment, assignment_issues
 from slot_racing.modules.timing_sensor.intake import SensorObservation
-from slot_racing.modules.timing_sensor.link import SensorLink
+from slot_racing.modules.timing_sensor.link import SensorLink, TransportMode
+from slot_racing.modules.timing_sensor.protocol import BAUD_RATE
 from slot_racing.modules.timing_sensor.store import (
     SensorConfigurationError,
     SensorConfigurationStore,
+)
+from slot_racing.modules.timing_sensor.transport import (
+    SerialSensorTransport,
+    SimulatedSensorTransport,
+    list_serial_ports,
 )
 from slot_racing.uikit import describe_error, make_table
 from slot_racing.uikit.theme import configure_page
@@ -57,6 +64,31 @@ class SensorTimingPage(QWidget):
         tr = translator.translate
         self.mode_label = QLabel(tr("sensor.mode.simulation"))
         self.mode_label.setObjectName("sensor-mode")
+        self.transport_combo = QComboBox()
+        self.transport_combo.setObjectName("sensor-transport")
+        self.transport_combo.addItem(tr("sensor.mode.simulation"), TransportMode.SIMULATION.value)
+        self.transport_combo.addItem(tr("sensor.mode.serial"), TransportMode.SERIAL.value)
+        self.port_combo = QComboBox()
+        self.port_combo.setObjectName("sensor-port")
+        self.port_combo.setEditable(True)
+        self.baud_label = QLabel(str(BAUD_RATE))
+        self.baud_label.setObjectName("sensor-baud")
+        self.identity_label = QLabel(tr("sensor.identity.none"))
+        self.identity_label.setObjectName("sensor-identity")
+        self.quality_label = QLabel(tr("sensor.quality.none"))
+        self.quality_label.setObjectName("sensor-quality")
+        ports = QPushButton(tr("sensor.action.ports"))
+        ports.setObjectName("sensor-ports")
+        ports.clicked.connect(self._refresh_ports)
+        connect = QPushButton(tr("sensor.action.connect"))
+        connect.setObjectName("sensor-connect")
+        connect.clicked.connect(self._connect)
+        sync = QPushButton(tr("sensor.action.sync"))
+        sync.setObjectName("sensor-sync-now")
+        sync.clicked.connect(self._request_sync)
+        self._timer = QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self.refresh)
         self.connection_label = QLabel("")
         self.connection_label.setObjectName("sensor-connection")
         self.sync_label = QLabel("")
@@ -125,6 +157,11 @@ class SensorTimingPage(QWidget):
         )
         form = QFormLayout()
         form.addRow(tr("sensor.field.mode"), self.mode_label)
+        form.addRow(tr("sensor.field.mode"), self.transport_combo)
+        form.addRow(tr("sensor.field.port"), self.port_combo)
+        form.addRow(tr("sensor.field.baud"), self.baud_label)
+        form.addRow(tr("sensor.field.identity"), self.identity_label)
+        form.addRow(tr("sensor.field.quality"), self.quality_label)
         form.addRow(tr("sensor.field.connection"), self.connection_label)
         form.addRow(tr("sensor.field.sync"), self.sync_label)
         form.addRow(tr("sensor.field.readiness"), self.readiness_label)
@@ -147,8 +184,13 @@ class SensorTimingPage(QWidget):
         frame.addWidget(inject)
         layout = QVBoxLayout(self)
         configure_page(layout)
+        ports_row = QHBoxLayout()
+        ports_row.addWidget(ports)
+        ports_row.addWidget(connect)
+        ports_row.addWidget(sync)
         layout.addWidget(self.protocol_label)
         layout.addLayout(form)
+        layout.addLayout(ports_row)
         layout.addWidget(self.assignments)
         layout.addLayout(editor)
         layout.addLayout(mapping)
@@ -164,9 +206,11 @@ class SensorTimingPage(QWidget):
         if not self._holding:
             self._link.acquire()
             self._holding = True
+        self._timer.start()
         self.refresh()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
+        self._timer.stop()
         if self._holding:
             self._link.release()
             self._holding = False
@@ -287,8 +331,71 @@ class SensorTimingPage(QWidget):
             saved = ()
         self._link.bind_view(saved, logical)
 
+    def _refresh_ports(self) -> None:
+        current = self.port_combo.currentText()
+        self.port_combo.clear()
+        for name in list_serial_ports():
+            self.port_combo.addItem(name)
+        if current:
+            self.port_combo.setCurrentText(current)
+
+    def _connect(self) -> None:
+        mode = self.transport_combo.currentData()
+        try:
+            if mode == TransportMode.SERIAL.value:
+                port = self.port_combo.currentText().strip()
+                if not port:
+                    self.status.show_error(self._translator.translate("sensor.error.port"))
+                    return
+                self._link.use_transport(SerialSensorTransport(port), TransportMode.SERIAL)
+                self.mode_label.setText(self._translator.translate("sensor.mode.serial"))
+                self.status.show_info(self._translator.translate("sensor.connected_serial"))
+            else:
+                self._link.use_transport(SimulatedSensorTransport(), TransportMode.SIMULATION)
+                self.mode_label.setText(self._translator.translate("sensor.mode.simulation"))
+                self.status.clear_message()
+        except RuntimeError:
+            self.status.show_error(self._translator.translate("sensor.error.race_holds_reader"))
+            return
+        except Exception as error:
+            self.status.show_error(
+                self._translator.format("sensor.error.serial", detail=str(error))
+            )
+            return
+        self.refresh()
+
+    def _request_sync(self) -> None:
+        try:
+            self._link.request_sync()
+        except RuntimeError:
+            self.status.show_error(self._translator.translate("sensor.error.sync"))
+            return
+        self.refresh()
+
     def _paint_status(self) -> None:
         tr = self._translator.translate
+        self.mode_label.setText(tr(f"sensor.mode.{self._link.mode.value}"))
+        identity = self._link.identity
+        if identity is None:
+            self.identity_label.setText(tr("sensor.identity.none"))
+        else:
+            sensors = " ".join(identity.sensors)
+            self.identity_label.setText(
+                f"{identity.device} {identity.firmware} {identity.session_id} {sensors}"
+            )
+        samples, uncertainty, numerator, denominator, accepted = self._link.sync_quality
+        if accepted:
+            self.quality_label.setText(
+                self._translator.format(
+                    "sensor.quality.value",
+                    samples=samples,
+                    uncertainty=uncertainty,
+                    numerator=numerator,
+                    denominator=denominator,
+                )
+            )
+        else:
+            self.quality_label.setText(tr("sensor.quality.none"))
         self.connection_label.setText(
             tr("sensor.connection.open") if self._link.connected else tr("sensor.connection.closed")
         )

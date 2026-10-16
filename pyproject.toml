@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.10",
     "pydantic>=2.6",
+    "pyserial>=3.5",
     "segno>=1.6.6",
 ]
 
@@ -81,6 +82,10 @@ disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
 module = "cv2.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "serial.*"
 ignore_missing_imports = true
 
 [tool.importlinter]
@@ -228,6 +233,7 @@ name = "Sensor timing logic does not know the UI"
 type = "forbidden"
 source_modules = [
     "slot_racing.modules.timing_sensor.clock_map",
+    "slot_racing.modules.timing_sensor.clock_sync",
     "slot_racing.modules.timing_sensor.configuration",
     "slot_racing.modules.timing_sensor.intake",
     "slot_racing.modules.timing_sensor.link",

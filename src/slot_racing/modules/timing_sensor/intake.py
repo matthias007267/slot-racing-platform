@@ -19,8 +19,13 @@ from slot_racing.modules.timing_sensor.clock_map import (
 )
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment
 from slot_racing.modules.timing_sensor.protocol import (
+    ErrorFrame,
+    HelloFrame,
     SensorFrame,
     SensorProtocolError,
+    StatusFrame,
+    SyncCommand,
+    SyncReply,
     parse_sensor_line,
 )
 
@@ -69,23 +74,37 @@ def consume_line(
     observation is still built, and the caller decides whether to publish.
     """
     try:
-        frame = parse_sensor_line(line)
+        message = parse_sensor_line(line)
     except SensorProtocolError as error:
         return (
             state,
             SensorObservation(kind="parse_error", raw=line, detail=error.reason),
             None,
         )
-    if frame is None:
+    if message is None or isinstance(message, SyncCommand):
         return state, None, None
+    if isinstance(message, HelloFrame):
+        return _hello(state, message, line)
+    if isinstance(message, StatusFrame):
+        kind = "rollover" if message.code == "TIME" else "status"
+        return state, _control(message.session_id, line, kind, message.code), None
+    if isinstance(message, ErrorFrame):
+        return _error(state, message, line)
+    if isinstance(message, SyncReply):
+        return state, _control(message.session_id, line, "sync", str(message.host_seq)), None
+    frame = message
     restart = _restart(state, frame, line)
     if restart is not None:
         return restart
     if state.last_sequence is not None and frame.sequence == state.last_sequence:
         return state, _observation(frame, line, "duplicate"), None
-    gap = 0
-    if state.last_sequence is not None and frame.sequence > state.last_sequence + 1:
+    # Sequence numbers start at 1. A first line above 1 skipped the earlier edges.
+    if state.last_sequence is None:
+        gap = frame.sequence - 1
+    elif frame.sequence > state.last_sequence + 1:
         gap = frame.sequence - state.last_sequence - 1
+    else:
+        gap = 0
     advanced = replace(state, session_id=frame.session_id, last_sequence=frame.sequence)
     assignment = assignments.get(frame.physical_id)
     if assignment is None:
@@ -133,6 +152,46 @@ def without_mapping(state: IntakeState) -> IntakeState:
     if state.sync is SyncStatus.UNSYNCHRONIZED:
         return replace(state, mapping=None)
     return replace(state, mapping=None, sync=SyncStatus.LOST)
+
+
+def _hello(
+    state: IntakeState, frame: HelloFrame, raw: str
+) -> tuple[IntakeState, SensorObservation, None]:
+    changed = state.session_id is not None and frame.session_id != state.session_id
+    detail = f"{frame.device} {frame.firmware} {' '.join(frame.sensors)}"
+    if not changed:
+        updated = replace(state, session_id=frame.session_id)
+        return updated, _control(frame.session_id, raw, "hello", detail), None
+    locked = IntakeState(
+        mapping=None,
+        sync=SyncStatus.UNSYNCHRONIZED
+        if state.sync is SyncStatus.UNSYNCHRONIZED
+        else SyncStatus.LOST,
+        session_id=frame.session_id,
+        last_sequence=None,
+    )
+    return locked, _control(frame.session_id, raw, "restart", detail), None
+
+
+def _error(
+    state: IntakeState, frame: ErrorFrame, raw: str
+) -> tuple[IntakeState, SensorObservation, None]:
+    if frame.code == "BUFFER":
+        return state, _control(frame.session_id, raw, "buffer", str(frame.detail)), None
+    if frame.code == "TIME":
+        locked = replace(
+            state,
+            mapping=None,
+            sync=SyncStatus.UNSYNCHRONIZED
+            if state.sync is SyncStatus.UNSYNCHRONIZED
+            else SyncStatus.LOST,
+        )
+        return locked, _control(frame.session_id, raw, "time_fault", str(frame.detail)), None
+    return state, _control(frame.session_id, raw, "protocol", frame.code), None
+
+
+def _control(session_id: str, raw: str, kind: str, detail: str) -> SensorObservation:
+    return SensorObservation(kind=kind, raw=raw, session_id=session_id, detail=detail)
 
 
 def _restart(

@@ -114,14 +114,20 @@ class SensorTimingFactory(TimingSourceFactory):
         return ProviderAvailability.unavailable("error.timing_provider.sensor_time_unsynchronized")
 
     def validate(self, spec: TimingSessionSpec) -> None:
-        _checked_assignments(self._store, self._tracks, self._capacity, spec)
+        _checked_assignments(self._store, self._tracks, self._live_capacity(), spec)
 
     def create_source(self, spec: TimingSessionSpec) -> TimingSource:
         if self._link.race_bound:
             raise ProviderConfigurationError("error.timing_provider.sensor_busy")
-        assignments = _checked_assignments(self._store, self._tracks, self._capacity, spec)
+        assignments = _checked_assignments(self._store, self._tracks, self._live_capacity(), spec)
         logical = {sensor.position_id: sensor.id for sensor in spec.setup.sensors}
         return SensorTimingSource(self._link, assignments, logical, frozenset(spec.lanes))
+
+    def _live_capacity(self) -> DeviceCapacity | None:
+        count = self._link.reported_sensor_count
+        if count is None:
+            return self._capacity
+        return DeviceCapacity(count)
 
 
 def _checked_assignments(
