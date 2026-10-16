@@ -1018,6 +1018,67 @@ def _named_extend_pose(
     return pose
 
 
+def auto_attaches(spec: PartSpec) -> tuple[ConnectorSpec, ...]:
+    """Attach points that name a companion part. Rail continuations are not included.
+
+    In the source file these are the ``autoConnect`` points. They are stored as
+    border joints that remember the companion's centre. A track joint that only
+    names the next rail is a continuation, not a companion.
+    """
+    return tuple(
+        connector
+        for connector in spec.connectors
+        if connector.kind == BORDER_JOINT and connector.has_neighbor and connector.target_source_id
+    )
+
+
+def attach_edges(spec: PartSpec, attach: ConnectorSpec) -> tuple[ConnectorSpec, ...]:
+    """Every edge that belongs to one autoConnect side.
+
+    A single source edge is the attach point itself. Several edges share one
+    side when the file splits that side: each edge is kept on the nearest
+    attach point that names the same companion. One matching edge is not the
+    whole side.
+    """
+    if attach.edge_length_mm is not None or not attach.target_source_id:
+        return (attach,)
+    attaches = [
+        candidate
+        for candidate in spec.connectors
+        if candidate.kind == BORDER_JOINT
+        and candidate.has_neighbor
+        and candidate.target_source_id == attach.target_source_id
+    ]
+    owned: list[ConnectorSpec] = []
+    for edge in spec.connectors:
+        if (
+            edge.kind != BORDER_JOINT
+            or edge.has_neighbor
+            or edge.target_source_id != attach.target_source_id
+        ):
+            continue
+        nearest = min(
+            attaches,
+            key=lambda candidate: math.hypot(
+                candidate.x_mm - edge.x_mm, candidate.y_mm - edge.y_mm
+            ),
+        )
+        if nearest.name == attach.name:
+            owned.append(edge)
+    return tuple(owned) if owned else (attach,)
+
+
+def attach_satisfied(
+    host: PartInstance,
+    spec: PartSpec,
+    attach: ConnectorSpec,
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+) -> bool:
+    """True only when every edge of this autoConnect side already meets a mate."""
+    edges = attach_edges(spec, attach)
+    return all(connector_occupied(host, edge, placed, source_id=spec.source_id) for edge in edges)
+
+
 def neighbor_pose(
     host: PartInstance,
     connector: ConnectorSpec,
@@ -1114,10 +1175,9 @@ def snap_selection(
     if snap_mm < 0 or not proposed or not any(instance.id == anchor_id for instance, _ in proposed):
         raise ValidationError("error.planner.part")
     named = _named_neighbor_pose(proposed, stationary, snap_mm, target_blockers)
-    if named is not None:
-        return named
     original = {instance.id: instance for instance, _spec in source_blockers}
     best: tuple[tuple[float, str, int, int, str], _SnapJoin] | None = None
+    joins: list[tuple[tuple[float, str, int, int, str], _SnapJoin]] = []
     for moving, spec in proposed:
         prior = original.get(moving.id, moving)
         blockers = source_blockers if moving.id in original else ()
@@ -1145,15 +1205,98 @@ def snap_selection(
                         continue
                     key = (distance, target_instance.id, target_index, source_index, moving.id)
                     join = _SnapJoin(moving, source, target_instance, target)
+                    joins.append((key, join))
                     if best is None or key < best[0]:
                         best = (key, join)
+    named_mates = (
+        0
+        if named is None
+        else _selection_mates(named, proposed, stationary, source_blockers, target_blockers)
+    )
+    multi: tuple[tuple[int, tuple[float, str, int, int, str]], dict[str, Pose]] | None = None
+    for key, join in joins:
+        poses = _pose_for_join(proposed, join)
+        mates = _selection_mates(poses, proposed, stationary, source_blockers, target_blockers)
+        # One coinciding edge is the old snap. Two or more are one rigid seat,
+        # for a border side or a part dropped into a gap. Nothing already
+        # placed is moved to open that gap.
+        if mates < 2:
+            continue
+        rank = (-mates, key)
+        if multi is None or rank < multi[0]:
+            multi = (rank, poses)
+    if multi is not None and -multi[0][0] > named_mates:
+        return multi[1]
+    if named is not None:
+        return named
     if best is None:
         return _grid_selection(proposed, anchor_id, grid_mm)
-    join = best[1]
-    seated = join_pose(join.target, join.target_joint, join.source_joint)
-    delta = signed_delta_deg(join.moving.rotation_z_deg, seated.rotation_z_deg)
-    anchor = world_xy(join.target, join.target_joint.x_mm, join.target_joint.y_mm)
-    return _rotate_selection(proposed, join.moving, join.source_joint, anchor, delta)
+    return _pose_for_join(proposed, best[1])
+
+
+def _selection_mates(
+    poses: dict[str, Pose],
+    proposed: Sequence[tuple[PartInstance, PartSpec]],
+    stationary: Sequence[tuple[PartInstance, PartSpec]],
+    source_blockers: Sequence[tuple[PartInstance, PartSpec]],
+    target_blockers: Sequence[tuple[PartInstance, PartSpec]],
+) -> int:
+    """Free joints of the seated selection that meet a free compatible joint.
+
+    The tolerance is the occupancy rule: 1 mm and 20° from an opposing heading.
+    Exclusive digital joints still pass through :func:`connectors_compatible`,
+    so a plain edge cannot pretend to be a switch mate. Each joint is used once.
+    """
+    original = {instance.id: instance for instance, _spec in source_blockers}
+    used_target: set[tuple[str, int]] = set()
+    count = 0
+    for moving, spec in proposed:
+        pose = poses[moving.id]
+        seated = replace(
+            moving,
+            x_mm=pose.x_mm,
+            y_mm=pose.y_mm,
+            rotation_z_deg=pose.rotation_z_deg,
+        )
+        prior = original.get(moving.id, moving)
+        blockers = source_blockers if moving.id in original else ()
+        for source_index in free_connector_indexes(prior, spec, blockers):
+            source = spec.connectors[source_index]
+            point = world_xy(seated, source.x_mm, source.y_mm)
+            direction = normalize_deg(source.direction_deg + seated.rotation_z_deg)
+            hit: tuple[str, int] | None = None
+            for target_instance, target_spec in stationary:
+                if target_instance.id == moving.id:
+                    continue
+                indexes = free_connector_indexes(target_instance, target_spec, target_blockers)
+                for target_index in indexes:
+                    key = (target_instance.id, target_index)
+                    if key in used_target:
+                        continue
+                    target = target_spec.connectors[target_index]
+                    if not connectors_compatible(
+                        source,
+                        target,
+                        left_source=spec.source_id,
+                        right_source=target_spec.source_id,
+                    ):
+                        continue
+                    target_point = world_xy(target_instance, target.x_mm, target.y_mm)
+                    if math.hypot(point[0] - target_point[0], point[1] - target_point[1]) > 1.0:
+                        continue
+                    other_dir = normalize_deg(target.direction_deg + target_instance.rotation_z_deg)
+                    turn = abs(((direction - other_dir) % 360.0) - 180.0)
+                    if turn > 20.0:
+                        continue
+                    hit = key
+                    break
+                if hit is not None:
+                    break
+            if hit is None:
+                continue
+            used_target.add(hit)
+            count += 1
+    return count
 
 
 @dataclass(frozen=True, slots=True)
@@ -1162,6 +1305,15 @@ class _SnapJoin:
     source_joint: ConnectorSpec
     target: PartInstance
     target_joint: ConnectorSpec
+
+
+def _pose_for_join(
+    proposed: Sequence[tuple[PartInstance, PartSpec]], join: _SnapJoin
+) -> dict[str, Pose]:
+    seated = join_pose(join.target, join.target_joint, join.source_joint)
+    delta = signed_delta_deg(join.moving.rotation_z_deg, seated.rotation_z_deg)
+    anchor = world_xy(join.target, join.target_joint.x_mm, join.target_joint.y_mm)
+    return _rotate_selection(proposed, join.moving, join.source_joint, anchor, delta)
 
 
 def _rotate_selection(

@@ -58,6 +58,7 @@ from slot_racing.modules.track_planner.document import (
     TrackPlan,
     add_piece,
     attach_accessory,
+    complete_auto_connections,
     duplicate_instances,
     empty_plan,
     extend_from_connector,
@@ -323,6 +324,17 @@ class PlannerPage(QWidget):
         set_role(self.short_labels, "ghost")
         self.short_labels.setChecked(False)
         self.short_labels.toggled.connect(self._short_labels_changed)
+        self.auto_connect = self._tool(
+            "planner-auto-connect", "planner.auto_connect", self._complete_auto
+        )
+        self.auto_connect.setToolTip(translate("planner.auto_connect.hint"))
+        self.auto_on_place = QPushButton(translate("planner.auto_on_place"))
+        self.auto_on_place.setObjectName("planner-auto-on-place")
+        self.auto_on_place.setCheckable(True)
+        self.auto_on_place.setChecked(False)
+        set_role(self.auto_on_place, "ghost")
+        self.auto_on_place.setToolTip(translate("planner.auto_on_place.hint"))
+        self.auto_on_place.toggled.connect(self._auto_on_place_changed)
         self.mode_unlimited = QPushButton(translate("planner.mode.unlimited"))
         self.mode_unlimited.setObjectName("planner-mode-unlimited")
         self.mode_unlimited.setCheckable(True)
@@ -559,6 +571,8 @@ class PlannerPage(QWidget):
             self.save_as_button,
             self.color_coding,
             self.short_labels,
+            self.auto_connect,
+            self.auto_on_place,
             self.jump_button,
             self.discard_button,
             self.reset_button,
@@ -1222,6 +1236,8 @@ class PlannerPage(QWidget):
             self.add_curve,
             self.add_start,
             self.delete_button,
+            self.auto_connect,
+            self.auto_on_place,
             self.place_part,
             self.add_part,
             self.edit_part,
@@ -1290,6 +1306,7 @@ class PlannerPage(QWidget):
                 origin_y,
                 0.0,
                 self._parts,
+                auto_connect=self.auto_on_place.isChecked(),
             )
         except Exception as error:
             self._report(error)
@@ -1322,6 +1339,13 @@ class PlannerPage(QWidget):
         }
         try:
             updated = place_template(self._plan, members, x_mm, y_mm, 0.0, centers)
+            if self.auto_on_place.isChecked():
+                fresh = {
+                    instance.id
+                    for instance in updated.instances
+                    if instance.id not in {item.id for item in self._plan.instances}
+                }
+                updated = complete_auto_connections(updated, self._parts, fresh)
         except Exception as error:
             self._report(error)
             return
@@ -1400,7 +1424,16 @@ class PlannerPage(QWidget):
         if spec is None:
             return
         try:
-            updated = place_instance(self._plan, part_id, spec, x_mm, y_mm, 0.0, self._parts)
+            updated = place_instance(
+                self._plan,
+                part_id,
+                spec,
+                x_mm,
+                y_mm,
+                0.0,
+                self._parts,
+                auto_connect=self.auto_on_place.isChecked(),
+            )
         except Exception as error:
             self._report(error)
             return
@@ -1454,13 +1487,44 @@ class PlannerPage(QWidget):
     def _extended(self, instance_id: str, connector_index: int, direction: str) -> None:
         try:
             updated = extend_from_connector(
-                self._plan, instance_id, connector_index, direction, self._parts
+                self._plan,
+                instance_id,
+                connector_index,
+                direction,
+                self._parts,
+                auto_connect=self.auto_on_place.isChecked(),
             )
         except Exception as error:
             self._report(error)
             return
         created = updated.instances[-1].id if updated.instances else None
         self._commit(updated, created)
+
+    def _complete_auto(self) -> None:
+        """One undo step for every companion of the selection, or of the whole plan."""
+        if self._lane_count < 1:
+            return
+        selected = set(self.canvas.selected_ids())
+        try:
+            updated = complete_auto_connections(
+                self._plan, self._parts, selected if selected else None
+            )
+        except Exception as error:
+            self._report(error)
+            return
+        if updated == self._plan:
+            self.status.show_info(self._translator.translate("planner.auto_connect.none"))
+            return
+        fresh = [
+            instance.id
+            for instance in updated.instances
+            if instance.id not in {item.id for item in self._plan.instances}
+        ]
+        self._commit(updated, fresh)
+
+    def _auto_on_place_changed(self, enabled: bool) -> None:
+        """Session switch. Turning it on does not rewrite the open plan."""
+        self.canvas.set_auto_connect(enabled)
 
     def _short_labels_changed(self, enabled: bool) -> None:
         """Session switch. Softyroyal hides the badge until the plan asks for it."""

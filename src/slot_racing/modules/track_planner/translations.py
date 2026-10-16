@@ -94,6 +94,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.jump_start": "Zur Startgeraden springen",
         "planner.color_coding": "Farbcodierung",
         "planner.short_labels": "Kurzbezeichnung",
+        "planner.auto_connect": "Zugehörige ergänzen",
+        "planner.auto_connect.hint": (
+            "Setzt die zugehörigen Bauteile an die freien Anschlüsse der Auswahl. "
+            "Ohne Auswahl gilt das für die ganze Strecke. "
+            "Die Strecke ändert sich erst durch diesen Befehl."
+        ),
+        "planner.auto_connect.none": "Es gibt keine freien zugehörigen Bauteile.",
+        "planner.auto_on_place": "Beim Platzieren ergänzen",
+        "planner.auto_on_place.hint": (
+            "Neue Platzierungen erhalten ihre zugehörigen Bauteile. "
+            "Bestehende Strecken bleiben unverändert, auch wenn sie geöffnet werden."
+        ),
         "planner.start_straight": "Startgerade",
         "planner.start_straight.missing": "Es ist keine Startgerade platziert.",
         "planner.missing_parts": (
