@@ -7,13 +7,20 @@ after opening are stored separately and are not treated as the request.
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 from typing import Any
 
+from slot_racing.core.diagnostics import record
 from slot_racing.modules.timing_camera.camera_config import CameraChoice, CameraConfig
 from slot_racing.modules.timing_camera.capture import CameraOpenError, CameraReadError
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
+
+logger = logging.getLogger(__name__)
+
+_BACKEND_CONST = {"dshow": "CAP_DSHOW", "msmf": "CAP_MSMF", "any": "CAP_ANY"}
+_BACKEND_FALLBACK = {"dshow": 700, "msmf": 1400, "any": 0}
 
 
 class OpenCVCapture:
@@ -30,6 +37,8 @@ class OpenCVCapture:
         self.backend: str = ""
         self.device_name: str = ""
         self._regions: tuple[DetectionRoi, ...] = ()
+        self._closed = False
+        self._native = False
 
     def set_regions(self, regions: tuple[DetectionRoi, ...]) -> None:
         """Later reads convert only these rectangles. Empty restores the full frame."""
@@ -64,40 +73,125 @@ class OpenCVCapture:
 
     def open(self) -> None:
         cv2 = _cv2()
+        self._closed = False
+        self._native = False
+        # Names use COM on this thread. Read them before the capture graph exists,
+        # then release COM. Doing it afterwards can tear that graph down.
+        names = _capture_names()
         opened: Any = None
         chosen = ""
         for backend_id, token in _open_backends(cv2, self._config.backend):
             capture = _open_capture(cv2, self._config.device_index, backend_id)
             if capture is None:
+                _note_open(self._config, token, result="skipped", reason="constructor_failed")
                 continue
             try:
                 if not bool(capture.isOpened()):
                     capture.release()
+                    _note_open(self._config, token, result="skipped", reason="not_opened")
                     continue
             except Exception:
                 _release(capture)
+                _note_open(self._config, token, result="skipped", reason="open_error")
                 continue
             opened = capture
             chosen = token
             break
         if opened is None:
+            _note_open(
+                self._config,
+                self._config.backend or "auto",
+                result="failed",
+                reason="not_opened",
+            )
             raise CameraOpenError(f"camera device {self._config.device_index} could not be opened")
+        if not self._bind(cv2, opened, chosen, names, apply_hints=True):
+            raise CameraOpenError(f"camera device {self._config.device_index} could not be opened")
+
+    def reopen_native(self) -> bool:
+        """Open the same backend again without size, rate or buffer hints.
+
+        DirectShow applies those hints by rebuilding the filter graph. iVCam and
+        other virtual cameras can accept the request and then deliver no samples,
+        so ``isOpened`` stays true while every ``read`` fails. The selected
+        backend is kept. This does not run again once the native graph is open.
+        """
+        if (
+            self._closed
+            or self._native
+            or self._capture is None
+            or self.backend not in _BACKEND_CONST
+        ):
+            return False
+        cv2 = _cv2()
+        token = self.backend
+        index = self._config.device_index
+        name = self.device_name
+        backend_id = _backend_id(cv2, _BACKEND_CONST[token], _BACKEND_FALLBACK[token])
+        self._release_current()
+        if self._closed:
+            return False
+        capture = _open_capture(cv2, index, backend_id)
+        if capture is None:
+            _note_open(self._config, token, result="native_failed", reason="constructor_failed")
+            return False
         try:
-            # A virtual camera may reject a size or rate. That must not close it.
-            _request(opened, cv2.CAP_PROP_FRAME_WIDTH, float(self._config.width))
-            _request(opened, cv2.CAP_PROP_FRAME_HEIGHT, float(self._config.height))
-            _request(opened, cv2.CAP_PROP_FPS, float(self._config.fps))
-            # One buffered picture. A deeper driver queue would hand us stale frames.
-            _request(opened, getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
+            opened = bool(capture.isOpened())
+        except Exception:
+            _release(capture)
+            _note_open(self._config, token, result="native_failed", reason="open_error")
+            return False
+        if not opened:
+            _release(capture)
+            _note_open(self._config, token, result="native_failed", reason="not_opened")
+            return False
+        names = {(token, index): name} if name else {}
+        if not self._bind(cv2, capture, token, names, apply_hints=False):
+            _note_open(self._config, token, result="native_failed", reason="closed")
+            return False
+        return True
+
+    def _bind(
+        self,
+        cv2: Any,
+        opened: Any,
+        chosen: str,
+        names: dict[tuple[str, int], str],
+        *,
+        apply_hints: bool,
+    ) -> bool:
+        try:
+            if apply_hints:
+                # A virtual camera may reject a size or rate. That must not close it.
+                _request(opened, cv2.CAP_PROP_FRAME_WIDTH, float(self._config.width))
+                _request(opened, cv2.CAP_PROP_FRAME_HEIGHT, float(self._config.height))
+                _request(opened, cv2.CAP_PROP_FPS, float(self._config.fps))
+                # One buffered picture. A deeper driver queue would hand us stale frames.
+                _request(opened, getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
             self.actual_width = _reported_size(opened.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.actual_height = _reported_size(opened.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.actual_fps = _reported_fps(opened.get(cv2.CAP_PROP_FPS))
             self.backend = chosen
-            self.device_name = _capture_names().get((chosen, self._config.device_index), "")
+            self.device_name = names.get((chosen, self._config.device_index), "")
+            self._native = not apply_hints
+            if self._closed:
+                _release(opened)
+                return False
             self._capture = opened
         except Exception:
             _release(opened)
             raise
+        _note_open(
+            self._config,
+            chosen,
+            result="opened" if apply_hints else "opened_native",
+            reason="hints" if apply_hints else "native",
+            actual_width=self.actual_width,
+            actual_height=self.actual_height,
+            actual_fps=self.actual_fps,
+            name=self.device_name,
+        )
+        return True
 
     def read(self) -> GrayFrame:
         capture = self._capture
@@ -110,10 +204,14 @@ class OpenCVCapture:
         return _as_gray_frame(cv2, image)
 
     def close(self) -> None:
+        self._closed = True
+        self._release_current()
+
+    def _release_current(self) -> None:
         capture = self._capture
         self._capture = None
         if capture is not None:
-            capture.release()
+            _release(capture)
 
 
 def probe_device_indices(limit: int = 5) -> tuple[int, ...]:
@@ -370,8 +468,7 @@ def _reported_fps(value: object) -> float | None:
 
 
 def _as_gray_frame(cv2: Any, image: Any) -> GrayFrame:
-    if int(getattr(image, "ndim", 0)) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    image = _to_gray(cv2, image)
     height, width = image.shape[:2]
     return GrayFrame(int(width), int(height), _pixel_bytes(image))
 
@@ -380,10 +477,80 @@ def _crop_gray(cv2: Any, image: Any, width: int, height: int, roi: DetectionRoi)
     if roi.x + roi.width > width or roi.y + roi.height > height:
         raise ValueError("zone extends outside the frame")
     view = image[roi.y : roi.y + roi.height, roi.x : roi.x + roi.width]
-    if int(getattr(view, "ndim", 0)) == 3:
-        view = cv2.cvtColor(view, cv2.COLOR_BGR2GRAY)
+    view = _to_gray(cv2, view)
     crop_height, crop_width = view.shape[:2]
     return GrayFrame(int(crop_width), int(crop_height), _pixel_bytes(view))
+
+
+def _to_gray(cv2: Any, image: Any) -> Any:
+    """BGR and BGRA become one channel. A grayscale picture is returned unchanged.
+
+    Virtual cameras often deliver RGB32. Treating those four channels as BGR
+    raises inside OpenCV, and three such reads used to close the device.
+    """
+    channels = _channel_count(image)
+    if channels == 1:
+        return image
+    if channels == 4:
+        code = getattr(cv2, "COLOR_BGRA2GRAY", None)
+    elif channels == 3:
+        code = getattr(cv2, "COLOR_BGR2GRAY", None)
+    else:
+        raise CameraReadError("camera frame is missing")
+    if isinstance(code, bool) or not isinstance(code, int):
+        raise CameraReadError("camera frame is missing")
+    return cv2.cvtColor(image, code)
+
+
+def _channel_count(image: Any) -> int:
+    shape = getattr(image, "shape", None)
+    if isinstance(shape, tuple) and len(shape) >= 3 and isinstance(shape[2], int):
+        return shape[2]
+    return 1
+
+
+def _note_open(
+    config: CameraConfig,
+    backend: str,
+    *,
+    result: str,
+    reason: str,
+    actual_width: int | None = None,
+    actual_height: int | None = None,
+    actual_fps: float | None = None,
+    name: str = "",
+) -> None:
+    logger.info(
+        "CAMERA_OPEN index=%s backend=%s result=%s reason=%s requested=%sx%s@%s "
+        "actual=%sx%s fps=%s name=%s",
+        config.device_index,
+        backend,
+        result,
+        reason,
+        config.width,
+        config.height,
+        config.fps,
+        "" if actual_width is None else actual_width,
+        "" if actual_height is None else actual_height,
+        "" if actual_fps is None else actual_fps,
+        name,
+    )
+    record(
+        "CAMERA_OPEN",
+        module="timing_camera",
+        page="camera",
+        result=result,
+        index=config.device_index,
+        backend=backend,
+        reason=reason,
+        requested_width=config.width,
+        requested_height=config.height,
+        requested_fps=config.fps,
+        actual_width="" if actual_width is None else actual_width,
+        actual_height="" if actual_height is None else actual_height,
+        actual_fps="" if actual_fps is None else actual_fps,
+        name=name,
+    )
 
 
 def _pixel_bytes(image: Any) -> bytes:
