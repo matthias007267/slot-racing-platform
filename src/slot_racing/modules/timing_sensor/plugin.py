@@ -31,11 +31,13 @@ class SensorTimingPlugin(Plugin):
                 "Status, Fehler und Uhrensynchronisation. Die Gerätezeit steht in "
                 "Nanosekunden; das ist keine Genauigkeitszusage."
             ),
+            "sensor.field.current": "Aktueller Betrieb",
+            "sensor.field.source": "Quelle",
             "sensor.field.mode": "Betriebsart",
             "sensor.field.port": "COM-Port",
             "sensor.field.baud": "Baudrate",
             "sensor.field.identity": "Gerät",
-            "sensor.field.quality": "Synchronisation",
+            "sensor.field.quality": "Synchronisationsqualität",
             "sensor.field.connection": "Verbindung",
             "sensor.field.sync": "Zeitzuordnung",
             "sensor.field.readiness": "Messbereitschaft",
@@ -55,15 +57,45 @@ class SensorTimingPlugin(Plugin):
             "sensor.column.result": "Ergebnis",
             "sensor.action.add": "Hinzufügen",
             "sensor.action.remove": "Entfernen",
-            "sensor.action.save": "Speichern",
+            "sensor.action.save": "Zuordnung speichern",
+            "sensor.action.open_timing": "Timing einrichten",
+            "sensor.action.open_tracks": "Strecke anlegen",
             "sensor.action.apply_mapping": "Zeitzuordnung setzen",
             "sensor.action.clear_mapping": "Zeitzuordnung verwerfen",
             "sensor.action.inject": "Meldung einspeisen",
             "sensor.action.connect": "Verbinden",
-            "sensor.action.ports": "Ports suchen",
-            "sensor.action.sync": "Uhr synchronisieren",
+            "sensor.action.ports": "COM-Ports suchen",
+            "sensor.action.sync": "Uhr erneut synchronisieren",
             "sensor.line.placeholder": "PSF/1 sitzung 1 0 sensor-a",
             "sensor.saved": "Zuordnung gespeichert.",
+            "sensor.developer": "Entwickler",
+            "sensor.field.offset": "Offset (ns)",
+            "sensor.field.numerator": "Zähler",
+            "sensor.field.denominator": "Nenner",
+            "sensor.field.line": "Protokollzeile",
+            "sensor.log.title": "Ereignisprotokoll",
+            "sensor.position.choose": "Messpunkt wählen",
+            "sensor.position.start_finish": "Start/Ziel",
+            "sensor.position.sector": "Sektor {number}",
+            "sensor.lane.value": "Spur {lane}",
+            "sensor.track.inactive": "inaktiv",
+            "sensor.hint.no_catalog": (
+                "Die Streckenverwaltung ist nicht aktiv. Vorhandene Strecken können "
+                "deshalb nicht geladen werden."
+            ),
+            "sensor.hint.no_tracks": (
+                "Noch keine Strecke vorhanden. Zum Anlegen genügen ein Name und die Spurzahl."
+            ),
+            "sensor.hint.no_setup": (
+                "Für „{name}“ ist noch keine Timing-Konfiguration mit Start/Ziel gespeichert."
+            ),
+            "sensor.hint.position_missing": "Für Sensor {sensor} ist kein Messpunkt gewählt.",
+            "sensor.hint.lane_missing": "Für Sensor {sensor} ist keine Spur gewählt.",
+            "sensor.hint.unsaved": "Die Zuordnung ist geändert und noch nicht gespeichert.",
+            "sensor.hint.sync_started": "Die Uhrensynchronisation wurde gestartet.",
+            "sensor.error.timing_navigation": (
+                "Die Timing-Konfiguration kann von hier nicht geöffnet werden."
+            ),
             "sensor.mapping.applied": "Zeitzuordnung übernommen.",
             "sensor.mapping.cleared": "Zeitzuordnung verworfen. Die Erfassung ist gesperrt.",
             "sensor.error.no_track": "Keine Strecke ausgewählt.",
@@ -148,14 +180,20 @@ class SensorTimingPlugin(Plugin):
         store = SensorConfigurationStore(context.get_service(Database))
         link = SensorLink()
         self._link: SensorLink | None = link
-        tracks = context.find_service(TrackCatalog)
-        setups = context.find_service(TimingSetupService)
-        context.register_timing_provider(SensorTimingFactory(link, store, tracks))
+        context.register_timing_provider(
+            SensorTimingFactory(link, store, lambda: context.find_service(TrackCatalog))
+        )
 
         def sensor_page() -> object:
             from slot_racing.modules.timing_sensor.ui.page import SensorTimingPage
 
-            return SensorTimingPage(context.translator, link, store, setups, tracks)
+            return SensorTimingPage(
+                context.translator,
+                link,
+                store,
+                lambda: context.find_service(TimingSetupService),
+                lambda: context.find_service(TrackCatalog),
+            )
 
         context.add_navigation(
             NavigationItem(
