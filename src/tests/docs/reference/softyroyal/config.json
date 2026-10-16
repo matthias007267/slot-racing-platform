@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "keys": [{"uri": "https://softyroyal.de/systems/public.pem"}],
+  "motd": "Could also run on Chromebooks.",
+  "mapping": {"uri": "https://softyroyal.de/systems/mapping.json"},
+  "info": {"id": 20260907, "uri": "https://softyroyal.de/systems/info.md"},
+  "available": [
+    {"default": true, "uri": "https://softyroyal.de/systems/carrera_evolution_20260921.planer.json", "name": "Carrera Evolution", "author": "Softyroyal"},
+    {"default": true, "uri": "https://softyroyal.de/systems/carrera_digital_20260921.planer.json", "name": "Carrera Digital", "author": "Softyroyal"},
+    {"default": false, "uri": "https://softyroyal.de/systems/carrera_go_20261002.planer.json", "name": "Carrera Go!!!", "author": "Softyroyal"},    
+    {"default": false, "uri": "https://softyroyal.de/systems/policar_20260921.planer.json", "name": "Policar", "author": "Softyroyal"}
+  ]
+}
