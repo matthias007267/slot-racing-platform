@@ -277,6 +277,7 @@ class GraphicEditor(QWidget):
         self._fill_list()
         self._show_metrics()
         self.canvas.update()
+        self._show_drawing_limit()
 
     def show_issues(self, issues: tuple[tuple[str, str], ...]) -> None:
         if not issues:
@@ -398,7 +399,20 @@ class GraphicEditor(QWidget):
         self._show_metrics()
         self._fill_list()
         self.canvas.update()
+        self._show_drawing_limit()
         self.changed.emit()
+
+    def _show_drawing_limit(self) -> None:
+        """Say when an edit left original drawings in place on purpose."""
+        try:
+            self.spec_provider()
+        except (ValidationError, ValueError):
+            return
+        text = self._translator.translate("planner.editor.drawing_kept")
+        if self.session.unlinked:
+            self.issue.setText(text)
+        elif self.issue.text() == text:
+            self.issue.setText("")
 
     def _fill_list(self) -> None:
         self._filling = True
