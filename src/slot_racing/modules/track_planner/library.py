@@ -18,6 +18,7 @@ from slot_racing.modules.track_planner.catalog_import import (
     PackageDraft,
     TemplateDraft,
     load_carrera_library,
+    source_anchor,
 )
 from slot_racing.modules.track_planner.inventory import (
     PackageContribution,
@@ -1407,6 +1408,10 @@ class PartLibrary:
 
     def _add_connectors(self, session: Session, part_id: int, spec: PartSpec) -> None:
         for index, connector in enumerate(spec.connectors):
+            points: list[list[object]] = [list(point) for point in connector.lane_points]
+            if connector.edge_length_mm is not None:
+                # The column stays a point list. The marker is not a groove end.
+                points.insert(0, [_EDGE_LENGTH_MARK, connector.edge_length_mm])
             session.add(
                 TrackPartConnector(
                     part_id=part_id,
@@ -1425,7 +1430,7 @@ class PartLibrary:
                     neighbor_x=connector.neighbor_x,
                     neighbor_y=connector.neighbor_y,
                     neighbor_angle=connector.neighbor_angle,
-                    lane_points=[list(point) for point in connector.lane_points],
+                    lane_points=points,
                 )
             )
 
@@ -1442,6 +1447,36 @@ class PartLibrary:
             matched = next((edge.spans for edge in edges if edge.slot in profile.slots), ())
             profile = replace(profile, edge=matched)
             edges = ()
+        stored_connectors = tuple(
+            ConnectorSpec(
+                name=connector.name,
+                x_mm=connector.x_mm,
+                y_mm=connector.y_mm,
+                z_mm=connector.z_mm,
+                direction_deg=connector.direction_deg,
+                kind=connector.kind,
+                lanes=tuple(int(lane) for lane in connector.lanes),
+                target_source_id=connector.target_source_id or "",
+                edge_types=tuple(part for part in (connector.edge_types or "").split(",") if part),
+                exclusive=bool(connector.exclusive),
+                has_neighbor=bool(connector.has_neighbor),
+                neighbor_x=connector.neighbor_x or 0.0,
+                neighbor_y=connector.neighbor_y or 0.0,
+                neighbor_angle=connector.neighbor_angle or 0.0,
+                lane_points=_lane_points(connector.lane_points),
+                edge_length_mm=_edge_length(connector.lane_points),
+            )
+            for connector in connectors
+        )
+        center_x_mm = 0.0
+        center_y_mm = 0.0
+        # The file stays the geometry of an untouched catalogue body. Stored
+        # rows are not rewritten. A part the user has changed keeps its joints.
+        anchor = source_anchor(definition.source_id or "")
+        if anchor is not None:
+            center_x_mm, center_y_mm, file_connectors = anchor
+            if definition.origin == ORIGIN_CATALOG:
+                stored_connectors = file_connectors
         spec = PartSpec(
             article_number=definition.article_number,
             scale=definition.scale,
@@ -1453,32 +1488,7 @@ class PartLibrary:
             radius_mm=definition.radius_mm,
             angle_deg=definition.angle_deg,
             lane_count=definition.lane_count,
-            connectors=tuple(
-                ConnectorSpec(
-                    name=connector.name,
-                    x_mm=connector.x_mm,
-                    y_mm=connector.y_mm,
-                    z_mm=connector.z_mm,
-                    direction_deg=connector.direction_deg,
-                    kind=connector.kind,
-                    lanes=tuple(int(lane) for lane in connector.lanes),
-                    target_source_id=connector.target_source_id or "",
-                    edge_types=tuple(
-                        part for part in (connector.edge_types or "").split(",") if part
-                    ),
-                    exclusive=bool(connector.exclusive),
-                    has_neighbor=bool(connector.has_neighbor),
-                    neighbor_x=connector.neighbor_x or 0.0,
-                    neighbor_y=connector.neighbor_y or 0.0,
-                    neighbor_angle=connector.neighbor_angle or 0.0,
-                    lane_points=tuple(
-                        (float(point[0]), float(point[1]))
-                        for point in (connector.lane_points or [])
-                        if isinstance(point, (list, tuple)) and len(point) >= 2
-                    ),
-                )
-                for connector in connectors
-            ),
+            connectors=stored_connectors,
             outline=tuple((float(point[0]), float(point[1])) for point in definition.outline),
             slot_paths=slots,
             attachment=profile,
@@ -1490,6 +1500,8 @@ class PartLibrary:
             piece_key=definition.piece_key or "",
             systems=tuple(part for part in (definition.systems or "").split(",") if part),
             selectable=bool(definition.selectable),
+            center_x_mm=center_x_mm,
+            center_y_mm=center_y_mm,
         )
         return PartRecord(
             definition.id,
@@ -1866,6 +1878,46 @@ def _require_package_spec(spec: PackageSpec) -> PackageSpec:
             )
         )
     return PackageSpec(manufacturer, article, name, tuple(contents))
+
+
+# Stored in lane_points ahead of the groove ends. It is not a lane coordinate.
+_EDGE_LENGTH_MARK = "edge-length"
+
+
+def _point_rows(raw: object) -> list[list[object] | tuple[object, ...]]:
+    if not isinstance(raw, list):
+        return []
+    return [point for point in raw if isinstance(point, (list, tuple)) and len(point) >= 2]
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _lane_points(raw: object) -> tuple[tuple[float, float], ...]:
+    points: list[tuple[float, float]] = []
+    for point in _point_rows(raw):
+        if point[0] == _EDGE_LENGTH_MARK:
+            continue
+        x_mm = _number(point[0])
+        y_mm = _number(point[1])
+        if x_mm is None or y_mm is None:
+            continue
+        points.append((x_mm, y_mm))
+    return tuple(points)
+
+
+def _edge_length(raw: object) -> float | None:
+    for point in _point_rows(raw):
+        if point[0] != _EDGE_LENGTH_MARK:
+            continue
+        length = _number(point[1])
+        if length is None or length <= 0.0:
+            return None
+        return length
+    return None
 
 
 def _attachment_profile(definition: TrackPartDefinition) -> AttachmentProfile | None:

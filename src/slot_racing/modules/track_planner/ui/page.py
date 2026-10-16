@@ -1278,8 +1278,16 @@ class PlannerPage(QWidget):
             (member.part_id, member.x_mm, member.y_mm, member.angle_deg)
             for member in template.members
         )
+        centers = {
+            member.part_id: (
+                self._parts[member.part_id].center_x_mm,
+                self._parts[member.part_id].center_y_mm,
+            )
+            for member in template.members
+            if member.part_id in self._parts
+        }
         try:
-            updated = place_template(self._plan, members, x_mm, y_mm, 0.0)
+            updated = place_template(self._plan, members, x_mm, y_mm, 0.0, centers)
         except Exception as error:
             self._report(error)
             return
