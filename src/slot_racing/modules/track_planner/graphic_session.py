@@ -3,6 +3,11 @@
 Coordinates are millimetres. A click commits geometry; the hover preview does
 not. Undo restores elements, not the mouse position. The compiled
 :class:`PartSpec` is the same body the plan paints.
+
+An edit of a stored part patches the lanes, the plate and the joints that
+changed. A source drawing moves only when it is the only stroke of that lane
+or the only fill of that plate. Every other path, joint and catalogue field
+stays. A part drawn in this session still compiles from its elements alone.
 """
 
 from __future__ import annotations
@@ -172,6 +177,8 @@ class GraphicSession:
         self._baseline: tuple[EditorElement, ...] = ()
         self._path_kind = KIND_LANE
         self._edited = False
+        # Lanes or the plate whose original drawing could not be tied to one path.
+        self.unlinked: frozenset[str] = frozenset()
 
     @property
     def source(self) -> PartSpec | None:
@@ -201,6 +208,7 @@ class GraphicSession:
         self._seq = _sequence_of(self.elements)
         self._path_kind = KIND_LANE
         self._edited = False
+        self.unlinked = frozenset()
 
     def set_tool(self, tool: str) -> None:
         if tool not in TOOLS:
@@ -350,6 +358,7 @@ class GraphicSession:
         self._redo.append(self.elements)
         self.elements = self._undo.pop()
         self._edited = self.elements != self._baseline
+        self.unlinked = frozenset()
         self.selected = frozenset()
         self._pen = None
 
@@ -359,6 +368,7 @@ class GraphicSession:
         self._undo.append(self.elements)
         self.elements = self._redo.pop()
         self._edited = self.elements != self._baseline
+        self.unlinked = frozenset()
 
     def can_undo(self) -> bool:
         return bool(self._undo)
@@ -491,6 +501,7 @@ class GraphicSession:
         as_draft: bool,
     ) -> PartSpec:
         """The stored body. An untouched open keeps the original geometry."""
+        self.unlinked = frozenset()
         if self._source is not None and not self._edited:
             return _with_category(
                 with_metadata(
@@ -522,6 +533,27 @@ class GraphicSession:
             if not as_draft:
                 validate_path_group(spec)
             return spec
+        if self._source is not None:
+            spec, unlinked = _preserve_source_edit(
+                _with_category(
+                    with_metadata(
+                        self._source,
+                        article_number=article_number,
+                        scale=scale,
+                        name=name,
+                        manufacturer=manufacturer,
+                        description=description,
+                    ),
+                    category,
+                    as_draft=as_draft,
+                ),
+                self._baseline,
+                self.elements,
+            )
+            self.unlinked = unlinked
+            if not as_draft:
+                validate_path_group(spec)
+            return spec
         plate = self.plate()
         lanes = tuple(
             SlotPath(item.spans, PATH_SLOT, item.lane)
@@ -539,11 +571,10 @@ class GraphicSession:
         outline = outline_from_spans(plate.spans) if plate is not None and plate.spans else ()
         if not outline and self._source is not None and not self._edited:
             outline = self._source.outline
-        preserved = tuple(
-            connector
-            for connector in (self._source.connectors if self._source is not None else ())
-            if connector.kind != TRACK
+        source_connectors: tuple[ConnectorSpec, ...] = (
+            () if self._source is None else self._source.connectors
         )
+        preserved = tuple(connector for connector in source_connectors if connector.kind != TRACK)
         connectors = (
             tuple(
                 ConnectorSpec(
@@ -1143,6 +1174,373 @@ def _center_paths(elements: tuple[EditorElement, ...]) -> tuple[SlotPath, ...]:
         for item in elements
         if item.kind == KIND_CENTER and item.spans
     )
+
+
+def _preserve_source_edit(
+    source: PartSpec,
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+) -> tuple[PartSpec, frozenset[str]]:
+    """Patch ``source`` with the elements that differ from the loaded baseline.
+
+    A drawing follows a lane only when that lane is the only groove with the
+    same spans. A fill follows the plate only when it is the only filled path
+    with the plate's spans. Anything else is kept byte for byte, including
+    catalogue identity, border joints and paint order.
+    """
+    unlinked: set[str] = set()
+    paths = _patch_paths(source.slot_paths, baseline, current, unlinked)
+    paths, contours, outline = _patch_plate(source, baseline, current, paths, unlinked)
+    numbers = [item.lane for item in current if item.kind == KIND_LANE and item.lane is not None]
+    lane_count = max(numbers) if numbers else source.lane_count
+    spec = replace(
+        source,
+        lane_count=lane_count,
+        connectors=_patch_connectors(source.connectors, baseline, current),
+        outline=outline,
+        slot_paths=paths,
+        contours=contours,
+    )
+    return spec, frozenset(unlinked)
+
+
+def _patch_paths(
+    paths: tuple[SlotPath, ...],
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+    unlinked: set[str],
+) -> tuple[SlotPath, ...]:
+    slots = [(index, path) for index, path in enumerate(paths) if path.kind == PATH_SLOT]
+    baseline_lanes = [item for item in baseline if item.kind == KIND_LANE and item.spans]
+    current_lanes = {item.id: item for item in current if item.kind == KIND_LANE}
+    paired = _pair_slots(slots, baseline_lanes)
+    links = _stroke_links(paths, slots)
+    edited: dict[int, EditorElement | None] = {}
+    for index, lane in paired.items():
+        edited[index] = current_lanes.get(lane.id)
+        replacement = edited[index]
+        linked = [draw for draw, slot in links.items() if slot == index]
+        changed = replacement is None or not replacement.spans or replacement.spans != lane.spans
+        if changed and not linked:
+            unlinked.add(lane.id)
+    kept: list[SlotPath] = []
+    for index, path in enumerate(paths):
+        if path.kind == PATH_SLOT and index in edited:
+            replacement = edited[index]
+            if replacement is None or not replacement.spans:
+                continue
+            if replacement.spans == path.spans and replacement.lane == path.lane:
+                kept.append(path)
+            else:
+                kept.append(replace(path, spans=replacement.spans, lane=replacement.lane))
+            continue
+        if path.kind == PATH_DRAW:
+            slot = links.get(index)
+            if slot is None or slot not in edited:
+                kept.append(path)
+                continue
+            replacement = edited[slot]
+            if replacement is None or not replacement.spans:
+                continue
+            if replacement.spans == path.spans:
+                kept.append(path)
+            else:
+                kept.append(replace(path, spans=replacement.spans))
+            continue
+        if path.kind == PATH_CENTER:
+            patched = _patched_named(path, index, "center", baseline, current)
+            if patched is not None:
+                kept.append(patched)
+            continue
+        if path.kind == PATH_START:
+            patched = _patched_start(path, index, paths, baseline, current)
+            if patched is not None:
+                kept.append(patched)
+            continue
+        kept.append(path)
+    kept.extend(_added_lanes(paths, slots, paired, links, baseline_lanes, current, unlinked))
+    kept.extend(_extra_starts(baseline, current))
+    known_centers = {
+        f"center-{index + 1}" for index, path in enumerate(paths) if path.kind == PATH_CENTER
+    }
+    fresh = tuple(
+        item
+        for item in current
+        if item.kind == KIND_CENTER and item.spans and item.id not in known_centers
+    )
+    kept.extend(_center_paths(fresh))
+    return tuple(kept)
+
+
+def _pair_slots(
+    slots: list[tuple[int, SlotPath]], lanes: list[EditorElement]
+) -> dict[int, EditorElement]:
+    """One stored groove to the element that was loaded from it."""
+    used: set[str] = set()
+    paired: dict[int, EditorElement] = {}
+    for index, path in slots:
+        hits = [lane for lane in lanes if lane.id not in used and lane.spans == path.spans]
+        if len(hits) == 1:
+            paired[index] = hits[0]
+            used.add(hits[0].id)
+    for index, path in slots:
+        if index in paired or path.lane is None:
+            continue
+        hits = [lane for lane in lanes if lane.id not in used and lane.lane == path.lane]
+        if len(hits) == 1:
+            paired[index] = hits[0]
+            used.add(hits[0].id)
+    return paired
+
+
+def _stroke_links(paths: tuple[SlotPath, ...], slots: list[tuple[int, SlotPath]]) -> dict[int, int]:
+    """Drawing index to groove index, only when one open stroke copies that groove."""
+    links: dict[int, int] = {}
+    for index, path in enumerate(paths):
+        if path.kind != PATH_DRAW or path.fill:
+            continue
+        hits = [slot for slot, groove in slots if groove.spans == path.spans]
+        if len(hits) == 1:
+            links[index] = hits[0]
+    return links
+
+
+def _ink_key(path: SlotPath) -> tuple[object, ...]:
+    return (
+        path.stroke,
+        path.width_mm,
+        path.linecap,
+        path.fill,
+        path.fill_alt,
+        path.dashed,
+        path.closed,
+        path.extras,
+    )
+
+
+def _added_lanes(
+    paths: tuple[SlotPath, ...],
+    slots: list[tuple[int, SlotPath]],
+    paired: dict[int, EditorElement],
+    links: dict[int, int],
+    baseline_lanes: list[EditorElement],
+    current: tuple[EditorElement, ...],
+    unlinked: set[str],
+) -> tuple[SlotPath, ...]:
+    known = {lane.id for lane in baseline_lanes}
+    added = [
+        item for item in current if item.kind == KIND_LANE and item.spans and item.id not in known
+    ]
+    if not added:
+        return ()
+    groups: list[tuple[tuple[object, ...], ...]] = []
+    exemplars: list[list[SlotPath]] = []
+    for index, _groove in slots:
+        if index not in paired:
+            continue
+        drawings = [paths[draw] for draw, slot in links.items() if slot == index]
+        groups.append(tuple(sorted(_ink_key(path) for path in drawings)))
+        exemplars.append(drawings)
+    uniform = len(set(groups)) == 1 and bool(groups) and bool(groups[0])
+    created: list[SlotPath] = []
+    model = exemplars[0] if uniform else []
+    for lane in added:
+        created.append(SlotPath(lane.spans, PATH_SLOT, lane.lane))
+        if model:
+            created.extend(replace(path, spans=lane.spans) for path in model)
+        else:
+            unlinked.add(lane.id)
+    return tuple(created)
+
+
+def _patched_named(
+    path: SlotPath,
+    index: int,
+    prefix: str,
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+) -> SlotPath | None:
+    """The same centre path, or ``None`` when the loaded mark was removed."""
+    element_id = f"{prefix}-{index + 1}"
+    loaded = next((item for item in baseline if item.id == element_id), None)
+    if loaded is None:
+        return path
+    edited = next((item for item in current if item.id == element_id), None)
+    if edited is None or not edited.spans:
+        return None
+    if (
+        edited.spans == loaded.spans
+        and edited.stroke == loaded.stroke
+        and edited.width_mm == loaded.width_mm
+        and edited.linecap == loaded.linecap
+        and edited.dashed == loaded.dashed
+        and edited.z_order == loaded.z_order
+    ):
+        return path
+    return replace(
+        path,
+        spans=edited.spans,
+        stroke=edited.stroke,
+        width_mm=edited.width_mm,
+        linecap=edited.linecap,
+        dashed=edited.dashed,
+        z_order=edited.z_order,
+    )
+
+
+def _patched_start(
+    path: SlotPath,
+    index: int,
+    paths: tuple[SlotPath, ...],
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+) -> SlotPath | None:
+    """One start stroke in its original place. ``None`` drops a removed stroke."""
+    stored = [cursor for cursor, item in enumerate(paths) if item.kind == PATH_START]
+    ordinal = stored.index(index)
+    loaded = [item for item in baseline if item.kind == KIND_START and item.spans]
+    edited = [item for item in current if item.kind == KIND_START and item.spans]
+    if ordinal >= len(loaded):
+        return path
+    item = loaded[ordinal]
+    unique = len({entry.id for entry in loaded}) == len(loaded)
+    if unique:
+        replacement = next((entry for entry in edited if entry.id == item.id), None)
+    else:
+        replacement = edited[ordinal] if ordinal < len(edited) else None
+    if replacement is None or not replacement.spans:
+        return None
+    if replacement.spans == path.spans:
+        return path
+    return replace(path, spans=replacement.spans)
+
+
+def _extra_starts(
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+) -> tuple[SlotPath, ...]:
+    loaded = [item for item in baseline if item.kind == KIND_START and item.spans]
+    known = {item.id for item in loaded}
+    return tuple(
+        SlotPath(item.spans, PATH_START)
+        for item in current
+        if item.kind == KIND_START and item.spans and item.id not in known
+    )
+
+
+def _patch_plate(
+    source: PartSpec,
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+    paths: tuple[SlotPath, ...],
+    unlinked: set[str],
+) -> tuple[tuple[SlotPath, ...], tuple[SlotPath, ...], tuple[tuple[float, float], ...]]:
+    loaded = next((item for item in baseline if item.kind == KIND_PLATE), None)
+    edited = next((item for item in current if item.kind == KIND_PLATE), None)
+    if loaded is None or edited is None or edited.spans == loaded.spans:
+        return paths, source.contours, source.outline
+    spans = edited.spans
+    if not spans:
+        unlinked.add(loaded.id)
+        return paths, source.contours[1:], ()
+    contours = (
+        (replace(source.contours[0], spans=spans), *source.contours[1:])
+        if source.contours
+        else (SlotPath(spans, PATH_CONTOUR),)
+    )
+    fills = [
+        index
+        for index, path in enumerate(paths)
+        if path.kind == PATH_DRAW and path.fill and path.spans == loaded.spans
+    ]
+    if len(fills) == 1:
+        updated = list(paths)
+        updated[fills[0]] = replace(paths[fills[0]], spans=spans)
+        paths = tuple(updated)
+    else:
+        unlinked.add(loaded.id)
+    outline = outline_from_spans(spans)
+    return paths, contours, outline if len(outline) >= 3 else source.outline
+
+
+def _patch_connectors(
+    connectors: tuple[ConnectorSpec, ...],
+    baseline: tuple[EditorElement, ...],
+    current: tuple[EditorElement, ...],
+) -> tuple[ConnectorSpec, ...]:
+    loaded = [item for item in baseline if item.kind == KIND_JOINT]
+    edited = [item for item in current if item.kind == KIND_JOINT]
+    by_id = {item.id: item for item in edited}
+    unique = len({item.id for item in loaded}) == len(loaded)
+    track = [connector for connector in connectors if connector.kind == TRACK]
+    paired: dict[int, EditorElement | None] = {}
+    used: set[str] = set()
+    for index, connector in enumerate(track):
+        element_id = f"joint-{connector.name}"
+        if unique and element_id in {item.id for item in loaded}:
+            item = next(item for item in loaded if item.id == element_id)
+            replacement = by_id.get(item.id)
+            paired[index] = replacement
+            if replacement is not None:
+                used.add(replacement.id)
+            continue
+        if index < len(loaded):
+            item = loaded[index]
+            if unique:
+                replacement = by_id.get(item.id)
+            elif index < len(edited):
+                replacement = edited[index]
+            else:
+                replacement = None
+            paired[index] = replacement
+            if replacement is not None:
+                used.add(replacement.id)
+    result: list[ConnectorSpec] = []
+    track_index = 0
+    for connector in connectors:
+        if connector.kind != TRACK:
+            result.append(connector)
+            continue
+        if track_index not in paired:
+            result.append(connector)
+            track_index += 1
+            continue
+        replacement = paired[track_index]
+        track_index += 1
+        if replacement is None:
+            continue
+        if (
+            replacement.x == connector.x_mm
+            and replacement.y == connector.y_mm
+            and replacement.direction_deg == connector.direction_deg
+            and replacement.lanes == connector.lanes
+        ):
+            result.append(connector)
+            continue
+        result.append(
+            replace(
+                connector,
+                x_mm=replacement.x,
+                y_mm=replacement.y,
+                direction_deg=replacement.direction_deg,
+                lanes=replacement.lanes,
+            )
+        )
+    for item in edited:
+        if item.id in used:
+            continue
+        result.append(
+            ConnectorSpec(
+                item.name or item.id,
+                item.x,
+                item.y,
+                0.0,
+                item.direction_deg,
+                TRACK,
+                item.lanes,
+            )
+        )
+    return tuple(result)
 
 
 def validate_path_group(spec: PartSpec) -> None:

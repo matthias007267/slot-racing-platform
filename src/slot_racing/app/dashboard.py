@@ -465,7 +465,10 @@ class DashboardPage(QWidget):
             return
         if self._qr_url != url or self._qr_pixmap is None:
             self._qr_url = url
-            self._qr_pixmap = QPixmap.fromImage(qr_image(url, side=_QR_SIDE))
+            pixmap = QPixmap.fromImage(qr_image(url, side=_QR_SIDE))
+            # Keep the module pixels. A ratio above 1 makes Qt resample them.
+            pixmap.setDevicePixelRatio(1)
+            self._qr_pixmap = pixmap
         if label.property("qr-url") != url:
             label.setPixmap(self._qr_pixmap)
             label.setProperty("qr-url", url)

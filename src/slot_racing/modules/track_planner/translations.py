@@ -256,6 +256,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.editor.issue.category": (
             "Bitte eine Kategorie wählen. Ein Entwurf ist noch kein verwendbares Bauteil."
         ),
+        "planner.editor.drawing_kept": (
+            "Einige Originalzeichnungen lassen sich der Bearbeitung nicht eindeutig "
+            "zuordnen. Diese Zeichnungen bleiben unverändert."
+        ),
         "planner.editor.preview": "Vorschau",
         "planner.editor.direction": "Richtung",
         "planner.editor.direction.right": "Rechts",

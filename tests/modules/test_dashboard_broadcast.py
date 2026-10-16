@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import socket
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-import cv2
-import numpy as np
 import pytest
+import segno
+import zxingcpp
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
@@ -107,6 +108,87 @@ def test_the_qr_image_contains_only_the_given_address() -> None:
     assert _decode_qr(qr_image("http://192.168.1.20:8765/live?token=other")) != url
     with pytest.raises(ValueError):
         qr_image("")
+
+
+# Lengths differ on purpose. Several of these are valid codes that OpenCV's
+# QRCodeDetector leaves empty even when every module is a solid black or white block.
+_QR_PAYLOADS = (
+    "http://127.0.0.1:9/live?token=a",
+    "http://192.168.1.20:8765/live?token=session-token",
+    "http://192.168.1.20:8765/live?token=l--8sapA7m0YTXn5xyc_KmhoYAmComus",
+    "http://10.0.0.1/live?token=lZwmvC6whmlIAPG-E3mWPTKM9lKA6Z5_NJUd1-vLdVe",
+    "http://172.16.8.14:8080/live?token=MFUT4_jUWDPoJvP8WRXZX8",
+    "http://172.16.8.14:8080/live?token=EppKXMg0eV6by6au08WEpWnvx9Ima9f4",
+    "http://desktop-win.tail1234.ts.net:51234/live?token=S8eFn81H8l2Z1EHQBe",
+    "http://192.168.50.12:51234/live?token=" + ("A" * 80),
+)
+
+
+@pytest.mark.parametrize("payload", _QR_PAYLOADS)
+def test_qr_modules_are_sharp_and_decode_to_the_payload(payload: str) -> None:
+    image = qr_image(payload, side=232)
+    matrix = _matrix(payload)
+    modules = len(matrix)
+    assert image.devicePixelRatio() == 1
+    assert image.width() == image.height()
+    assert modules >= 21
+    assert image.width() % modules == 0
+    scale = image.width() // modules
+    assert scale >= 1
+    assert image.width() == modules * scale
+    assert all(not cell for row in matrix[:4] for cell in row)
+    assert all(not cell for row in matrix[-4:] for cell in row)
+    assert all(not row[index] for row in matrix for index in range(4))
+    assert all(not row[index] for row in matrix for index in range(modules - 4, modules))
+    _assert_module_blocks(image, matrix, scale)
+    assert _decode_qr(image) == payload
+
+
+_TOKEN_ORDERS = (
+    ("l--8sapA7m0YTXn5xyc_KmhoYAmComus", "MFUT4_jUWDPoJvP8WRXZX8"),
+    ("ab", "lZwmvC6whmlIAPG-E3mWPTKM9lKA6Z5_NJUd1-vLdVe"),
+)
+
+
+@pytest.mark.parametrize(("first_token", "next_token"), _TOKEN_ORDERS)
+def test_dashboard_qr_follows_the_first_address_and_the_renewed_one(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_token: str,
+    next_token: str,
+) -> None:
+    tokens = iter((first_token, next_token))
+    monkeypatch.setattr(
+        "slot_racing.modules.races.ui.live_server.new_session_token",
+        lambda: next(tokens),
+    )
+    runtime = Runtime.create(
+        AppConfig(live_broadcast_port=_free_port()),
+        config_path=tmp_path / "config.json",
+        database=migrated_database(),
+    )
+    try:
+        window = MainWindow(runtime)
+        qtbot.addWidget(window)
+        window.show()
+        page = window.current_page()
+        assert isinstance(page, DashboardPage)
+        _button(page, "dashboard-live-start").click()
+        _assert_shown_qr(page, first_token)
+        first = _label(page, "dashboard-live-url").property("live-url")
+        runtime.services.get(LiveBroadcast).stop()
+        page.refresh()
+        _assert_shown_qr(page, next_token)
+        updated = _label(page, "dashboard-live-url").property("live-url")
+        assert isinstance(first, str)
+        assert isinstance(updated, str)
+        assert updated != first
+        renewed = _image_of(_label(page, "dashboard-live-qr"))
+        previous = qr_image(first, side=_label(page, "dashboard-live-qr").width())
+        assert not _same_pixels(renewed, previous)
+    finally:
+        runtime.shutdown()
 
 
 def test_dashboard_shows_a_usable_address_and_updates_it(qtbot: QtBot, tmp_path: Path) -> None:
@@ -576,17 +658,103 @@ def _image_of(label: QLabel) -> QImage:
     return pixmap.toImage()
 
 
+def _assert_shown_qr(page: DashboardPage, token: str) -> None:
+    shown = _label(page, "dashboard-live-url").property("live-url")
+    assert isinstance(shown, str)
+    assert token in shown
+    label = _label(page, "dashboard-live-qr")
+    image = _image_of(label)
+    assert image.devicePixelRatio() == 1
+    assert _decode_qr(image) == shown
+    assert _same_pixels(image, qr_image(shown, side=label.width()))
+
+
 def _decode_qr(image: QImage) -> str:
+    """Read one QR code with ZXing.
+
+    OpenCV's ``QRCodeDetector`` returns an empty string for some payloads whose
+    modules are exact black and white blocks. ZXing reads those same images.
+    A failed read keeps the image so the pixels can be checked on their own.
+    """
+    found = zxingcpp.read_barcodes(
+        image,
+        formats=zxingcpp.BarcodeFormats(zxingcpp.BarcodeFormat.QRCode),
+        is_pure=True,
+        try_rotate=False,
+        try_downscale=False,
+        try_invert=False,
+    )
+    texts = [code.text for code in found if code.valid and code.text]
+    if len(texts) == 1:
+        return texts[0]
+    path = _save_failed_qr(image, texts)
+    raise AssertionError(
+        "QR decode failed: "
+        f"size={image.width()}x{image.height()} "
+        f"dpr={image.devicePixelRatio()} "
+        f"format={image.format()} "
+        f"bytesPerLine={image.bytesPerLine()} "
+        f"decoded={texts!r} "
+        f"saved={path}"
+    )
+
+
+def _save_failed_qr(image: QImage, texts: list[str]) -> Path:
+    folder = Path(tempfile.gettempdir()) / "slot-racing-qr"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "failed-qr.png"
+    if not image.save(str(path), b"PNG"):
+        raise AssertionError("the failed QR image could not be saved")
+    note = folder / "failed-qr.txt"
+    note.write_text(
+        f"size={image.width()}x{image.height()}\n"
+        f"dpr={image.devicePixelRatio()}\n"
+        f"format={image.format()}\n"
+        f"bytesPerLine={image.bytesPerLine()}\n"
+        f"decoded={texts!r}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _matrix(payload: str) -> tuple[tuple[bool, ...], ...]:
+    code = segno.make(payload, error="m", micro=False)
+    return tuple(tuple(bool(cell) for cell in row) for row in code.matrix_iter(scale=1, border=4))
+
+
+def _assert_module_blocks(image: QImage, matrix: tuple[tuple[bool, ...], ...], scale: int) -> None:
+    _held, pixels, stride = _rgb32(image)
+    for y, row in enumerate(matrix):
+        for x, dark in enumerate(row):
+            expected = b"\x00\x00\x00\xff" if dark else b"\xff\xff\xff\xff"
+            for dy in range(scale):
+                start = (y * scale + dy) * stride + x * scale * 4
+                block = pixels[start : start + scale * 4]
+                assert block == expected * scale
+
+
+def _rgb32(image: QImage) -> tuple[QImage, memoryview, int]:
     converted = image.convertToFormat(QImage.Format.Format_RGB32)
-    width = converted.width()
-    height = converted.height()
-    line = converted.bytesPerLine()
-    raw = np.frombuffer(converted.constBits(), dtype=np.uint8, count=line * height)
-    pixels = raw.reshape((height, line))[:, : width * 4].reshape((height, width, 4))
-    gray = cv2.cvtColor(np.ascontiguousarray(pixels), cv2.COLOR_BGRA2GRAY)
-    value, _points, _straight = cv2.QRCodeDetector().detectAndDecode(gray)
-    assert isinstance(value, str)
-    return value
+    bits = converted.constBits()
+    assert bits is not None
+    # The caller keeps ``converted``: the view borrows its buffer.
+    return converted, memoryview(bits).cast("B"), converted.bytesPerLine()
+
+
+def _same_pixels(left: QImage, right: QImage) -> bool:
+    if (left.width(), left.height()) != (right.width(), right.height()):
+        return False
+    if left.devicePixelRatio() != right.devicePixelRatio():
+        return False
+    _left_image, left_pixels, left_stride = _rgb32(left)
+    _right_image, right_pixels, right_stride = _rgb32(right)
+    width = left.width() * 4
+    for y in range(left.height()):
+        left_row = left_pixels[y * left_stride : y * left_stride + width]
+        right_row = right_pixels[y * right_stride : y * right_stride + width]
+        if left_row != right_row:
+            return False
+    return True
 
 
 def _second_race(env: Env, name: str) -> None:
