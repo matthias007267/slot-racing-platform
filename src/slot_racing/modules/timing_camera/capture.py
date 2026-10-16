@@ -101,13 +101,23 @@ class LatestFrameBuffer:
         with self._cond:
             return self._retired
 
-    def put(self, frame: TimedFrame) -> None:
+    def put(self, frame: TimedFrame, *, ready: Callable[[], None] | None = None) -> None:
+        """Store ``frame`` and wake detection.
+
+        ``ready`` runs after the frame is stored and before any waiter is woken.
+        It must not block and must not acquire this buffer: the capture thread
+        holds that lock here. A caller uses it to record that the grab has
+        reached the slot, which is earlier than detection and earlier than the
+        next camera read.
+        """
         with self._cond:
             if self._retired:
                 return
             if self._frame is not None:
                 self.dropped += 1
             self._frame = frame
+            if ready is not None:
+                ready()
             self._cond.notify_all()
 
     def take(self) -> TimedFrame | None:
@@ -240,6 +250,8 @@ class CameraFrameSource(FrameSource):
         self._last_read_ns = 0
         self._last_capture_dt_ns = 0
         self._last_publish_ns = 0
+        self._settled = 0
+        self._settled_cond = threading.Condition()
         self.last_open_ns = 0
         self.last_close_ns = 0
         self.last_join_ns = 0
@@ -272,6 +284,42 @@ class CameraFrameSource(FrameSource):
     def sequence(self) -> int:
         """Sequence of the last frame read from the device. Zero before the first one."""
         return self._sequence
+
+    @property
+    def settled(self) -> int:
+        """Grabs stored in the latest-frame slot, or skipped on purpose.
+
+        This advances inside ``put``, before detection is woken, and when a
+        pause or a resume filter drops the grab. It is not the next ``read``
+        and not a finished analysis. An unread frame is still replaced.
+        """
+        with self._settled_cond:
+            return self._settled
+
+    def wait_settled(self, count: int, timeout: float) -> bool:
+        """Block until ``settled`` reaches ``count``, or ``timeout`` seconds pass.
+
+        The wait is the publish signal itself. Time the detection worker later
+        spends analyzing the picture does not consume the timeout: the signal
+        has already been set.
+        """
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
+            raise ValueError("timeout must be a non-negative number")
+        with self._settled_cond:
+            deadline = time.monotonic() + timeout
+            while self._settled < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._settled >= count
+                self._settled_cond.wait(remaining)
+            return True
+
+    def _note_settled(self) -> None:
+        with self._settled_cond:
+            self._settled += 1
+            self._settled_cond.notify_all()
 
     @property
     def read_attempts(self) -> int:
@@ -454,11 +502,20 @@ class CameraFrameSource(FrameSource):
         started = time.perf_counter_ns()
         with self._sub_lock:
             slots = tuple(self._subscribers)
-        if slots:
-            for slot in slots:
-                slot.put(frame)
-        else:
-            self._queue.put(frame)
+        targets = slots if slots else (self._queue,)
+        noted = False
+
+        def ready() -> None:
+            nonlocal noted
+            if noted:
+                return
+            noted = True
+            self._note_settled()
+
+        for slot in targets:
+            slot.put(frame, ready=None if noted else ready)
+        if not noted:
+            self._note_settled()
         self._last_publish_ns = time.perf_counter_ns() - started
 
     def _run(self) -> None:
@@ -490,6 +547,7 @@ class CameraFrameSource(FrameSource):
                 self._last_capture_dt_ns = timestamp_ns - previous
             self._previous_stamp = timestamp_ns
             if self._paused or (self._resume_ns is not None and timestamp_ns < self._resume_ns):
+                self._note_settled()
                 continue
             self._emit(_timed(grabbed, timestamp_ns, self._sequence))
 
