@@ -12,6 +12,7 @@ from collections.abc import Callable
 from slot_racing.core.events import (
     EventDispatcher,
     LapCompleted,
+    MeasurementsReset,
     RaceFinished,
     RacePaused,
     RaceResumed,
@@ -42,6 +43,7 @@ class RaceRecorder:
             bus.subscribe(SectorCompleted, self._on_sector),
             bus.subscribe(LapCompleted, self._on_lap),
             bus.subscribe(RaceFinished, self._on_finished),
+            bus.subscribe(MeasurementsReset, self._on_reset),
         ]
 
     def close(self) -> None:
@@ -75,6 +77,12 @@ class RaceRecorder:
                 sectors,
             ),
         )
+
+    def _on_reset(self, event: MeasurementsReset) -> None:
+        """Drop sector times that belonged to the attempt that was just cleared."""
+        self._sectors = {
+            key: value for key, value in self._sectors.items() if key[0] != event.race_id
+        }
 
     def _on_finished(self, event: RaceFinished) -> None:
         self._sectors = {key: v for key, v in self._sectors.items() if key[0] != event.race_id}

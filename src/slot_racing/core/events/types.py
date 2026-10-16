@@ -48,6 +48,17 @@ class RaceResumed(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MeasurementsReset(Event):
+    """A free session dropped its current times and kept the same drivers.
+
+    The race keeps running. A crossing timestamped before this event belongs to the
+    attempt that was cleared and must not start or finish a lap.
+    """
+
+    race_id: RaceId
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RaceFinished(Event):
     race_id: RaceId
     results: tuple[ParticipantResult, ...]

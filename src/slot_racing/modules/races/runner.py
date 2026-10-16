@@ -154,6 +154,15 @@ class RaceRunner:
         kept = tuple(person for person in self.race.participants if person.lane != lane)
         self.race = replace(self.race, participants=(*kept, info))
 
+    def reset_measurements(self, *, at_ns: int) -> None:
+        """Drop every lane's live laps. The participants and the race id stay.
+
+        Lap times are cleared before the engine publishes the reset, so a redraw during that
+        event cannot paint the old attempt.
+        """
+        self._lap_times_ns.clear()
+        self._engine.reset_measurements(at_ns)
+
     def tick(self) -> None:
         self._engine.poll_sources()
         self._stop_when_duration_elapsed()
@@ -339,6 +348,15 @@ class RaceController:
             return False
         runner.reassign_lane(info, at_ns=self._clock.now_ns())
         return True
+
+    def reset_measurements(self) -> None:
+        """Clear the current free session's times. Assignments and the race stay."""
+        runner = self.active
+        if runner is None or not runner.is_active or runner.race.mode is not RaceMode.FREE:
+            raise ValidationError("error.race.not_resettable")
+        at_ns = self._clock.now_ns()
+        self._service.reset_free_measurements(runner.race.id)
+        runner.reset_measurements(at_ns=at_ns)
 
     def start_prepared(self) -> None:
         """Start the race that :meth:`prepare_race` left waiting."""

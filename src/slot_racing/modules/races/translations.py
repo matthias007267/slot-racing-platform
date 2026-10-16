@@ -115,6 +115,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Die Zeitmessung beenden und die gemessenen Zeiten speichern?"
         ),
         "race.live.confirm_stop_free": "Das freie Rennen beenden und die Zeitmessung stoppen?",
+        "race.live.reset_values": "Werte zurücksetzen",
+        "race.live.reset_confirm": "Zurücksetzen",
+        "race.live.reset_cancel": "Abbrechen",
+        "race.live.confirm_reset": (
+            "Möchtest du die aktuellen Messwerte wirklich zurücksetzen? Die bisherigen "
+            "Rundenzeiten und Bestzeiten dieses freien Rennens werden gelöscht. Fahrer und "
+            "Fahrzeuge bleiben unverändert."
+        ),
+        "race.live.values_reset": "Messwerte zurückgesetzt. Der nächste Durchgang startet neu.",
         "race.live.switch_lane": "Fahrer/Auto wechseln – Spur {lane}",  # noqa: RUF001
         "race.live.switch.title": "Fahrer und Fahrzeug – Spur {lane}",  # noqa: RUF001
         "race.live.switch.confirm": "Übernehmen",
@@ -346,6 +355,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "error.race.not_switchable": (
             "Fahrer und Fahrzeug können nur während eines freien Rennens gewechselt werden."
+        ),
+        "error.race.not_resettable": (
+            "Messwerte können nur während eines laufenden freien Rennens zurückgesetzt werden."
         ),
         "error.race.restart_name": "Der Name muss sich vom ursprünglichen Rennen unterscheiden.",
         "error.race.restart_incomplete": (

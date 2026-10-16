@@ -604,6 +604,31 @@ class RaceService(RaceHistoryCatalog):
                 session.flush()
             return True, self._participant_info(current)
 
+    def reset_free_measurements(self, race_id: RaceId) -> None:
+        """Delete the stored times of one running free session.
+
+        Drivers, vehicles, lanes, the race row and every other race stay. The same clearing
+        used when a lane changes hands is applied to each participant, without writing a new
+        assignment.
+        """
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if RaceMode(race.mode) is not RaceMode.FREE:
+                raise ValidationError("error.race.not_resettable")
+            if RaceStatus(race.status) not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
+                raise ValidationError("error.race.not_resettable")
+            seated = list(
+                session.scalars(select(RaceParticipant).where(RaceParticipant.race_id == race.id))
+            )
+            session.execute(delete(TimeMeasurement).where(TimeMeasurement.race_id == race.id))
+            for participant in seated:
+                self._clear_participant_laps(session, participant.id)
+                participant.laps_completed = 0
+                participant.best_lap_ns = None
+                participant.total_time_ns = None
+                participant.final_position = None
+                participant.finished = False
+
     def plan_heats(self, race_id: RaceId) -> list[HeatInfo]:
         """Build or rebuild the open heats from the drivers and the lanes this race uses."""
         with self._database.session() as session:

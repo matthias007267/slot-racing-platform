@@ -24,6 +24,7 @@ from slot_racing.core.events import (
     Event,
     LapCompleted,
     LapStarted,
+    MeasurementsReset,
     RaceFinished,
     RacePaused,
     RaceResumed,
@@ -90,6 +91,7 @@ _RACE_EVENTS = (
     LapCompleted,
     SectorCompleted,
     WinnerDetermined,
+    MeasurementsReset,
 )
 
 
@@ -137,6 +139,7 @@ class LiveRaceView(QWidget):
             QMessageBox.question(self, translator.translate("common.confirm"), text)
             == QMessageBox.StandardButton.Yes
         )
+        self.confirm_reset: Callable[[str], bool] = self._ask_reset
 
         self.stage = LiveHudStage(translator)
         self.clock = self.stage.clock
@@ -182,6 +185,10 @@ class LiveRaceView(QWidget):
             )
             self.switch_buttons[lane] = button
             switch_layout.addWidget(button)
+        self.reset_button = QPushButton(translator.translate("race.live.reset_values"))
+        self.reset_button.setObjectName("live-reset-values")
+        self.reset_button.clicked.connect(self.reset_measurements)
+        switch_layout.addWidget(self.reset_button)
         self._switch_row.hide()
 
         layout.addWidget(self.heat_gate, 1)
@@ -519,6 +526,26 @@ class LiveRaceView(QWidget):
         self._controller.switch_lane(lane, driver_id, vehicle_id)
         self.refresh()
 
+    def reset_measurements(self) -> None:
+        """Clear the current times after confirmation. The free session keeps running."""
+        runner = self._runner
+        if runner is None or not runner.is_active or runner.race.mode is not RaceMode.FREE:
+            return
+        question = self.translator.translate("race.live.confirm_reset")
+        if not self.confirm_reset(question):
+            return
+        self._guard(self._controller.reset_measurements)
+        self.refresh()
+
+    def _ask_reset(self, text: str) -> bool:
+        box = reset_question(self, self.translator)
+        box.setText(text)
+        box.exec()
+        clicked = box.clickedButton()
+        accepted = clicked is not None and clicked.objectName() == "live-reset-accept"
+        box.deleteLater()
+        return accepted
+
     def stop_race(self) -> None:
         runner = self._runner
         if runner is None or not runner.is_active:
@@ -549,6 +576,10 @@ class LiveRaceView(QWidget):
     def _remember(self, event: Event) -> None:
         """Keep the latest message and the latest completed lap. Both come from race events."""
         tr = self.translator.translate
+        if isinstance(event, MeasurementsReset):
+            self._lap_notice = None
+            self._message = tr("race.live.values_reset")
+            return
         if isinstance(event, LapCompleted):
             self._lap_notice = (event.lane, event.lap_number)
             return
@@ -705,6 +736,8 @@ class LiveRaceView(QWidget):
         self.results_button.setEnabled(finished and not free)
         self.back_button.setEnabled(True)
         self._switch_row.setVisible(free)
+        self.reset_button.setVisible(free)
+        self.reset_button.setEnabled(active)
         shown = 0 if runner is None else self._shown_lanes(runner)
         for lane, button in self.switch_buttons.items():
             button.setEnabled(active)
@@ -974,6 +1007,27 @@ class LiveRaceView(QWidget):
         for subscription in self._subscriptions:
             subscription.cancel()
         self._subscriptions.clear()
+
+
+def reset_question(parent: QWidget, translator: Translator) -> QMessageBox:
+    """Confirmation for clearing a free session. Cancel is the default button."""
+    box = QMessageBox(parent)
+    box.setObjectName("live-reset-question")
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(translator.translate("race.live.reset_values"))
+    box.setText(translator.translate("race.live.confirm_reset"))
+    accept = box.addButton(
+        translator.translate("race.live.reset_confirm"),
+        QMessageBox.ButtonRole.AcceptRole,
+    )
+    accept.setObjectName("live-reset-accept")
+    cancel = box.addButton(
+        translator.translate("race.live.reset_cancel"),
+        QMessageBox.ButtonRole.RejectRole,
+    )
+    cancel.setObjectName("live-reset-cancel")
+    box.setDefaultButton(cancel)
+    return box
 
 
 def _show_records(layout: HudLayout, *, time_trial: bool) -> bool:
