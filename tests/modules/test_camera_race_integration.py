@@ -1272,6 +1272,9 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         consume(device, blank(), runner)
         live.refresh()
         cross(device, zone_rect(ZONE_X), runner=runner)
+        # cross returns when the frame is taken. The crossing is stored after
+        # that analysis, and refresh only delivers events already queued.
+        await_detection(runner)
         live.refresh()
         assert live.status_label.text().endswith("Beendet")
         assert column_text(live.table, 0, "Platz") == "1"

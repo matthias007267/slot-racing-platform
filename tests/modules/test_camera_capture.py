@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -600,11 +601,19 @@ def test_the_device_index_is_configurable() -> None:
 
 
 class _Image:
-    def __init__(self, rows: list[list[int]], *, color: bool = False) -> None:
+    def __init__(self, rows: list[list[int]], *, color: bool = False, channels: int = 0) -> None:
         self._rows = rows
-        self.ndim = 3 if color else 2
         width = len(rows[0])
-        self.shape = (len(rows), width, 3) if color else (len(rows), width)
+        self.shape: tuple[int, ...]
+        if channels:
+            self.ndim = 3
+            self.shape = (len(rows), width, channels)
+        elif color:
+            self.ndim = 3
+            self.shape = (len(rows), width, 3)
+        else:
+            self.ndim = 2
+            self.shape = (len(rows), width)
 
     def reshape(self, size: int) -> list[int]:
         assert size == -1
@@ -625,6 +634,7 @@ class _FakeCv2:
     CAP_PROP_FRAME_HEIGHT = 4
     CAP_PROP_FPS = 5
     COLOR_BGR2GRAY = 6
+    COLOR_BGRA2GRAY = 7
     CAP_DSHOW = 700
     CAP_MSMF = 1400
     CAP_ANY = 0
@@ -637,6 +647,8 @@ class _FakeCv2:
         self.instances: list[_FakeCap] = []
         self.converted = False
         self.converted_shapes: list[tuple[int, ...]] = []
+        self.color_codes: list[int] = []
+        self.reject_hints = False
         self.image: _Image | None = _Image([[1, 2], [3, 4]])
         self.raise_props: set[int] = set()
 
@@ -646,8 +658,9 @@ class _FakeCv2:
         return capture
 
     def cvtColor(self, image: _Image, code: int) -> _Image:  # noqa: N802
-        assert code == self.COLOR_BGR2GRAY
+        assert code in {self.COLOR_BGR2GRAY, self.COLOR_BGRA2GRAY}
         self.converted = True
+        self.color_codes.append(code)
         self.converted_shapes.append(image.shape)
         return _Image(image._rows)
 
@@ -675,6 +688,8 @@ class _FakeCap:
         return {3: width, 4: height, 5: fps}.get(prop, 0)
 
     def read(self) -> tuple[bool, _Image | None]:
+        if self.api.reject_hints and self.api.CAP_PROP_FRAME_WIDTH in self.props:
+            return False, None
         if self.api.image is None:
             return False, None
         return True, self.api.image
@@ -872,6 +887,142 @@ def test_windows_uses_directshow_before_media_foundation(
     finally:
         device.close()
     assert api.instances[0].released
+
+
+def test_directshow_names_are_read_before_the_capture_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slot_racing.modules.timing_camera import opencv_device
+
+    api = _FakeCv2()
+    order: list[str] = []
+
+    def capture(index: int, backend: int | None = None) -> _FakeCap:
+        order.append("capture")
+        opened = _FakeCap(api, index, backend)
+        api.instances.append(opened)
+        return opened
+
+    monkeypatch.setattr(api, "VideoCapture", capture)
+    monkeypatch.setitem(sys.modules, "cv2", api)
+
+    def names() -> dict[tuple[str, int], str]:
+        order.append("names")
+        return {}
+
+    monkeypatch.setattr(opencv_device, "_capture_names", names)
+    device = OpenCVCapture(CameraConfig(device_index=1, backend="dshow"))
+    device.open()
+    device.close()
+    assert order.index("names") < order.index("capture")
+
+
+def test_a_backend_that_accepts_hints_but_delivers_nothing_reopens_natively(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = _FakeCv2()
+    api.reject_hints = True
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    caplog.set_level(logging.INFO)
+    device = OpenCVCapture(
+        CameraConfig(device_index=1, backend="dshow", width=1920, height=1080, fps=30)
+    )
+    source = CameraFrameSource(device)
+    source.start()
+    try:
+        assert source.wait_settled(1, 2)
+        frame = source.poll_frame()
+        assert frame is not None
+        assert (frame.frame.width, frame.frame.height) == (2, 2)
+        assert [capture.backend for capture in api.instances] == [700, 700]
+        assert api.instances[0].props[api.CAP_PROP_FRAME_WIDTH] == 1920
+        assert api.instances[0].props[38] == 1
+        assert api.CAP_PROP_FRAME_WIDTH not in api.instances[1].props
+        assert 38 not in api.instances[1].props
+        assert api.instances[0].released
+        assert not api.instances[1].released
+        assert device.backend == "dshow"
+        assert source.is_capturing
+    finally:
+        source.stop()
+    assert "CAMERA_OPEN" in caplog.text
+    assert "backend=dshow" in caplog.text
+    assert "result=native" in caplog.text
+    assert "CAMERA_FRAME" in caplog.text
+    assert "result=received" in caplog.text
+    assert "CAMERA_READ" in caplog.text
+    assert "result=closed" not in caplog.text
+
+
+def test_a_delivering_camera_keeps_the_requested_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeCv2()
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    device = OpenCVCapture(CameraConfig(device_index=0, backend="dshow", width=640, height=480))
+    source = CameraFrameSource(device)
+    source.start()
+    try:
+        assert source.wait_settled(1, 2)
+    finally:
+        source.stop()
+    assert len(api.instances) == 1
+    assert api.instances[0].props[api.CAP_PROP_FRAME_WIDTH] == 640
+    assert api.instances[0].released
+
+
+def test_bgra_frames_are_converted_without_closing_the_camera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeCv2()
+    api.image = _Image([[9, 8], [7, 6]], channels=4)
+    monkeypatch.setitem(sys.modules, "cv2", api)
+    device = OpenCVCapture(CameraConfig(backend="dshow"))
+    device.open()
+    try:
+        frame = device.read()
+    finally:
+        device.close()
+    assert api.color_codes == [api.COLOR_BGRA2GRAY]
+    assert tuple(frame.pixels) == (9, 8, 7, 6)
+
+
+def test_a_disconnect_after_the_first_frame_does_not_reopen_the_camera() -> None:
+    device = _DropAfterFrame()
+    source = CameraFrameSource(device, max_read_failures=1)
+    source.start()
+    try:
+        assert source.wait_settled(1, 2)
+        wait_for(lambda: not source.is_capturing)
+        with pytest.raises(CameraReadError, match="gone"):
+            source.check()
+    finally:
+        source.stop()
+    assert device.reopened == 0
+    assert device.reads >= 2
+
+
+class _DropAfterFrame:
+    def __init__(self) -> None:
+        self.reads = 0
+        self.reopened = 0
+
+    def open(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def read(self) -> GrayFrame:
+        self.reads += 1
+        if self.reads == 1:
+            return GrayFrame.blank(2, 2, 4)
+        raise CameraReadError("gone")
+
+    def reopen_native(self) -> bool:
+        self.reopened += 1
+        return True
 
 
 def test_a_rejected_camera_setting_does_not_block_opening(

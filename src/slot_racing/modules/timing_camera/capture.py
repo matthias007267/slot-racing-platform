@@ -31,17 +31,21 @@ Host-driven sources that have no capture thread still deliver frames through
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol, cast
 
+from slot_racing.core.diagnostics import record
 from slot_racing.modules.timing_camera._checks import require_range
 from slot_racing.modules.timing_camera.frame_source import FrameSource, TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
+
+logger = logging.getLogger(__name__)
 
 # One unread frame. A second arrival replaces it. A deeper slot would keep
 # pictures the detector is already too late to use.
@@ -250,6 +254,7 @@ class CameraFrameSource(FrameSource):
         self._last_read_ns = 0
         self._last_capture_dt_ns = 0
         self._last_publish_ns = 0
+        self._native_reopened = False
         self._settled = 0
         self._settled_cond = threading.Condition()
         self.last_open_ns = 0
@@ -530,16 +535,31 @@ class CameraFrameSource(FrameSource):
                 return
             except Exception as error:
                 self._read_failures += 1
+                _note_capture(
+                    "CAMERA_READ",
+                    result="failed",
+                    attempt=self._read_failures,
+                    error=_short(error),
+                )
                 if self._stop.is_set():
                     return
                 failures += 1
                 if failures >= self._max_read_failures:
+                    if self._stop.is_set():
+                        return
+                    if self._captured == 0 and self._reopen_native():
+                        failures = 0
+                        continue
+                    if self._stop.is_set():
+                        return
                     self._fail(error)
                     return
                 continue
             failures = 0
             self._captured += 1
             self._sequence += 1
+            if self._captured == 1:
+                _note_first_frame(grabbed, self._sequence)
             # The stamp belongs to the grab, not to a later poll.
             timestamp_ns = self._clock()
             previous = self._previous_stamp
@@ -565,7 +585,32 @@ class CameraFrameSource(FrameSource):
                 return crops
         return self._device.read()
 
+    def _reopen_native(self) -> bool:
+        """One more open of the same backend, without size, rate or buffer hints.
+
+        Only before the first picture. A camera that already delivered a frame
+        keeps the normal failure limit, so a disconnect still stops capture.
+        """
+        if self._native_reopened:
+            return False
+        self._native_reopened = True
+        reopen = getattr(self._device, "reopen_native", None)
+        if not callable(reopen):
+            return False
+        try:
+            opened = bool(reopen())
+        except Exception as error:
+            _note_capture("CAMERA_OPEN", result="native_failed", error=_short(error))
+            return False
+        if self._stop.is_set():
+            self._device.close()
+            return False
+        if opened:
+            _note_capture("CAMERA_OPEN", result="native", reason="no_frame")
+        return opened
+
     def _fail(self, error: BaseException) -> None:
+        _note_capture("CAMERA_READ", result="closed", error=_short(error))
         with self._error_lock:
             if self._error is None:
                 self._error = error
@@ -581,6 +626,30 @@ class CameraFrameSource(FrameSource):
 
 # A crop delivery has no full picture. The carrier is not scanned.
 _CROP_CARRIER = GrayFrame(1, 1, b"\x00")
+
+
+def _note_first_frame(grabbed: GrayFrame | tuple[GrayFrame, ...], sequence: int) -> None:
+    if isinstance(grabbed, GrayFrame):
+        _note_capture(
+            "CAMERA_FRAME",
+            result="received",
+            width=grabbed.width,
+            height=grabbed.height,
+            sequence=sequence,
+        )
+        return
+    _note_capture("CAMERA_FRAME", result="received", crops=len(grabbed), sequence=sequence)
+
+
+def _note_capture(event: str, *, result: str, **fields: object) -> None:
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info("%s result=%s %s", event, result, details)
+    record(event, module="timing_camera", page="camera", result=result, **fields)
+
+
+def _short(error: BaseException) -> str:
+    text = str(error).strip() or error.__class__.__name__
+    return text[:200]
 
 
 def _reported_fps(value: object) -> float | None:
