@@ -5,19 +5,20 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QGroupBox, QLabel, QPushButton
 from pytestqt.qtbot import QtBot
 
 from slot_racing.core.catalog import TrackCatalog, TrackInfo
 from slot_racing.core.domain import (
     TimingPositionType,
+    TimingSetup,
     TrackId,
     default_timing_setup,
 )
 from slot_racing.core.events import SensorTriggered
 from slot_racing.core.i18n import Translator
 from slot_racing.core.messages import CORE_TRANSLATIONS
-from slot_racing.core.timing import TimingSessionSpec
+from slot_racing.core.timing import TimingSessionSpec, TimingSetupService
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus, to_host_ns
 from slot_racing.modules.timing_sensor.configuration import (
     DeviceCapacity,
@@ -77,6 +78,17 @@ def _issues(assignments: Sequence[SensorAssignment], **overrides: object) -> tup
         capacity=capacity,
     )
     return tuple(issue.key for issue in found)
+
+
+class _Setups(TimingSetupService):
+    def get_setup(self, track_id: TrackId) -> TimingSetup | None:
+        return default_timing_setup() if int(track_id) == 1 else None
+
+    def save_setup(self, track_id: TrackId, setup: TimingSetup) -> None:
+        del track_id, setup
+
+    def clear_setup(self, track_id: TrackId) -> None:
+        del track_id
 
 
 class _Tracks(TrackCatalog):
@@ -339,7 +351,7 @@ def test_the_diagnostic_page_shows_simulation_mapping_and_a_gap(
 ) -> None:
     store = SensorConfigurationStore(migrated_database())
     link = SensorLink()
-    page = SensorTimingPage(_translator(), link, store, None, _Tracks())
+    page = SensorTimingPage(_translator(), link, store, _Setups(), _Tracks())
     qtbot.addWidget(page)
     page.show()
     QApplication.processEvents()
@@ -347,24 +359,23 @@ def test_the_diagnostic_page_shows_simulation_mapping_and_a_gap(
     assert page.connection_label.text() == "Verbunden"
     assert page.readiness_label.text() == "Nicht messbereit"
     assert "PSF/1" in page.protocol_label.text()
-    page.physical_edit.setText("gate-a")
-    page.position_edit.setText("start_finish")
-    page.lane_spin.setValue(1)
-    _click(page, "sensor-add")
-    page.physical_edit.setText("gate-b")
-    page.position_edit.setText("start_finish")
-    page.lane_spin.setValue(2)
-    _click(page, "sensor-add")
+    _choose(page, "sensor-position-s1", "start_finish")
+    _choose(page, "sensor-lane-s1", 1)
+    _choose(page, "sensor-position-s2", "start_finish")
+    _choose(page, "sensor-lane-s2", 2)
     _click(page, "sensor-save")
+    developer = page.findChild(QGroupBox, "sensor-developer")
+    assert developer is not None and developer.isChecked() is False
+    developer.setChecked(True)
     page.offset_edit.setText("1000")
     _click(page, "sensor-map-apply")
     QApplication.processEvents()
     assert page.readiness_label.text() == "Messbereit"
-    page.line_edit.setText(_frame("sess", 1, 25, "gate-a"))
+    page.line_edit.setText(_frame("sess", 1, 25, "s1"))
     _click(page, "sensor-inject")
-    page.line_edit.setText(_frame("sess", 1, 25, "gate-a"))
+    page.line_edit.setText(_frame("sess", 1, 25, "s1"))
     _click(page, "sensor-inject")
-    page.line_edit.setText(_frame("sess", 4, 40, "gate-b"))
+    page.line_edit.setText(_frame("sess", 4, 40, "s2"))
     _click(page, "sensor-inject")
     texts = [_cell(page, row, 5) for row in range(page.log.rowCount())]
     assert texts == ["Übernommen", "Duplikat", "Lücke (2)"]
@@ -385,6 +396,14 @@ def test_the_diagnostic_page_shows_simulation_mapping_and_a_gap(
     assert note is not None and "Nanosekunden" in note.text()
     assert page.baud_label.text() == "115200"
     assert page.port_combo.currentText() == ""
+
+
+def _choose(page: SensorTimingPage, name: str, value: object) -> None:
+    combo = page.findChild(QComboBox, name)
+    assert combo is not None
+    index = combo.findData(value)
+    assert index >= 0
+    combo.setCurrentIndex(index)
 
 
 def _click(page: SensorTimingPage, name: str) -> None:

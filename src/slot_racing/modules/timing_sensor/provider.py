@@ -6,6 +6,8 @@ track's physical sensor map. It does not know which device produced the lines.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.domain import TimingPositionType
 from slot_racing.core.errors import ProviderConfigurationError
@@ -89,7 +91,7 @@ class SensorTimingFactory(TimingSourceFactory):
         self,
         link: SensorLink,
         store: SensorConfigurationStore,
-        tracks: TrackCatalog | None = None,
+        tracks: TrackCatalog | Callable[[], TrackCatalog | None] | None = None,
         capacity: DeviceCapacity | None = None,
     ) -> None:
         self._link = link
@@ -114,12 +116,14 @@ class SensorTimingFactory(TimingSourceFactory):
         return ProviderAvailability.unavailable("error.timing_provider.sensor_time_unsynchronized")
 
     def validate(self, spec: TimingSessionSpec) -> None:
-        _checked_assignments(self._store, self._tracks, self._live_capacity(), spec)
+        _checked_assignments(self._store, self._catalog(), self._live_capacity(), spec)
 
     def create_source(self, spec: TimingSessionSpec) -> TimingSource:
         if self._link.race_bound:
             raise ProviderConfigurationError("error.timing_provider.sensor_busy")
-        assignments = _checked_assignments(self._store, self._tracks, self._live_capacity(), spec)
+        assignments = _checked_assignments(
+            self._store, self._catalog(), self._live_capacity(), spec
+        )
         logical = {sensor.position_id: sensor.id for sensor in spec.setup.sensors}
         return SensorTimingSource(self._link, assignments, logical, frozenset(spec.lanes))
 
@@ -128,6 +132,16 @@ class SensorTimingFactory(TimingSourceFactory):
         if count is None:
             return self._capacity
         return DeviceCapacity(count)
+
+    def _catalog(self) -> TrackCatalog | None:
+        """The track list at use time. Activation order must not freeze an empty catalog."""
+        source = self._tracks
+        if isinstance(source, TrackCatalog):
+            return source
+        if source is None:
+            return None
+        found = source()
+        return found if isinstance(found, TrackCatalog) else None
 
 
 def _checked_assignments(
