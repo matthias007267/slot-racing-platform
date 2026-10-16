@@ -33,7 +33,9 @@ from slot_racing.modules.track_planner.geometry import (
 from slot_racing.modules.track_planner.parametric import with_metadata
 from slot_racing.modules.track_planner.parts import (
     LANE_PITCH_MM,
+    PATH_CENTER,
     PATH_CONTOUR,
+    PATH_DRAW,
     PATH_SLOT,
     PATH_START,
     SPAN_ARC,
@@ -56,6 +58,7 @@ TOOL_PLATE = "plate"
 TOOL_LANE = "lane"
 TOOL_JOINT = "joint"
 TOOL_START = "start"
+TOOL_CENTER = "center"
 TOOLS = (
     TOOL_SELECT,
     TOOL_LINE,
@@ -65,12 +68,14 @@ TOOLS = (
     TOOL_LANE,
     TOOL_JOINT,
     TOOL_START,
+    TOOL_CENTER,
 )
 
 KIND_PLATE = "plate"
 KIND_LANE = "lane"
 KIND_JOINT = "connector"
 KIND_START = "start"
+KIND_CENTER = "center"
 
 ISSUE_PLATE = "planner.editor.issue.plate"
 ISSUE_GEOMETRY = "planner.editor.issue.geometry"
@@ -98,6 +103,11 @@ class EditorElement:
     closed: bool = False
     finished: bool = False
     name: str = ""
+    stroke: str | None = None
+    width_mm: float | None = None
+    linecap: str | None = None
+    dashed: bool = False
+    z_order: int = 0
 
 
 class _ElementPatch(TypedDict, total=False):
@@ -197,11 +207,17 @@ class GraphicSession:
             raise ValueError(tool)
         if tool == TOOL_PLATE:
             self._finish_kind(KIND_LANE)
+            self._finish_kind(KIND_CENTER)
             self._path_kind = KIND_PLATE
+        elif tool == TOOL_CENTER:
+            self._finish_kind(KIND_LANE)
+            self._path_kind = KIND_CENTER
         elif tool in {TOOL_LANE, TOOL_LINE}:
+            self._finish_kind(KIND_CENTER)
             self._path_kind = KIND_LANE
         elif tool in {TOOL_SELECT, TOOL_JOINT, TOOL_START}:
             self._finish_kind(KIND_LANE)
+            self._finish_kind(KIND_CENTER)
         self.tool = tool
         self._pen = None
         self.hover = None
@@ -230,7 +246,7 @@ class GraphicSession:
         if self.tool == TOOL_START:
             self._click_start(point)
             return
-        if self.tool in {TOOL_PLATE, TOOL_LANE, TOOL_LINE}:
+        if self.tool in {TOOL_PLATE, TOOL_LANE, TOOL_LINE, TOOL_CENTER}:
             self._click_line(point, tolerance_mm)
             return
         if self.tool == TOOL_ARC:
@@ -406,12 +422,13 @@ class GraphicSession:
         self._commit(previous)
 
     def finish_path(self) -> None:
-        """End the open lane so the next click starts another one."""
+        """End the open lane or centre mark so the next click starts another one."""
+        kind = KIND_CENTER if self._path_kind == KIND_CENTER else KIND_LANE
         previous = self.elements
         changed = False
         elements: list[EditorElement] = []
         for item in self.elements:
-            if item.kind == KIND_LANE and not item.finished and item.id in self._open_targets():
+            if item.kind == kind and not item.finished and item.spans:
                 elements.append(replace(item, finished=True))
                 changed = True
             else:
@@ -475,19 +492,36 @@ class GraphicSession:
     ) -> PartSpec:
         """The stored body. An untouched open keeps the original geometry."""
         if self._source is not None and not self._edited:
-            kept = with_metadata(
-                self._source,
-                article_number=article_number,
-                scale=scale,
-                name=name,
-                manufacturer=manufacturer,
-                description=description,
+            return _with_category(
+                with_metadata(
+                    self._source,
+                    article_number=article_number,
+                    scale=scale,
+                    name=name,
+                    manufacturer=manufacturer,
+                    description=description,
+                ),
+                category,
+                as_draft=as_draft,
             )
-            if as_draft:
-                return replace(kept, category="draft")
-            if category and category != kept.category:
-                return replace(kept, category=category)
-            return kept
+        if self._source is not None and _centers_only(self.elements, self._baseline):
+            kept = _with_category(
+                with_metadata(
+                    self._source,
+                    article_number=article_number,
+                    scale=scale,
+                    name=name,
+                    manufacturer=manufacturer,
+                    description=description,
+                ),
+                category,
+                as_draft=as_draft,
+            )
+            others = tuple(path for path in kept.slot_paths if path.kind != PATH_CENTER)
+            spec = replace(kept, slot_paths=others + _center_paths(self.elements))
+            if not as_draft:
+                validate_path_group(spec)
+            return spec
         plate = self.plate()
         lanes = tuple(
             SlotPath(item.spans, PATH_SLOT, item.lane)
@@ -553,7 +587,7 @@ class GraphicSession:
             lane_count=lane_count,
             connectors=connectors,
             outline=outline,
-            slot_paths=lanes + starts,
+            slot_paths=lanes + starts + _center_paths(self.elements),
             contours=contours,
             manufacturer=manufacturer,
             description=description,
@@ -599,7 +633,12 @@ class GraphicSession:
             self._drag_base = self.elements
 
     def _click_line(self, point: tuple[float, float], tolerance_mm: float) -> None:
-        kind = KIND_PLATE if self.tool == TOOL_PLATE else KIND_LANE
+        if self.tool == TOOL_PLATE:
+            kind = KIND_PLATE
+        elif self.tool == TOOL_CENTER or self._path_kind == KIND_CENTER:
+            kind = KIND_CENTER
+        else:
+            kind = KIND_LANE
         self._path_kind = kind
         target = self._open_existing(kind)
         if target is not None and target.kind == KIND_PLATE and target.closed:
@@ -645,11 +684,13 @@ class GraphicSession:
         self._commit(previous)
 
     def _draw_kind(self) -> str:
-        """Arcs and curves follow the open plate. A closed plate sends them to a lane."""
+        """Arcs and curves follow the open plate or the open centre mark."""
         if self._path_kind == KIND_PLATE:
             plate = self.plate()
             if plate is not None and not plate.closed:
                 return KIND_PLATE
+        if self._path_kind == KIND_CENTER:
+            return KIND_CENTER
         return KIND_LANE
 
     def _click_arc(self, point: tuple[float, float]) -> None:
@@ -748,6 +789,11 @@ class GraphicSession:
     def _open_existing(self, kind: str) -> EditorElement | None:
         if kind == KIND_PLATE:
             return self.plate()
+        if kind == KIND_CENTER:
+            return next(
+                (item for item in self.elements if item.kind == KIND_CENTER and not item.finished),
+                None,
+            )
         return next((item for item in self.lanes() if not item.finished), None)
 
     def _anchor(self, target: EditorElement | None) -> tuple[float, float] | None:
@@ -782,6 +828,17 @@ class GraphicSession:
             if plate is not None and not plate.closed:
                 return plate
             element = EditorElement(self._next("plate"), KIND_PLATE, name="Bodenplatte")
+        elif kind == KIND_CENTER:
+            element = EditorElement(
+                self._next("center"),
+                KIND_CENTER,
+                name="Mittelmarkierung",
+                stroke="#e0e0e0",
+                width_mm=4.0,
+                linecap="butt",
+                dashed=False,
+                z_order=-1,
+            )
         else:
             number = 1 + max((item.lane or 0 for item in self.lanes()), default=0)
             element = EditorElement(
@@ -810,7 +867,7 @@ class GraphicSession:
             return None
         points = self._pen.points
         end = self.hover
-        if self.tool in {TOOL_LINE, TOOL_PLATE, TOOL_LANE, TOOL_START}:
+        if self.tool in {TOOL_LINE, TOOL_PLATE, TOOL_LANE, TOOL_START, TOOL_CENTER}:
             if _distance(points[-1], end) <= POSITION_GAP_MM:
                 return None
             return SlotSpan.line(points[-1][0], points[-1][1], end[0], end[1])
@@ -824,8 +881,30 @@ class GraphicSession:
             return _bezier_bulge(points[0], points[1], end)
         return None
 
-    def _open_targets(self) -> frozenset[str]:
-        return frozenset(item.id for item in self.lanes() if not item.finished)
+    def set_mark_style(
+        self,
+        *,
+        stroke: str | None = None,
+        width_mm: float | None = None,
+        dashed: bool | None = None,
+    ) -> None:
+        """Colour, width and dash of the selected centre marks. Other elements stay."""
+        previous = self.elements
+        updated: list[EditorElement] = []
+        for item in self.elements:
+            if item.id not in self.selected or item.kind != KIND_CENTER:
+                updated.append(item)
+                continue
+            updated.append(
+                replace(
+                    item,
+                    stroke=item.stroke if stroke is None else stroke,
+                    width_mm=item.width_mm if width_mm is None else width_mm,
+                    dashed=item.dashed if dashed is None else dashed,
+                )
+            )
+        self.elements = tuple(updated)
+        self._commit(previous)
 
     def _commit(self, previous: tuple[EditorElement, ...]) -> None:
         if previous == self.elements:
@@ -1028,9 +1107,44 @@ class GraphicSession:
         self._replace(element_id, spans=tuple(spans))
 
 
+def _with_category(spec: PartSpec, category: str, *, as_draft: bool) -> PartSpec:
+    if as_draft:
+        return replace(spec, category="draft")
+    if category and category != spec.category:
+        return replace(spec, category=category)
+    return spec
+
+
+def _centers_only(elements: tuple[EditorElement, ...], baseline: tuple[EditorElement, ...]) -> bool:
+    """True when every change is a centre mark. Grooves and joints stay as loaded."""
+    return _drop_kind(elements, KIND_CENTER) == _drop_kind(baseline, KIND_CENTER)
+
+
+def _drop_kind(elements: tuple[EditorElement, ...], kind: str) -> tuple[EditorElement, ...]:
+    return tuple(item for item in elements if item.kind != kind)
+
+
+def _center_paths(elements: tuple[EditorElement, ...]) -> tuple[SlotPath, ...]:
+    return tuple(
+        SlotPath(
+            item.spans,
+            PATH_CENTER,
+            stroke=item.stroke,
+            width_mm=item.width_mm,
+            linecap=item.linecap,
+            dashed=item.dashed,
+            z_order=item.z_order,
+        )
+        for item in elements
+        if item.kind == KIND_CENTER and item.spans
+    )
+
+
 def validate_path_group(spec: PartSpec) -> None:
     """Stored curves must meet. A start stroke is checked as a path, not as a lane."""
     for path in spec.slot_paths:
+        if path.kind == PATH_DRAW:
+            continue
         role = "slot" if path.kind == PATH_START else None
         geometry = (
             driving_geometry(path)
@@ -1090,6 +1204,22 @@ def _elements_from_spec(spec: PartSpec) -> tuple[EditorElement, ...]:
                 name=f"Spur {number}",
             )
         )
+    for index, path in enumerate(spec.slot_paths):
+        if path.kind == PATH_CENTER and path.spans:
+            elements.append(
+                EditorElement(
+                    f"center-{index + 1}",
+                    KIND_CENTER,
+                    spans=path.spans,
+                    finished=True,
+                    name="Mittelmarkierung",
+                    stroke=path.stroke,
+                    width_mm=path.width_mm,
+                    linecap=path.linecap,
+                    dashed=path.dashed,
+                    z_order=path.z_order,
+                )
+            )
     for path in spec.slot_paths:
         if path.kind == PATH_START and path.spans:
             elements.append(

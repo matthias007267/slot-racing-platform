@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -24,6 +25,7 @@ from slot_racing.modules.track_planner.parts import (
     LANE_CHANGE,
     PATH_CENTER,
     PATH_CONTOUR,
+    PATH_DRAW,
     PATH_SLOT,
     PATH_START,
     PITLANE,
@@ -37,6 +39,7 @@ from slot_racing.modules.track_planner.parts import (
     SlotPath,
 )
 from slot_racing.modules.track_planner.svg_path import outline_points, parse_svg_path
+from slot_racing.modules.track_planner.trace import trace
 
 EVOLUTION_FILE = "carrera_evolution_20260921.planer.json"
 DIGITAL_FILE = "carrera_digital_20260921.planer.json"
@@ -121,13 +124,16 @@ def load_carrera_library() -> LibraryDraft:
     specs: list[PartSpec] = []
     for source_id, part in bodies.items():
         try:
-            specs.append(
-                _part_spec(
-                    source_id,
-                    part,
-                    piece_key=piece_keys.get(source_id, ""),
-                    systems=_systems(source_id, evolution_ids, digital_ids, referenced),
-                )
+            spec, drawing_notes = _part_spec(
+                source_id,
+                part,
+                piece_key=piece_keys.get(source_id, ""),
+                systems=_systems(source_id, evolution_ids, digital_ids, referenced),
+            )
+            specs.append(spec)
+            notes.extend(
+                ImportNote(source_id, spec.article_number, spec.name, detail)
+                for detail in drawing_notes
             )
         except (ValueError, KeyError, TypeError) as error:
             skipped.append(
@@ -316,9 +322,9 @@ def _part_spec(
     *,
     piece_key: str,
     systems: tuple[str, ...],
-) -> PartSpec:
+) -> tuple[PartSpec, tuple[str, ...]]:
     slots = _slot_paths(part.get("slots"))
-    drawings = _drawing_paths(part.get("drawings"))
+    drawings, drawing_notes = _drawing_paths(part.get("drawings"))
     clip = parse_svg_path(str(part.get("clip") or ""))
     contours = tuple(SlotPath(subpath.spans, PATH_CONTOUR) for subpath in clip if subpath.spans)
     outline = outline_points(clip)
@@ -350,7 +356,7 @@ def _part_spec(
         systems=systems,
         selectable=source_id != HELPER_SOURCE,
         catalog_listed=part.get("listed") is not False,
-    )
+    ), drawing_notes
 
 
 def _category(article: str, slot_count: int) -> str:
@@ -383,24 +389,142 @@ def _slot_paths(raw: object) -> tuple[SlotPath, ...]:
     return tuple(paths)
 
 
-def _drawing_paths(raw: object) -> tuple[SlotPath, ...]:
+# Keys present on every drawing in the bundled Carrera files, plus the two fills.
+_DRAWING_KEYS = frozenset(
+    {
+        "type",
+        "path",
+        "stroke-width",
+        "stroke-color",
+        "stroke-linecap",
+        "fill-color",
+        "fill-color-alt",
+    }
+)
+_COLOR = re.compile(r"^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$")
+_CAPS = frozenset({"butt", "round", "square"})
+# Grey 4 mm strokes are the centre dashes. The 16 mm grey stroke is the slot rim.
+_CENTER_STROKES = frozenset({("#e0e0e0", 4.0), ("#ebebeb", 4.0)})
+
+
+def _drawing_paths(raw: object) -> tuple[tuple[SlotPath, ...], tuple[str, ...]]:
+    """Every area and stroke. Physical grooves stay in ``slots``, not here.
+
+    The file lists the front-most drawing first. ``z_order`` keeps that index so
+    the painter can put the last entry at the back. ``fill-color`` is the plain
+    roadway. ``fill-color-alt`` is the same surface with colour coding on.
+    """
     if not isinstance(raw, list):
-        return ()
+        return (), ("drawings are not a list",) if raw is not None else ()
     paths: list[SlotPath] = []
-    for drawing in raw:
-        if not isinstance(drawing, dict) or drawing.get("type") == "area":
+    notes: list[str] = []
+    for index, drawing in enumerate(raw):
+        if not isinstance(drawing, dict):
+            notes.append(f"drawing {index} is not an object")
+            trace("DRAWING_ATTRIBUTE", result="ignored", detail=notes[-1])
             continue
-        color = str(drawing.get("stroke-color") or "").lower()
-        if color in {"#ffffff", "#fff"}:
-            kind = PATH_START
-        elif color == "#e0e0e0":
-            kind = PATH_CENTER
-        else:
+        for key in drawing:
+            if key not in _DRAWING_KEYS:
+                notes.append(f"unknown drawing attribute {key}")
+                trace("DRAWING_ATTRIBUTE", result="kept", detail=key)
+        kind, note = _drawing_kind(drawing)
+        if note:
+            notes.append(note)
+            trace("DRAWING_ATTRIBUTE", result="kept", detail=note)
+        try:
+            parsed = parse_svg_path(str(drawing.get("path") or ""))
+        except ValueError:
+            notes.append(f"unsupported path command in drawing {index}")
+            trace("DRAWING_ATTRIBUTE", result="unsupported", detail=notes[-1])
             continue
-        for subpath in parse_svg_path(str(drawing.get("path") or "")):
-            if subpath.spans:
-                paths.append(SlotPath(subpath.spans, kind))
-    return tuple(paths)
+        if not parsed and str(drawing.get("path") or "").strip():
+            notes.append(f"drawing {index} has no geometry")
+            trace("DRAWING_ATTRIBUTE", result="empty", detail=notes[-1])
+        extras = tuple(
+            (str(key), _extra_text(value))
+            for key, value in drawing.items()
+            if str(key) not in _DRAWING_KEYS
+        )
+        stroke = _color_text(drawing.get("stroke-color"), notes)
+        width = _width_text(drawing.get("stroke-width"), notes)
+        linecap = _cap_text(drawing.get("stroke-linecap"), notes)
+        fill = _color_text(drawing.get("fill-color"), notes)
+        fill_alt = _color_text(drawing.get("fill-color-alt"), notes)
+        closed = drawing.get("type") == "area"
+        for subpath in parsed:
+            if not subpath.spans:
+                continue
+            paths.append(
+                SlotPath(
+                    subpath.spans,
+                    kind,
+                    stroke=stroke,
+                    width_mm=width,
+                    linecap=linecap,
+                    fill=fill,
+                    fill_alt=fill_alt,
+                    closed=closed or subpath.closed,
+                    z_order=index,
+                    extras=extras,
+                )
+            )
+    return tuple(paths), tuple(dict.fromkeys(notes))
+
+
+def _drawing_kind(drawing: Mapping[str, object]) -> tuple[str, str]:
+    raw_type = drawing.get("type")
+    if raw_type == "area":
+        return PATH_DRAW, ""
+    if raw_type != "path":
+        return PATH_DRAW, f"unknown drawing type {raw_type}"
+    color = str(drawing.get("stroke-color") or "").strip().lower()
+    width = drawing.get("stroke-width")
+    width_mm = (
+        float(width) if isinstance(width, (int, float)) and not isinstance(width, bool) else None
+    )
+    if color in {"#ffffff", "#fff"}:
+        return PATH_START, ""
+    if width_mm is not None and (color, width_mm) in _CENTER_STROKES:
+        return PATH_CENTER, ""
+    return PATH_DRAW, ""
+
+
+def _color_text(value: object, notes: list[str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"", "none", "transparent"}:
+        return None
+    if _COLOR.fullmatch(text) is None:
+        notes.append(f"unrecognised colour {text}")
+    return text
+
+
+def _width_text(value: object, notes: list[str]) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if value is not None:
+            notes.append("unrecognised stroke width")
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        notes.append("unrecognised stroke width")
+        return None
+    return number
+
+
+def _cap_text(value: object, notes: list[str]) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().lower()
+    if text not in _CAPS:
+        notes.append(f"unknown line cap {text}")
+    return text
+
+
+def _extra_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _connectors(

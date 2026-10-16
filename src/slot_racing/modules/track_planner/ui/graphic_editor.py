@@ -41,17 +41,20 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.modules.track_planner.geometry import CubicBezier
 from slot_racing.modules.track_planner.graphic_session import (
+    KIND_CENTER,
     KIND_JOINT,
     KIND_LANE,
     KIND_START,
     TOOL_ARC,
     TOOL_BEZIER,
+    TOOL_CENTER,
     TOOL_JOINT,
     TOOL_LANE,
     TOOL_LINE,
     TOOL_PLATE,
     TOOL_SELECT,
     TOOL_START,
+    EditorElement,
     GraphicSession,
 )
 from slot_racing.modules.track_planner.parts import (
@@ -73,6 +76,7 @@ _TOOLS = (
     (TOOL_LANE, "graphic-lane", "planner.editor.tool.lane"),
     (TOOL_JOINT, "graphic-joint", "planner.editor.tool.joint"),
     (TOOL_START, "graphic-start", "planner.editor.tool.start"),
+    (TOOL_CENTER, "graphic-center", "planner.editor.tool.center"),
 )
 
 
@@ -196,6 +200,18 @@ class GraphicEditor(QWidget):
         ):
             spin.editingFinished.connect(lambda metric=name: self._commit_metric(metric))
         self.lanes_edit.editingFinished.connect(lambda: self._commit_metric("lanes"))
+        self.mark_color = QLineEdit()
+        self.mark_color.setObjectName("graphic-mark-color")
+        self.mark_color.editingFinished.connect(self._commit_mark)
+        self.mark_width = QDoubleSpinBox()
+        self.mark_width.setObjectName("graphic-mark-width")
+        self.mark_width.setRange(0.1, 40.0)
+        self.mark_width.setDecimals(2)
+        self.mark_width.setSingleStep(0.5)
+        self.mark_width.editingFinished.connect(self._commit_mark)
+        self.mark_dashed = QCheckBox(translate("planner.editor.mark_dashed"))
+        self.mark_dashed.setObjectName("graphic-mark-dashed")
+        self.mark_dashed.toggled.connect(self._commit_mark)
         properties = QFormLayout()
         properties.addRow(translate("planner.editor.x"), self.x_spin)
         properties.addRow(translate("planner.editor.y"), self.y_spin)
@@ -204,6 +220,9 @@ class GraphicEditor(QWidget):
         properties.addRow(translate("planner.editor.sweep"), self.sweep_spin)
         properties.addRow(translate("planner.editor.direction_deg"), self.direction_spin)
         properties.addRow(translate("planner.editor.lanes"), self.lanes_edit)
+        properties.addRow(translate("planner.editor.mark_color"), self.mark_color)
+        properties.addRow(translate("planner.editor.mark_width"), self.mark_width)
+        properties.addRow(self.mark_dashed)
         properties.addRow(translate("planner.editor.grid"), self.grid)
         properties.addRow(self.snap_grid)
         properties.addRow(self.snap_points)
@@ -422,7 +441,49 @@ class GraphicEditor(QWidget):
         self.lanes_edit.setEnabled(
             (self.editable and isinstance(lanes, str) and lanes != "") or self._joint_selected()
         )
+        mark = self._center_selected()
+        self.mark_color.setEnabled(self.editable and mark is not None)
+        self.mark_width.setEnabled(self.editable and mark is not None)
+        self.mark_dashed.setEnabled(self.editable and mark is not None)
+        if mark is None:
+            self.mark_color.setText("")
+        else:
+            self.mark_color.setText(mark.stroke or "")
+            if mark.width_mm is not None:
+                self.mark_width.setValue(mark.width_mm)
+            self.mark_dashed.setChecked(mark.dashed)
         self._filling = False
+
+    def _center_selected(self) -> EditorElement | None:
+        element = self.session._single()
+        if element is None or element.kind != KIND_CENTER:
+            return None
+        return element
+
+    def _commit_mark(self, _checked: bool = False) -> None:
+        if self._filling or not self.editable:
+            return
+        mark = self._center_selected()
+        if mark is None:
+            return
+        color = self.mark_color.text().strip()
+        if color and QColor(color).isValid() is False:
+            self._show_metrics()
+            return
+        width = self.mark_width.value()
+        dashed = self.mark_dashed.isChecked()
+        if (
+            color == (mark.stroke or "")
+            and abs((mark.width_mm or 0.0) - width) <= 0.001
+            and dashed == mark.dashed
+        ):
+            return
+        self.session.set_mark_style(
+            stroke=color or None,
+            width_mm=width,
+            dashed=dashed,
+        )
+        self._after_edit()
 
     def _joint_selected(self) -> bool:
         element = self.session._single()

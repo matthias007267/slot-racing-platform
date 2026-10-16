@@ -1,12 +1,9 @@
-"""Paint one track part from its figure. The plan and the library both call this.
+"""Paint one track part. The plan and the library both call this.
 
-Paths are built once per figure and reused. Colour coding only changes the
-roadway brush, so a toggle does not rebuild geometry. Zoom and pan are view
-transforms; they do not create new paths.
-
-Layers, from back to front: outer shoulder, roadway, inner shoulder, edges,
-slots, centre line, start line. Shoulders are drawn when the figure has them.
-No current part does.
+A part that carries source fills is drawn from those drawings: areas at the
+back, strokes in front, in the order stored on the part. Colour coding swaps
+``fill`` for ``fill_alt`` and does not rebuild geometry. Parts without a source
+fill keep the generic figure. Zoom and pan are view transforms.
 """
 
 from __future__ import annotations
@@ -36,6 +33,9 @@ from slot_racing.modules.track_planner.appearance import (
 )
 from slot_racing.modules.track_planner.figure import RoadArc, TrackFigure, track_figure
 from slot_racing.modules.track_planner.parts import (
+    PATH_CENTER,
+    PATH_DRAW,
+    PATH_SLOT,
     PATH_START,
     SPAN_ARC,
     SPAN_BEZIER,
@@ -63,6 +63,13 @@ class _Drawn:
     stripes: QPainterPath
 
 
+_CAPS = {
+    "butt": Qt.PenCapStyle.FlatCap,
+    "round": Qt.PenCapStyle.RoundCap,
+    "square": Qt.PenCapStyle.SquareCap,
+}
+
+
 def paint_part(
     painter: QPainter,
     spec: PartSpec,
@@ -75,6 +82,10 @@ def paint_part(
 ) -> None:
     """Draw ``spec`` in local millimetres. The caller sets the transform."""
     accessory = spec.attachment is not None
+    if _has_source_fill(spec) and not accessory:
+        _paint_visuals(painter, spec, color_coding=color_coding, styled_only=False)
+        _paint_status(painter, spec, selected=selected, shortage=shortage)
+        return
     paint_figure(
         painter,
         track_figure(spec, attachment_slot),
@@ -85,17 +96,128 @@ def paint_part(
         shortage=shortage and not accessory,
     )
     _paint_start_paths(painter, spec)
+    _paint_visuals(painter, spec, color_coding=color_coding, styled_only=True)
+
+
+def _has_source_fill(spec: PartSpec) -> bool:
+    return any(path.fill for path in spec.slot_paths)
+
+
+def _styled(path: SlotPath) -> bool:
+    return path.kind in {PATH_DRAW, PATH_CENTER, PATH_START} and (
+        path.stroke is not None or path.fill is not None or path.dashed
+    )
+
+
+def _paint_visuals(
+    painter: QPainter, spec: PartSpec, *, color_coding: bool, styled_only: bool
+) -> None:
+    """Source drawings. The last file entry is painted first so index 0 stays on top."""
+    visuals = [path for path in spec.slot_paths if path.kind != PATH_SLOT]
+    sourced = [path for path in visuals if path.z_order >= 0]
+    custom = [path for path in visuals if path.z_order < 0]
+    sourced.sort(key=lambda path: path.z_order, reverse=True)
+    for path in (*sourced, *custom):
+        if path.kind == PATH_SLOT:
+            continue
+        if styled_only and not _styled(path):
+            continue
+        _paint_drawing(painter, path, color_coding=color_coding)
+
+
+def _paint_drawing(painter: QPainter, path: SlotPath, *, color_coding: bool) -> None:
+    shape = _shape(path)
+    if shape.isEmpty():
+        return
+    fill = path.fill_alt if color_coding and path.fill_alt else path.fill
+    fill_color = None if fill is None else _color(fill)
+    if fill_color is not None:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill_color)
+        painter.drawPath(shape)
+    width = path.width_mm
+    stroke = path.stroke
+    stroke_color = None if stroke is None else _color(stroke)
+    if stroke is None or stroke_color is None or width is None or width <= 0.0:
+        return
+    pen = QPen(stroke_color)
+    pen.setWidthF(width)
+    pen.setCapStyle(_CAPS.get(path.linecap or "", Qt.PenCapStyle.FlatCap))
+    pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+    if path.dashed:
+        pen.setStyle(Qt.PenStyle.CustomDashLine)
+        pen.setDashPattern([2.0, 1.4])
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(shape)
+
+
+def _paint_status(painter: QPainter, spec: PartSpec, *, selected: bool, shortage: bool) -> None:
+    outline = _polygon(spec.outline)
+    if shortage:
+        _stroke(
+            painter,
+            outline,
+            COLORS.error,
+            _halo_mm(painter, EDGE_WIDTH_MM * 1.6, 4.0),
+            round_cap=False,
+        )
+    if selected:
+        _stroke(painter, outline, COLORS.accent, EDGE_WIDTH_MM * 1.6, round_cap=False)
+
+
+def _color(text: str) -> QColor | None:
+    color = QColor(text)
+    if not color.isValid():
+        return None
+    return color
+
+
+def _shape(path: SlotPath) -> QPainterPath:
+    shape = QPainterPath()
+    shape.setFillRule(Qt.FillRule.WindingFill)
+    for span in path.spans:
+        _append_span(shape, span)
+    if path.closed or path.fill:
+        shape.closeSubpath()
+    return shape
+
+
+def _append_span(path: QPainterPath, span: SlotSpan) -> None:
+    start = as_segment(span).start()
+    continuing = not path.isEmpty() and _near(path.currentPosition(), start)
+    if span.kind == SPAN_ARC:
+        _add_arc(
+            path,
+            span.x0,
+            span.y0,
+            span.radius_mm,
+            span.start_deg,
+            span.sweep_deg,
+            move=not continuing,
+        )
+        return
+    if not continuing:
+        path.moveTo(start[0], start[1])
+    if span.kind == SPAN_BEZIER:
+        path.cubicTo(span.c1x, span.c1y, span.c2x, span.c2y, span.x1, span.y1)
+        return
+    path.lineTo(span.x1, span.y1)
+
+
+def _near(current: QPointF, point: tuple[float, float]) -> bool:
+    return math.hypot(current.x() - point[0], current.y() - point[1]) <= 0.05
 
 
 def _paint_start_paths(painter: QPainter, spec: PartSpec) -> None:
-    """The optional start/finish stroke stored on the part, not the plan marker band."""
+    """An unstyled start stroke. Source marks carry their own colour and width."""
     pen = QPen(QColor(START_DARK))
     pen.setCosmetic(True)
     pen.setWidthF(2.4)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     for path in spec.slot_paths:
-        if path.kind != PATH_START:
+        if path.kind != PATH_START or path.stroke is not None:
             continue
         for span in path.spans:
             segment = as_segment(span)
