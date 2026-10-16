@@ -345,6 +345,12 @@ def test_a_new_session_mutes_the_race_until_an_explicit_mapping() -> None:
     link.poll()
     assert link.take_events() == ()
     assert any(item.kind == "restart" for item in link.observations)
+    withheld = [item for item in link.observations if item.kind == "withheld"]
+    assert len(withheld) == 1
+    assert withheld[0].detail == "restart"
+    assert withheld[0].physical_id == "s2"
+    assert withheld[0].position_id == "start_finish"
+    assert withheld[0].lane == 2
     link.set_time_mapping(DeviceClockMapping(5))
     stream.push((_frame("b0002", 2, 200, "s2") + "\n").encode("ascii"))
     transport.pump()

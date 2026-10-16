@@ -71,6 +71,7 @@ class SensorLink:
         self._last_device_ns: int | None = None
         self._last_host_ns: int | None = None
         self._mute_race = False
+        self._mute_reason = ""
         self._seen_fault: str | None = None
         self._mapping_key: tuple[int, int, int] | None = None
 
@@ -170,6 +171,7 @@ class SensorLink:
         self._mapping_key = (mapping.offset_ns, mapping.numerator, mapping.denominator)
         if resume:
             self._mute_race = False
+            self._mute_reason = ""
 
     def lose_time_mapping(self) -> None:
         """Lock capture. A mapping that was valid is shown as lost, not as a continued clock."""
@@ -199,6 +201,7 @@ class SensorLink:
         self._race_lanes = lanes
         self._race_bound = True
         self._mute_race = False
+        self._mute_reason = ""
         self._pending.clear()
 
     def unbind_race(self) -> None:
@@ -224,7 +227,11 @@ class SensorLink:
         transport.request_sync(rounds)
 
     def poll(self) -> None:
-        """Read new lines. Race events stay queued until :meth:`take_events`."""
+        """Read new lines. Race events stay queued until :meth:`take_events`.
+
+        A line that would be a race event is not queued while this race is muted.
+        The log then names that reason instead of calling the line accepted.
+        """
         self._note_transport()
         if not self._transport.connected:
             return
@@ -241,6 +248,12 @@ class SensorLink:
             self._state = state
             if observation is None:
                 continue
+            if event is not None and self._race_bound and self._mute_race:
+                observation = replace(
+                    observation,
+                    kind="withheld",
+                    detail=self._mute_reason or "muted",
+                )
             self._remember(observation)
             self._observations.append(observation)
             if event is None or not self._race_bound or self._mute_race:
@@ -337,8 +350,8 @@ class SensorLink:
 
     def _break_race(self, detail: str) -> None:
         """Stop a running race from treating the next edges as the same measurement."""
-        del detail
         self._mute_race = True
+        self._mute_reason = detail or "muted"
         self._last_device_ns = None
         self._last_host_ns = None
         self._estimator.clear()
@@ -354,6 +367,7 @@ class SensorLink:
         self._last_device_ns = None
         self._last_host_ns = None
         self._mute_race = False
+        self._mute_reason = ""
         self._seen_fault = None
         self._mapping_key = None
         self._pending.clear()
