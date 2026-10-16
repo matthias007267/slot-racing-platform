@@ -7,7 +7,7 @@ each piece sits on the grid and where later timing points can attach to a piece 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
@@ -27,14 +27,19 @@ from slot_racing.modules.track_planner.parts import (
     PartInstance,
     PartSpec,
     Pose,
+    attach_edges,
+    auto_attaches,
     connector_occupied,
     connectors_compatible,
     extend_pose,
+    find_source_part,
     is_plate_draft,
     is_start_finish_part,
     join_pose,
+    neighbor_pose,
     origin_from_midpoint,
     rotate_xy,
+    signed_delta_deg,
     snap_pose,
     snap_selection,
     standard_extend_parts,
@@ -553,6 +558,8 @@ def extend_from_connector(
     connector_index: int,
     direction: str,
     catalog: dict[int, PartSpec],
+    *,
+    auto_connect: bool = False,
 ) -> TrackPlan:
     """Append the standard part that continues ``direction`` from one free joint.
 
@@ -578,10 +585,18 @@ def extend_from_connector(
     pose = extend_pose(current, target, spec, direction)
     if pose is None:
         raise ValidationError("error.planner.extend")
+    before = len(plan.instances)
     updated = place_instance(
-        plan, part_id, spec, pose.x_mm, pose.y_mm, pose.rotation_z_deg, catalog
+        plan,
+        part_id,
+        spec,
+        pose.x_mm,
+        pose.y_mm,
+        pose.rotation_z_deg,
+        catalog,
+        auto_connect=auto_connect,
     )
-    created = updated.instances[-1]
+    created = updated.instances[before]
     if not connector_occupied(current, target, ((created, spec),)):
         raise ValidationError("error.planner.extend")
     return updated
@@ -688,8 +703,64 @@ def place_instance(
     y_mm: float,
     rotation_z_deg: float,
     catalog: dict[int, PartSpec],
+    *,
+    auto_connect: bool = False,
 ) -> TrackPlan:
-    """Append one instance. A nearby compatible joint wins over the grid."""
+    """Append one instance. A nearby compatible joint wins over the grid.
+
+    ``auto_connect`` also seats the companions named by that part's attach
+    points. The default leaves the plan with only the part the caller placed.
+    """
+    created = _spawn_instances(
+        plan,
+        part_id,
+        spec,
+        x_mm,
+        y_mm,
+        rotation_z_deg,
+        catalog,
+        auto_connect=auto_connect,
+    )
+    return _replace(plan, instances=(*plan.instances, *created))
+
+
+def preview_placement(
+    plan: TrackPlan,
+    part_id: int,
+    spec: PartSpec,
+    x_mm: float,
+    y_mm: float,
+    rotation_z_deg: float,
+    catalog: dict[int, PartSpec],
+    *,
+    auto_connect: bool = False,
+) -> tuple[PartInstance, ...]:
+    """The instances :func:`place_instance` would append. The plan is not changed."""
+    if spec.attachment is not None or is_plate_draft(spec):
+        return ()
+    return _spawn_instances(
+        plan,
+        part_id,
+        spec,
+        x_mm,
+        y_mm,
+        rotation_z_deg,
+        catalog,
+        auto_connect=auto_connect,
+    )
+
+
+def _spawn_instances(
+    plan: TrackPlan,
+    part_id: int,
+    spec: PartSpec,
+    x_mm: float,
+    y_mm: float,
+    rotation_z_deg: float,
+    catalog: dict[int, PartSpec],
+    *,
+    auto_connect: bool,
+) -> tuple[PartInstance, ...]:
     if spec.attachment is not None or is_plate_draft(spec):
         raise ValidationError("error.planner.part")
     placed = _placed(plan, catalog)
@@ -707,8 +778,125 @@ def place_instance(
         y_mm=pose.y_mm,
         rotation_z_deg=pose.rotation_z_deg,
     )
-    plan = add_instance(plan, instance)
-    return plan
+    if not auto_connect:
+        return (instance,)
+    hosted = _replace(plan, instances=(*plan.instances, instance))
+    completed = complete_auto_connections(hosted, catalog, (instance.id,))
+    return completed.instances[len(plan.instances) :]
+
+
+def complete_auto_connections(
+    plan: TrackPlan,
+    catalog: Mapping[int, PartSpec],
+    instance_ids: Collection[str] | None = None,
+) -> TrackPlan:
+    """Seat the companions an attach point names. Already placed parts stay put.
+
+    Only the given instances are completed. ``None`` means every part already
+    on the plan. Companions are ordinary instances: they are not grouped, and
+    they are not completed in turn, so a border cannot place another border.
+    A side that is already met is left alone. When one companion of a part
+    cannot be resolved, none of that part's new companions are added.
+    """
+    if instance_ids is None:
+        hosts = tuple(instance for instance in plan.instances if instance.host_id is None)
+    else:
+        wanted = set(instance_ids)
+        hosts = tuple(
+            instance
+            for instance in plan.instances
+            if instance.id in wanted and instance.host_id is None
+        )
+    placed = list(_placed(plan, catalog))
+    created: list[PartInstance] = []
+    for host in hosts:
+        spec = catalog.get(host.part_id)
+        if spec is None:
+            continue
+        batch = _companion_batch(host, spec, placed, catalog)
+        if not batch:
+            continue
+        for part_id, target, pose in batch:
+            instance = PartInstance(
+                id=new_id(),
+                part_id=part_id,
+                x_mm=pose.x_mm,
+                y_mm=pose.y_mm,
+                rotation_z_deg=pose.rotation_z_deg,
+            )
+            created.append(instance)
+            placed.append((instance, target))
+    if not created:
+        return plan
+    return _replace(plan, instances=(*plan.instances, *created))
+
+
+def _companion_batch(
+    host: PartInstance,
+    spec: PartSpec,
+    placed: list[tuple[PartInstance, PartSpec]],
+    catalog: Mapping[int, PartSpec],
+) -> list[tuple[int, PartSpec, Pose]] | None:
+    """Companions for one part. ``None`` refuses a partial set."""
+    batch: list[tuple[int, PartSpec, Pose]] = []
+    tentative = list(placed)
+    failed = False
+    for attach in auto_attaches(spec):
+        edges = attach_edges(spec, attach)
+        if any(
+            connector_occupied(host, edge, tentative, source_id=spec.source_id) for edge in edges
+        ):
+            continue
+        found = find_source_part(catalog, attach.target_source_id)
+        if found is None:
+            failed = True
+            break
+        part_id, target = found
+        if target.attachment is not None or is_plate_draft(target):
+            failed = True
+            break
+        pose = neighbor_pose(
+            host,
+            attach,
+            center_x_mm=target.center_x_mm,
+            center_y_mm=target.center_y_mm,
+        )
+        if abs(pose.x_mm) > _POSITION_LIMIT_MM or abs(pose.y_mm) > _POSITION_LIMIT_MM:
+            failed = True
+            break
+        if _pose_taken(tentative, part_id, pose):
+            continue
+        ghost = PartInstance(
+            id=f"{host.id}:{attach.name}",
+            part_id=part_id,
+            x_mm=pose.x_mm,
+            y_mm=pose.y_mm,
+            rotation_z_deg=pose.rotation_z_deg,
+        )
+        seated = [*tentative, (ghost, target)]
+        if not all(
+            connector_occupied(host, edge, seated, source_id=spec.source_id) for edge in edges
+        ):
+            failed = True
+            break
+        batch.append((part_id, target, pose))
+        tentative.append((ghost, target))
+    if failed:
+        return None
+    return batch
+
+
+def _pose_taken(placed: Sequence[tuple[PartInstance, PartSpec]], part_id: int, pose: Pose) -> bool:
+    """True when this catalogue part is already seated on the companion pose."""
+    for instance, _spec in placed:
+        if instance.part_id != part_id:
+            continue
+        if math.hypot(instance.x_mm - pose.x_mm, instance.y_mm - pose.y_mm) > 1.0:
+            continue
+        if abs(signed_delta_deg(instance.rotation_z_deg, pose.rotation_z_deg)) > 1.0:
+            continue
+        return True
+    return False
 
 
 def attach_accessory(
@@ -815,7 +1003,7 @@ def reposition_selection(
 
 
 def _placed(
-    plan: TrackPlan, catalog: dict[int, PartSpec]
+    plan: TrackPlan, catalog: Mapping[int, PartSpec]
 ) -> tuple[tuple[PartInstance, PartSpec], ...]:
     placed: list[tuple[PartInstance, PartSpec]] = []
     for instance in plan.instances:

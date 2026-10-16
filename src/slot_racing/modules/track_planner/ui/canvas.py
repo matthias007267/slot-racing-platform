@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
+    QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
     QMouseEvent,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import Shiboken
 
+from slot_racing.core.errors import ValidationError
 from slot_racing.modules.track_planner.attachment import placed_outline
 from slot_racing.modules.track_planner.document import (
     CLOCKWISE,
@@ -40,6 +42,7 @@ from slot_racing.modules.track_planner.document import (
     Piece,
     TrackPlan,
     lane_centers,
+    preview_placement,
     span,
     travel_vector,
 )
@@ -145,6 +148,9 @@ class PlanCanvas(QGraphicsView):
         self._rotate_starts: dict[str, tuple[float, float, float]] = {}
         self._on_accessory: AccessoryRequested | None = None
         self._right_at: QPointF | None = None
+        self._plan: TrackPlan | None = None
+        self._auto_connect = False
+        self._ghosts: list[_DropGhost] = []
 
     def set_listener(self, listener: Moved) -> None:
         self._on_moved = listener
@@ -163,6 +169,11 @@ class PlanCanvas(QGraphicsView):
 
     def set_accessory_listener(self, listener: AccessoryRequested) -> None:
         self._on_accessory = listener
+
+    def set_auto_connect(self, enabled: bool) -> None:
+        """Whether a drop preview includes companions. The plan is not written."""
+        self._auto_connect = enabled
+        self.clear_drop_preview()
 
     def set_color_coding(self, enabled: bool) -> None:
         """Restyle the parts already on the plan. The scene is not rebuilt."""
@@ -208,6 +219,8 @@ class PlanCanvas(QGraphicsView):
             if self.rotation_handle.scene() is self._scene:
                 self._scene.removeItem(self.rotation_handle)
             self._arrows = []
+            self._ghosts = []
+            self._plan = plan
             self._catalog = {} if parts is None else parts
             self._scene.clear()
             self._scene.addItem(self.rotation_handle)
@@ -377,17 +390,61 @@ class PlanCanvas(QGraphicsView):
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:  # noqa: N802
         if event.mimeData().hasFormat(PART_MIME):
             event.acceptProposedAction()
+            part_id = int(bytes(event.mimeData().data(PART_MIME).data()).decode("ascii"))
+            position = self.mapToScene(event.position().toPoint())
+            self.show_drop_preview(part_id, position.x() / MM, position.y() / MM)
             return
         event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:  # noqa: N802
+        self.clear_drop_preview()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         if not event.mimeData().hasFormat(PART_MIME) or self._on_dropped is None:
             event.ignore()
             return
+        self.clear_drop_preview()
         part_id = int(bytes(event.mimeData().data(PART_MIME).data()).decode("ascii"))
         position = self.mapToScene(event.position().toPoint())
         self._on_dropped(part_id, position.x() / MM, position.y() / MM)
         event.acceptProposedAction()
+
+    def show_drop_preview(self, part_id: int, x_mm: float, y_mm: float) -> None:
+        """Draw the pose :func:`place_instance` would use. Nothing is stored."""
+        self.clear_drop_preview()
+        plan = self._plan
+        spec = self._catalog.get(part_id)
+        if plan is None or spec is None or part_id < 1:
+            return
+        try:
+            created = preview_placement(
+                plan,
+                part_id,
+                spec,
+                x_mm,
+                y_mm,
+                0.0,
+                dict(self._catalog),
+                auto_connect=self._auto_connect,
+            )
+        except ValidationError:
+            return
+        for index, instance in enumerate(created):
+            body = self._catalog.get(instance.part_id)
+            if body is None:
+                continue
+            ghost = _DropGhost(body, companion=index > 0)
+            ghost.setPos(instance.x_mm * MM, instance.y_mm * MM)
+            ghost.setRotation(instance.rotation_z_deg)
+            self._scene.addItem(ghost)
+            self._ghosts.append(ghost)
+
+    def clear_drop_preview(self) -> None:
+        for ghost in self._ghosts:
+            if ghost.scene() is self._scene:
+                self._scene.removeItem(ghost)
+        self._ghosts = []
 
     def _report(self, item_id: str, x: int, y: int) -> None:
         if self._loading or self._on_moved is None:
@@ -760,6 +817,38 @@ class MissingItem(QGraphicsRectItem):
         self.setOpacity(0.35)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setZValue(3)
+
+
+class _DropGhost(QGraphicsItem):
+    """Placement preview. It is not a plan instance and cannot be selected."""
+
+    def __init__(self, spec: PartSpec, *, companion: bool) -> None:
+        super().__init__()
+        self._spec = spec
+        outline = placed_outline(spec, None)
+        self._polygon = QPolygonF(
+            [QPointF(x * MM, y * MM) for x, y in outline]
+            or [QPointF(-8, -8), QPointF(8, -8), QPointF(8, 8), QPointF(-8, 8)]
+        )
+        self._bounds = self._polygon.boundingRect().adjusted(-4, -4, 4, 4)
+        self.setOpacity(0.4 if companion else 0.72)
+        self.setZValue(20)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        return self._bounds
+
+    def paint(self, painter: QPainter, _option: object, _widget: object = None) -> None:
+        painter.save()
+        painter.scale(MM, MM)
+        paint_part(
+            painter,
+            self._spec,
+            color_coding=False,
+            selected=False,
+            start_straight=False,
+        )
+        painter.restore()
 
 
 class InstanceItem(QGraphicsItem):
