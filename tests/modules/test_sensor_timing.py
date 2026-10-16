@@ -382,7 +382,9 @@ def test_the_diagnostic_page_shows_simulation_mapping_and_a_gap(
     )
     assert start == "start_finish"
     note = page.findChild(QLabel, "sensor-protocol")
-    assert note is not None and "nicht das endgültige USB-Protokoll" in note.text()
+    assert note is not None and "Nanosekunden" in note.text()
+    assert page.baud_label.text() == "115200"
+    assert page.port_combo.currentText() == ""
 
 
 def _click(page: SensorTimingPage, name: str) -> None:

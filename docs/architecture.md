@@ -55,7 +55,7 @@ Every module is a package with a `plugin.py` (a `Plugin` subclass registered as 
 | `statistics` | Placeholder plugin with navigation entry |
 | `track_planner` | Part library, plans, stock and packages. The active library is imported from the Carrera Evolution and Digital source files: the source UUID is the part identity, the official article number and the piece key are separate, and shells are placement templates rather than extra parts. The previous bundled catalogue stays only as legacy rows for saved plans. Lines, arcs and cubic Bézier curves share one path model (ADR 0017). The part dialog is one element editor (ADR 0020). A draft stays unplaceable. A geometry edit of a used part forks a revision so saved plans keep their shape (ADR 0016) |
 | `timing_camera` | Camera timing provider (off by default). Capture thread, bounded queue, one global saved configuration (device hint and detection zones) in the `settings` table, and a **Kamera-Zeitmessung** page that edits that document on the live picture. Zones are not stored per track |
-| `timing_sensor` | Sensor timing provider `sensor` (off by default). Physical sensors map to a position and a lane per track in the `settings` table. A provisional simulator frame and a diagnostic page share one reader. No serial port and no firmware |
+| `timing_sensor` | Sensor timing provider `sensor` (off by default). Physical sensors map to a position and a lane per track in the `settings` table. The simulator and the USB reader share one `PSF/1` parser and one diagnostic page. Mega 2560 firmware lives in `firmware/` |
 | `audio_animation` | Placeholder plugin only |
 
 ### Shared UI helpers (`slot_racing.uikit`)
@@ -343,19 +343,22 @@ camera. The same path is covered by an integration test with a scripted capture.
 real camera is a separate test, `pytest -m camera_hardware`, and the default `pytest` run
 does not include it.
 
-The sensor provider (`timing_sensor`, id `sensor`, off by default) is device-neutral. USB, a
-Raspberry Pi or another reader is a transport behind one shared link; none of those readers is
-implemented. Physical sensor ids are stored per track in `settings['timing_sensor.configuration']`,
-each pointing at a `position_id` and a lane. Two physical sensors may share one logical position
-when their lanes differ. The logical `hardware_id` is not that map. The diagnostic page and a race
-acquire the same link, so they do not open two readers. The simulator and any later transport yield
-text; one parser (`PSF/1`) turns it into observations. `PSF/1` is explicitly provisional and is not
-the USB protocol. Device time is converted to host monotonic nanoseconds only through an explicit
-clock mapping. Without that mapping, and after a restart that drops it, the provider emits no
-`SensorTriggered`. Session id and event number stay in the module: duplicates are dropped, gaps are
-counted and not filled. The page shows simulation mode, connection, sync, the assignment, device
-time, host time when converted, and those diagnostics. An invalid map or a lost mapping is not
-shown as ready. Section times stay in the engine.
+The sensor provider (`timing_sensor`, id `sensor`, off by default) is device-neutral. USB and the
+simulator are transports behind one shared link; a Raspberry Pi reader would be another transport
+of the same module. Physical sensor ids are stored per track in
+`settings['timing_sensor.configuration']`, each pointing at a `position_id` and a lane. Two
+physical sensors may share one logical position when their lanes differ. The logical `hardware_id`
+is not that map. The diagnostic page and a race acquire the same link, so they do not open two
+readers. Both transports yield `PSF/1` text; one parser turns it into observations. The Mega 2560
+firmware in `firmware/` speaks that protocol at 115200 baud. `device_time_ns` is the controller
+clock in nanoseconds at the accepted edge, not the host receive time and not an accuracy claim.
+A clock exchange (`PSF/1 SYNC`) estimates the mapping onto the host monotonic clock. Without that
+mapping, and after a restart or a disconnect that drops it, the provider emits no
+`SensorTriggered`. A race that was already running does not resume across that break until a new
+race is bound or an explicit mapping is installed. Session id and event number stay in the module:
+duplicates are dropped, gaps are counted and not filled. The page shows mode, port, handshake,
+sync quality, the assignment, device time, host time when converted, and those diagnostics. An
+invalid map or a lost mapping is not shown as ready. Section times stay in the engine.
 
 ### Timing configuration UI (`tracks` module)
 

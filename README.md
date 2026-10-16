@@ -48,9 +48,9 @@ Open work, in the existing order. Finished work is not listed again.
 
 1. Automatic vehicle detection
 2. **Sensor-Hardware.** The sensor module (provider `sensor`, off by default) maps physical
-   sensors per track and runs a provisional simulator. A real USB or serial reader, device
-   firmware and clock synchronization against the controller are still open. A Raspberry Pi
-   reader would be another transport of the same module.
+   sensors per track. The simulator and a USB reader for the Mega 2560 share `PSF/1`; the
+   firmware and the Windows upload notes are in `firmware/`. A Raspberry Pi reader would be
+   another transport of the same module.
 3. Manufacturer-specific hardware
 4. Audio and animations
 5. Time-limited races

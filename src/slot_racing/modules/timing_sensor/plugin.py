@@ -25,11 +25,17 @@ class SensorTimingPlugin(Plugin):
             "timing.provider.sensor": "Sensor",
             "nav.sensor_timing": "Sensor-Zeitmessung",
             "sensor.mode.simulation": "Simulation",
+            "sensor.mode.serial": "USB",
             "sensor.protocol.note": (
-                "Vorläufiges Textformat PSF/1 für den Simulator. "
-                "Das ist nicht das endgültige USB-Protokoll."
+                "PSF/1 ist das Textprotokoll für Simulator und USB: Ereignisse, Kennung, "
+                "Status, Fehler und Uhrensynchronisation. Die Gerätezeit steht in "
+                "Nanosekunden; das ist keine Genauigkeitszusage."
             ),
             "sensor.field.mode": "Betriebsart",
+            "sensor.field.port": "COM-Port",
+            "sensor.field.baud": "Baudrate",
+            "sensor.field.identity": "Gerät",
+            "sensor.field.quality": "Synchronisation",
             "sensor.field.connection": "Verbindung",
             "sensor.field.sync": "Zeitzuordnung",
             "sensor.field.readiness": "Messbereitschaft",
@@ -53,6 +59,9 @@ class SensorTimingPlugin(Plugin):
             "sensor.action.apply_mapping": "Zeitzuordnung setzen",
             "sensor.action.clear_mapping": "Zeitzuordnung verwerfen",
             "sensor.action.inject": "Meldung einspeisen",
+            "sensor.action.connect": "Verbinden",
+            "sensor.action.ports": "Ports suchen",
+            "sensor.action.sync": "Uhr synchronisieren",
             "sensor.line.placeholder": "PSF/1 sitzung 1 0 sensor-a",
             "sensor.saved": "Zuordnung gespeichert.",
             "sensor.mapping.applied": "Zeitzuordnung übernommen.",
@@ -61,6 +70,20 @@ class SensorTimingPlugin(Plugin):
             "sensor.error.mapping": "Zeitzuordnung ungültig: {detail}",
             "sensor.error.not_simulation": "Simulierte Meldungen nur im Simulatorbetrieb.",
             "sensor.error.not_open": "Der Simulator ist nicht geöffnet.",
+            "sensor.error.port": "Kein COM-Port ausgewählt.",
+            "sensor.error.serial": "Die serielle Verbindung ist fehlgeschlagen: {detail}",
+            "sensor.error.race_holds_reader": (
+                "Ein Rennen benutzt den Leser. Die Verbindung bleibt, bis das Rennen endet."
+            ),
+            "sensor.error.sync": "Die Uhrensynchronisation braucht den verbundenen USB-Leser.",
+            "sensor.connected_serial": (
+                "USB-Leser geöffnet. Das Board setzt sich beim Öffnen zurück."
+            ),
+            "sensor.quality.none": "Noch keine gültige Messung",
+            "sensor.quality.value": (
+                "{samples} Messungen, Unsicherheit {uncertainty} ns, Gang {numerator}/{denominator}"
+            ),
+            "sensor.identity.none": "Kein Gerät erkannt",
             "sensor.observation.accepted": "Übernommen",
             "sensor.observation.duplicate": "Duplikat",
             "sensor.observation.gap": "Lücke ({gap})",
@@ -70,6 +93,17 @@ class SensorTimingPlugin(Plugin):
             "sensor.observation.unsynchronized": "Ohne Zeitzuordnung",
             "sensor.observation.clock_error": "Zeit nicht umrechenbar",
             "sensor.observation.ignored": "Spur nicht im Rennen",
+            "sensor.observation.hello": "Gerät erkannt",
+            "sensor.observation.status": "Status {detail}",
+            "sensor.observation.rollover": "Zeitüberlauf erweitert",
+            "sensor.observation.buffer": "Pufferüberlauf ({detail})",
+            "sensor.observation.time_fault": "Geräteuhr verloren",
+            "sensor.observation.protocol": "Protokollfehler",
+            "sensor.observation.sync": "Zeittausch {detail}",
+            "sensor.observation.disconnect": "Verbindung verloren",
+            "sensor.observation.handshake": "Handshake: {detail}",
+            "sensor.observation.partial": "Unvollständige Zeile",
+            "sensor.observation.host_overflow": "Hostpuffer voll",
             "error.timing_provider.sensor_time_unsynchronized": (
                 "Die Sensor-Zeitmessung hat keine gültige Zeitzuordnung."
             ),
