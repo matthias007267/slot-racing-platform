@@ -135,12 +135,33 @@ class _RowScroll(QScrollArea):
     height. The host then grows and this area scrolls vertically instead.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._fitting = False
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self.fit_host()
+
+    def event(self, event: QEvent) -> bool:
+        # A wrapped bar lowers its minimum only after the resize that widened
+        # it. The following layout request is the first moment the viewport
+        # has that height back; fitting here keeps the column from staying on
+        # its 48 px floor.
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self.fit_host()
+        return handled
+
+    def fit_host(self) -> None:
+        if self._fitting:
+            return
         host = self.widget()
         if host is None:
             return
         viewport = self.viewport().size()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
         width = max(host.minimumSizeHint().width(), viewport.width())
         height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
         if height > viewport.height():
@@ -151,8 +172,13 @@ class _RowScroll(QScrollArea):
             if narrowed != width:
                 width = narrowed
                 height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
-        if host.width() != width or host.height() != height:
+        if host.width() == width and host.height() == height:
+            return
+        self._fitting = True
+        try:
             host.resize(width, height)
+        finally:
+            self._fitting = False
 
     def _host_height(
         self, host: QWidget, width: int, viewport_height: int, *, horizontal_bar: bool
@@ -291,6 +317,12 @@ class PlannerPage(QWidget):
         set_role(self.color_coding, "ghost")
         self.color_coding.setChecked(self._color_coding)
         self.color_coding.toggled.connect(self._color_coding_changed)
+        self.short_labels = QPushButton(translate("planner.short_labels"))
+        self.short_labels.setObjectName("planner-short-labels")
+        self.short_labels.setCheckable(True)
+        set_role(self.short_labels, "ghost")
+        self.short_labels.setChecked(False)
+        self.short_labels.toggled.connect(self._short_labels_changed)
         self.mode_unlimited = QPushButton(translate("planner.mode.unlimited"))
         self.mode_unlimited.setObjectName("planner-mode-unlimited")
         self.mode_unlimited.setCheckable(True)
@@ -526,6 +558,7 @@ class PlannerPage(QWidget):
             self.save_button,
             self.save_as_button,
             self.color_coding,
+            self.short_labels,
             self.jump_button,
             self.discard_button,
             self.reset_button,
@@ -575,6 +608,7 @@ class PlannerPage(QWidget):
         stack.addWidget(self.action_bar)
         body_host = _BodyHost()
         body_host.setObjectName("planner-body")
+        body_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body_host.setLayout(stack)
         body_scroll = _RowScroll()
         body_scroll.setObjectName("planner-body-scroll")
@@ -1427,6 +1461,10 @@ class PlannerPage(QWidget):
             return
         created = updated.instances[-1].id if updated.instances else None
         self._commit(updated, created)
+
+    def _short_labels_changed(self, enabled: bool) -> None:
+        """Session switch. Softyroyal hides the badge until the plan asks for it."""
+        self.canvas.set_short_labels(enabled)
 
     def _color_coding_changed(self, enabled: bool) -> None:
         self._color_coding = enabled

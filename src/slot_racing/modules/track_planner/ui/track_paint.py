@@ -1,9 +1,11 @@
-"""Paint one track part. The plan and the library both call this.
+"""Paint one track part. The plan, the library and both editors call this.
 
 A part that carries source fills is drawn from those drawings: areas at the
 back, strokes in front, in the order stored on the part. Colour coding swaps
 ``fill`` for ``fill_alt`` and does not rebuild geometry. Parts without a source
-fill keep the generic figure. Zoom and pan are view transforms.
+fill keep the generic figure. A closed contour clips that body. Selection,
+shortage and the short label are painted afterwards, so they are not clipped.
+Zoom and pan are view transforms.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 from slot_racing.modules.track_planner.appearance import (
     CENTER_LINE,
@@ -79,24 +81,48 @@ def paint_part(
     start_straight: bool,
     shortage: bool = False,
     attachment_slot: str | None = None,
+    show_short_label: bool = False,
 ) -> None:
-    """Draw ``spec`` in local millimetres. The caller sets the transform."""
+    """Draw ``spec`` in local millimetres. The caller sets the transform.
+
+    ``show_short_label`` is the plan's Kurzbezeichnung switch. The library and
+    the editors leave it off. The label does not change the hit shape.
+    """
     accessory = spec.attachment is not None
-    if _has_source_fill(spec) and not accessory:
+    sourced = _has_source_fill(spec) and not accessory
+    figure: TrackFigure | None = None
+    painter.save()
+    clip = _clip_path(spec)
+    if clip is not None:
+        painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+    if sourced:
         _paint_visuals(painter, spec, color_coding=color_coding, styled_only=False)
+    else:
+        figure = track_figure(spec, attachment_slot)
+        paint_figure(
+            painter,
+            figure,
+            fill=STRIP_WHITE if accessory else roadway_fill(spec, coded=color_coding),
+            selected=selected,
+            start_straight=start_straight and not accessory,
+            part_width=spec.width_mm or 0.0,
+            shortage=shortage and not accessory,
+            mark=False,
+        )
+        _paint_start_paths(painter, spec)
+        _paint_visuals(painter, spec, color_coding=color_coding, styled_only=True)
+    painter.restore()
+    if sourced:
         _paint_status(painter, spec, selected=selected, shortage=shortage)
-        return
-    paint_figure(
-        painter,
-        track_figure(spec, attachment_slot),
-        fill=STRIP_WHITE if accessory else roadway_fill(spec, coded=color_coding),
-        selected=selected,
-        start_straight=start_straight and not accessory,
-        part_width=spec.width_mm or 0.0,
-        shortage=shortage and not accessory,
-    )
-    _paint_start_paths(painter, spec)
-    _paint_visuals(painter, spec, color_coding=color_coding, styled_only=True)
+    elif figure is not None:
+        _paint_road_status(
+            painter,
+            _drawn(figure).roadway,
+            selected=selected,
+            shortage=shortage and not accessory,
+        )
+    if show_short_label:
+        _paint_short_label(painter, spec)
 
 
 def _has_source_fill(spec: PartSpec) -> bool:
@@ -153,17 +179,129 @@ def _paint_drawing(painter: QPainter, path: SlotPath, *, color_coding: bool) -> 
 
 
 def _paint_status(painter: QPainter, spec: PartSpec, *, selected: bool, shortage: bool) -> None:
-    outline = _polygon(spec.outline)
+    _paint_road_status(painter, _polygon(spec.outline), selected=selected, shortage=shortage)
+
+
+def _paint_road_status(
+    painter: QPainter, roadway: QPainterPath, *, selected: bool, shortage: bool
+) -> None:
+    """Selection and shortage sit outside the clip, on the roadway or the outline."""
     if shortage:
         _stroke(
             painter,
-            outline,
+            roadway,
             COLORS.error,
             _halo_mm(painter, EDGE_WIDTH_MM * 1.6, 4.0),
             round_cap=False,
         )
     if selected:
-        _stroke(painter, outline, COLORS.accent, EDGE_WIDTH_MM * 1.6, round_cap=False)
+        _stroke(painter, roadway, COLORS.accent, EDGE_WIDTH_MM * 1.6, round_cap=False)
+
+
+def _clip_path(spec: PartSpec) -> QPainterPath | None:
+    """Closed contours only. An open edge is not a paint bound."""
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    for contour in spec.contours:
+        if not _closed_contour(contour):
+            continue
+        region = QPainterPath()
+        region.setFillRule(Qt.FillRule.WindingFill)
+        for span in contour.spans:
+            _append_span(region, span)
+        if region.isEmpty():
+            continue
+        region.closeSubpath()
+        path.addPath(region)
+    path.setFillRule(Qt.FillRule.WindingFill)
+    if path.isEmpty() or path.boundingRect().isEmpty():
+        return None
+    return path
+
+
+def _closed_contour(path: SlotPath) -> bool:
+    if path.closed:
+        return bool(path.spans)
+    if not path.spans:
+        return False
+    start = as_segment(path.spans[0]).start()
+    end = as_segment(path.spans[-1]).end()
+    return _near(QPointF(*start), end)
+
+
+def short_label_rect(spec: PartSpec) -> QRectF | None:
+    """Axis-aligned badge in local millimetres. ``None`` when there is no label."""
+    label = _label_metrics(spec)
+    if label is None:
+        return None
+    transform = QTransform()
+    transform.translate(spec.center_x_mm, spec.center_y_mm)
+    transform.rotate(spec.center_angle_deg)
+    return transform.mapRect(label.badge)
+
+
+def _paint_short_label(painter: QPainter, spec: PartSpec) -> None:
+    label = _label_metrics(spec)
+    if label is None:
+        return
+    painter.save()
+    painter.translate(spec.center_x_mm, spec.center_y_mm)
+    painter.rotate(spec.center_angle_deg)
+    pen = QPen(QColor(0, 0, 0, 38))
+    pen.setCosmetic(True)
+    pen.setWidthF(0.5)
+    painter.setPen(pen)
+    painter.setBrush(QColor("#ffffff"))
+    painter.drawRoundedRect(label.badge, 1.0, 1.0)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#000000"))
+    painter.drawPath(label.text)
+    painter.restore()
+
+
+@dataclass(frozen=True, slots=True)
+class _Label:
+    badge: QRectF
+    text: QPainterPath
+
+
+def _label_metrics(spec: PartSpec) -> _Label | None:
+    """Softyroyal badge. The size follows the clip, and it never exceeds 40 mm."""
+    text = spec.short_label.strip()
+    if not text:
+        return None
+    clip = _clip_path(spec)
+    if clip is None:
+        span_x = span_y = math.inf
+    else:
+        bounds = clip.boundingRect()
+        span_x = bounds.width()
+        span_y = bounds.height()
+    size = min(40.0, span_x * 0.9 / (len(text) * 0.6 + 0.8), span_y * 0.9 / 1.4)
+    if not math.isfinite(size) or size <= 0.0:
+        return None
+    pad = size * 0.4
+    badge_w = len(text) * size * 0.6 + pad * 2.0
+    badge_h = size * 1.4
+    font = QFont()
+    font.setStyleHint(QFont.StyleHint.SansSerif)
+    font.setPixelSize(1000)
+    font.setWeight(QFont.Weight.DemiBold)
+    glyphs = QPainterPath()
+    glyphs.addText(QPointF(0, 0), font, text)
+    ink = glyphs.boundingRect()
+    if ink.isEmpty():
+        return None
+    glyphs.translate(-ink.center().x(), -ink.center().y())
+    # ``size`` is the em the badge was built for. The plate reserves
+    # ``len * 0.6 * size`` for the glyphs. A wider face would spill into the
+    # padding; scale down only far enough to stay inside the plate.
+    text_w = len(text) * size * 0.6
+    scale = size / 1000.0
+    if ink.width() > 0.0 and ink.height() > 0.0 and text_w > 0.0 and badge_h > 0.0:
+        scale = min(scale, text_w / ink.width(), badge_h / ink.height())
+    drawn = QTransform().scale(scale, scale).map(glyphs)
+    return _Label(QRectF(-badge_w / 2.0, -badge_h / 2.0, badge_w, badge_h), drawn)
 
 
 def _color(text: str) -> QColor | None:
@@ -238,6 +376,7 @@ def paint_figure(
     start_straight: bool,
     part_width: float,
     shortage: bool = False,
+    mark: bool = True,
 ) -> None:
     drawn = _drawn(figure)
     painter.save()
@@ -255,16 +394,9 @@ def paint_figure(
     # The shortage stroke is the roadway itself. It sits under the selection
     # stroke and stays a few screen pixels wider, so a selected extra part keeps
     # a green centre and a red rim. Neither stroke is a bounding box.
-    if shortage:
-        _stroke(
-            painter,
-            drawn.roadway,
-            COLORS.error,
-            _halo_mm(painter, EDGE_WIDTH_MM * 1.6, 4.0),
-            round_cap=False,
-        )
-    if selected:
-        _stroke(painter, drawn.roadway, COLORS.accent, EDGE_WIDTH_MM * 1.6, round_cap=False)
+    # ``paint_part`` draws the mark after the clip, so the halo is not cut.
+    if mark:
+        _paint_road_status(painter, drawn.roadway, selected=selected, shortage=shortage)
     painter.restore()
 
 

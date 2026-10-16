@@ -578,7 +578,8 @@ class GraphicCanvas(QWidget):
                 selected=False,
                 start_straight=False,
             )
-        if spec is None or self._editor.session.edited:
+            self._stroke_selection(painter)
+        else:
             self._stroke_elements(painter)
         self._preview(painter)
         self._marks(painter)
@@ -699,6 +700,7 @@ class GraphicCanvas(QWidget):
             y_mm += step
 
     def _stroke_elements(self, painter: QPainter) -> None:
+        """Sketch of a part that has no compiled body yet."""
         for item in self._editor.session.elements:
             if not item.visible or item.kind == KIND_JOINT:
                 continue
@@ -706,6 +708,14 @@ class GraphicCanvas(QWidget):
             if item.kind == KIND_LANE:
                 color = COLORS.info
             self._stroke(painter, item.spans, color, 1.6)
+
+    def _stroke_selection(self, painter: QPainter) -> None:
+        """The selected element only. The body is the shared part painter."""
+        session = self._editor.session
+        for item in session.elements:
+            if item.id not in session.selected or not item.visible or item.kind == KIND_JOINT:
+                continue
+            self._stroke(painter, item.spans, COLORS.accent, 1.8)
 
     def _preview(self, painter: QPainter) -> None:
         span = self._editor.session.preview_span()

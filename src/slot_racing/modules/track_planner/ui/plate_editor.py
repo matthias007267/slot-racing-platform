@@ -868,7 +868,7 @@ class PlateCanvas(QWidget):
                 painter.drawLine(QPointF(*start), QPointF(*end))
             if session.closed:
                 painter.drawLine(QPointF(*points[-1]), QPointF(*points[0]))
-        self._stroke_lanes(painter, session)
+        self._stroke_lanes(painter, session, sketch=spec is None)
         hover = session.hover
         if hover is not None and self._editor.mode == _FLOOR and points and not session.closed:
             pen = QPen(QColor(COLORS.info))
@@ -923,16 +923,24 @@ class PlateCanvas(QWidget):
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(*point), radius * (1.3 if chosen else 0.8), radius)
 
-    def _stroke_lanes(self, painter: QPainter, session: PlateSession) -> None:
+    def _stroke_lanes(self, painter: QPainter, session: PlateSession, *, sketch: bool) -> None:
+        """Lane ink for an open sketch. A compiled body keeps only the selected span."""
         for lane in range(len(session.lanes)):
             active = lane == session.active_lane
             chosen = session.lane_span
             for index, span in enumerate(session.lane_spans(lane)):
                 selected = chosen == (lane, index)
-                color = COLORS.accent if selected or active else COLORS.info
+                if not sketch and not selected:
+                    continue
+                if sketch:
+                    color = COLORS.accent if selected or active else COLORS.info
+                    width = 2.4 if selected or active else 1.2
+                else:
+                    color = COLORS.accent
+                    width = 2.4
                 pen = QPen(QColor(color))
                 pen.setCosmetic(True)
-                pen.setWidthF(2.4 if selected or active else 1.2)
+                pen.setWidthF(width)
                 painter.setPen(pen)
                 self._stroke_span(painter, span)
 
