@@ -293,7 +293,14 @@ def _label_metrics(spec: PartSpec) -> _Label | None:
     if ink.isEmpty():
         return None
     glyphs.translate(-ink.center().x(), -ink.center().y())
-    drawn = QTransform().scale(size / 1000.0, size / 1000.0).map(glyphs)
+    # ``size`` is the em the badge was built for. The plate reserves
+    # ``len * 0.6 * size`` for the glyphs. A wider face would spill into the
+    # padding; scale down only far enough to stay inside the plate.
+    text_w = len(text) * size * 0.6
+    scale = size / 1000.0
+    if ink.width() > 0.0 and ink.height() > 0.0 and text_w > 0.0 and badge_h > 0.0:
+        scale = min(scale, text_w / ink.width(), badge_h / ink.height())
+    drawn = QTransform().scale(scale, scale).map(glyphs)
     return _Label(QRectF(-badge_w / 2.0, -badge_h / 2.0, badge_w, badge_h), drawn)
 
 

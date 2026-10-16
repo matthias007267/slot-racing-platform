@@ -88,7 +88,7 @@ def test_the_library_fills_the_column_and_actions_sit_below_the_planner(
         _assert_flow_heights_match_their_width(page)
         _assert_wraps_exactly_when_the_row_is_narrower_than_one_line(page)
         _assert_column_gives_the_list_the_leftover_height(page, panel, library_scroll)
-        _assert_stage_keeps_the_leftover(page, stage, above_floor=height >= 600)
+        _assert_stage_keeps_the_leftover(page, stage)
         assert properties.width() > 0
 
     _assert_wrapped_height_is_released(window, page, stage)
@@ -127,7 +127,7 @@ def test_the_bar_covers_the_row_when_the_columns_are_wider_than_the_window(
         _assert_flow_heights_match_their_width(page)
         assert body.width() + 1 >= properties.width()
         assert page.library.height() > 40
-        _assert_stage_keeps_the_leftover(page, stage, above_floor=height >= 600)
+        _assert_stage_keeps_the_leftover(page, stage)
 
 
 def _assert_column_gives_the_list_the_leftover_height(
@@ -191,20 +191,35 @@ def _assert_contained(host: QWidget, widgets: tuple[QWidget, ...]) -> None:
             assert not left.intersects(right)
 
 
-def _assert_stage_keeps_the_leftover(
-    page: PlannerPage, stage: QWidget, *, above_floor: bool
-) -> None:
+def _assert_stage_keeps_the_leftover(page: PlannerPage, stage: QWidget) -> None:
     """48 px is the stage's defined floor, not a stuck layout.
 
-    The canvas publishes no minimum of its own. On a short window the wrapped
-    toolbar can leave the column exactly that floor, and the stage may sit on
-    it. A normal window has to hand the leftover back, above the floor.
+    The canvas publishes no minimum of its own. Once the wrapped toolbar and
+    the action bar have taken their height, a short row may leave the column
+    exactly on that floor. A row that is taller than the floor has to hand
+    the leftover to the stage. The cut is the viewport, not the window height:
+    Windows faces wrap the same bar onto more rows, so a 600 px window is not
+    the same amount of leftover on every platform.
     """
     floor = stage.minimumSizeHint().height()
-    assert stage.height() >= floor
-    if above_floor:
-        assert stage.height() > floor
-    assert page.canvas.height() == stage.height()
+    scroll = page.findChild(QScrollArea, "planner-body-scroll")
+    body = page.findChild(QWidget, "planner-body")
+    body_layout = None if body is None else body.layout()
+    assert scroll is not None and body_layout is not None
+    spacing = max(0, body_layout.spacing())
+    leftover = scroll.viewport().height() - page.action_bar.height() - spacing
+    detail = (
+        f"window={page.window().width()}x{page.window().height()} "
+        f"stage={stage.width()}x{stage.height()} floor={floor} leftover={leftover} "
+        f"toolbar={page.toolbar.width()}x{page.toolbar.height()} "
+        f"action={page.action_bar.width()}x{page.action_bar.height()} "
+        f"viewport={scroll.viewport().width()}x{scroll.viewport().height()}"
+    )
+    assert stage.height() >= floor, detail
+    if leftover > floor:
+        assert stage.height() > floor, detail
+        assert stage.height() >= leftover - 2, detail
+    assert page.canvas.height() == stage.height(), detail
     assert page.canvas.geometry().top() >= 0
     assert page.canvas.geometry().bottom() <= stage.height()
 
@@ -230,8 +245,8 @@ def _assert_wrapped_height_is_released(
     _activate(window, 860, 600)
     assert page.toolbar.height() < narrow_toolbar
     assert page.action_bar.height() <= narrow_action
-    assert stage.height() > stage.minimumSizeHint().height()
-    assert stage.height() > narrow_stage
+    _assert_stage_keeps_the_leftover(page, stage)
+    assert stage.height() >= narrow_stage
     _assert_flow_heights_match_their_width(page)
     _assert_buttons_are_fully_visible(page)
     _assert_toolbar_buttons_are_inside(page)
@@ -266,11 +281,14 @@ def _on_page(page: QWidget, widget: QWidget) -> QRect:
 
 
 def _activate(window: MainWindow, width: int, height: int) -> None:
+    """Resize and settle. A wrapped bar publishes its new height only after the resize."""
     window.resize(width, height)
-    QApplication.processEvents()
     layout = window.layout()
     assert layout is not None
-    layout.activate()
-    QApplication.processEvents()
-    layout.activate()
+    for _ in range(4):
+        QApplication.processEvents()
+        layout.invalidate()
+        layout.activate()
+        if window.width() == width and window.height() == height:
+            break
     QApplication.processEvents()

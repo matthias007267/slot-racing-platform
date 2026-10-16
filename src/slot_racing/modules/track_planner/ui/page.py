@@ -135,12 +135,33 @@ class _RowScroll(QScrollArea):
     height. The host then grows and this area scrolls vertically instead.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._fitting = False
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self.fit_host()
+
+    def event(self, event: QEvent) -> bool:
+        # A wrapped bar lowers its minimum only after the resize that widened
+        # it. The following layout request is the first moment the viewport
+        # has that height back; fitting here keeps the column from staying on
+        # its 48 px floor.
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self.fit_host()
+        return handled
+
+    def fit_host(self) -> None:
+        if self._fitting:
+            return
         host = self.widget()
         if host is None:
             return
         viewport = self.viewport().size()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
         width = max(host.minimumSizeHint().width(), viewport.width())
         height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
         if height > viewport.height():
@@ -151,8 +172,13 @@ class _RowScroll(QScrollArea):
             if narrowed != width:
                 width = narrowed
                 height = self._host_height(host, width, viewport.height(), horizontal_bar=True)
-        if host.width() != width or host.height() != height:
+        if host.width() == width and host.height() == height:
+            return
+        self._fitting = True
+        try:
             host.resize(width, height)
+        finally:
+            self._fitting = False
 
     def _host_height(
         self, host: QWidget, width: int, viewport_height: int, *, horizontal_bar: bool
@@ -582,6 +608,7 @@ class PlannerPage(QWidget):
         stack.addWidget(self.action_bar)
         body_host = _BodyHost()
         body_host.setObjectName("planner-body")
+        body_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body_host.setLayout(stack)
         body_scroll = _RowScroll()
         body_scroll.setObjectName("planner-body-scroll")

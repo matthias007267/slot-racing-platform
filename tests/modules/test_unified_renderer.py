@@ -195,6 +195,27 @@ def _delta_box(
     return max(xs) - min(xs), max(ys) - min(ys), sum(xs) / len(xs), sum(ys) / len(ys)
 
 
+def _assert_badge_has_pad_and_ink(before: QImage, after: QImage) -> None:
+    """The badge is a white plate with dark glyphs, independent of one sample point."""
+    pad = 0
+    ink = 0
+    left = before.width() // 2 - 250
+    right = before.width() // 2 + 250
+    top = before.height() // 2 - 250
+    bottom = before.height() // 2 + 250
+    for y_px in range(top, bottom, 2):
+        for x_px in range(left, right, 2):
+            if before.pixel(x_px, y_px) == after.pixel(x_px, y_px):
+                continue
+            color = after.pixelColor(x_px, y_px)
+            if color.red() > 240 and color.green() > 240 and color.blue() > 240:
+                pad += 1
+            elif color.red() < 40 and color.green() < 40 and color.blue() < 40:
+                ink += 1
+    assert pad > 10
+    assert ink > 4
+
+
 def test_german_short_labels_come_from_the_file_and_empty_ones_stay_blank() -> None:
     straight = _by_source(ACTIVE_STRAIGHT_SOURCE)
     curve = _by_source(ACTIVE_CURVE_SOURCE)
@@ -371,8 +392,20 @@ def test_short_labels_follow_the_centre_and_its_angle(qapp: object) -> None:
     assert far_w == pytest.approx(close_w * 3, abs=12)
     assert far_h == pytest.approx(close_h * 3, abs=12)
     straight = _by_source(ACTIVE_STRAIGHT_SOURCE)
-    assert _hex(_render(straight), 0.0, 0.0) == "#e0e0e0"
-    assert _hex(_render(straight, label=True), 40.0, 18.0) == "#ffffff"
+    plain_straight = _render(straight)
+    labelled_straight = _render(straight, label=True)
+    assert _hex(plain_straight, 0.0, 0.0) == "#e0e0e0"
+    # The badge, not one glyph pixel. A wider face paints "1/1" through the
+    # point that is padding on another face; the plate under it is not white.
+    straight_w, straight_h, straight_x, straight_y = _delta_box(plain_straight, labelled_straight)
+    assert straight_w > straight_h
+    assert straight_x == pytest.approx(_SIZE / 2, abs=8)
+    assert straight_y == pytest.approx(_SIZE / 2, abs=8)
+    upright = _render(replace(straight, center_angle_deg=90.0), label=True)
+    upright_plain = _render(replace(straight, center_angle_deg=90.0))
+    upright_w, upright_h, _, _ = _delta_box(upright_plain, upright)
+    assert upright_h > upright_w
+    _assert_badge_has_pad_and_ink(plain_straight, labelled_straight)
 
 
 def test_centre_marks_and_a_custom_part_without_source_drawings() -> None:
