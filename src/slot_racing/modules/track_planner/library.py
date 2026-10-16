@@ -547,6 +547,10 @@ class PartLibrary:
             and stored.manufacturer == (spec.manufacturer.strip() or "Carrera")
             and stored.description == spec.description
             and stored.source_id == spec.source_id
+            and stored.center_x_mm == spec.center_x_mm
+            and stored.center_y_mm == spec.center_y_mm
+            and stored.center_angle_deg == spec.center_angle_deg
+            and stored.short_label == spec.short_label
             and same_geometry(stored, spec)
         )
 
@@ -1398,6 +1402,10 @@ class PartLibrary:
             piece_key=spec.piece_key,
             systems=",".join(spec.systems),
             selectable=spec.selectable,
+            center_x_mm=spec.center_x_mm,
+            center_y_mm=spec.center_y_mm,
+            center_angle_deg=spec.center_angle_deg,
+            short_label=spec.short_label,
             legacy=False,
         )
         self._assign_attachment(definition, spec)
@@ -1468,18 +1476,21 @@ class PartLibrary:
             )
             for connector in connectors
         )
-        center_x_mm = 0.0
-        center_y_mm = 0.0
-        center_angle_deg = 0.0
-        short_label = ""
-        # The file stays the geometry of an untouched catalogue body. Stored
-        # rows are not rewritten. A part the user has changed keeps its joints.
-        # The short label is paint and is not a stored column.
-        anchor = source_anchor(definition.source_id or "")
-        if anchor is not None:
-            center_x_mm, center_y_mm, center_angle_deg, short_label, file_connectors = anchor
-            if definition.origin == ORIGIN_CATALOG:
-                stored_connectors = file_connectors
+        # Stored centre and label win. The file is not consulted for them, so a
+        # copy without a source id and a value saved on this row stay as stored.
+        # A missing older value is the column default: centre (0, 0), angle 0,
+        # empty label. That fallback is not a reconstructed centre.
+        center_x_mm = float(definition.center_x_mm)
+        center_y_mm = float(definition.center_y_mm)
+        center_angle_deg = float(definition.center_angle_deg)
+        short_label = definition.short_label or ""
+        # Joints of an untouched catalogue body still come from the file. Older
+        # databases then keep the edge joints without a rewrite. This does not
+        # replace the centre or the label stored on the row.
+        if definition.origin == ORIGIN_CATALOG:
+            anchor = source_anchor(definition.source_id or "")
+            if anchor is not None:
+                stored_connectors = anchor[4]
         spec = PartSpec(
             article_number=definition.article_number,
             scale=definition.scale,
@@ -1604,6 +1615,10 @@ class PartLibrary:
         definition.piece_key = spec.piece_key
         definition.systems = ",".join(spec.systems)
         definition.selectable = spec.selectable
+        definition.center_x_mm = spec.center_x_mm
+        definition.center_y_mm = spec.center_y_mm
+        definition.center_angle_deg = spec.center_angle_deg
+        definition.short_label = spec.short_label
         self._assign_attachment(definition, spec)
         session.execute(
             delete(TrackPartConnector).where(TrackPartConnector.part_id == definition.id)

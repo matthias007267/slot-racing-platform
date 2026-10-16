@@ -177,9 +177,11 @@ def source_anchor(
 ) -> tuple[float, float, float, str, tuple[ConnectorSpec, ...]] | None:
     """Centre, label angle, short label and joints of one catalogue body.
 
-    ``None`` when that UUID is not a body in the bundled files. Catalogue reads
-    use this in place of the stored joint rows, so an older database gains the
-    edge joints without a rewrite of the part. The label is paint, not a column.
+    ``None`` when that UUID is not a body in the bundled files. An untouched
+    catalogue row still reads its joints from here, so an older database keeps
+    the edge joints without a rewrite. Centre and short label are columns on
+    the definition. Callers must not replace those stored values with this
+    tuple: a copy without a source id, and a value the user stored, win.
     """
     if not source_id:
         return None
