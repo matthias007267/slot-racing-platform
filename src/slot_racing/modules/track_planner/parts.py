@@ -69,8 +69,12 @@ CONNECTOR_KINDS = frozenset({TRACK, BORDER_JOINT, SUPPORT_JOINT})
 # Carrera Digital 132 / Evolution: 200 mm for two lanes, 100 mm between lane centres.
 LANE_PITCH_MM = 100.0
 # Defaults for a plan that has never stored its own grid or dock distance.
+# The dock radius stays 200 mm. A tighter search would reject docks that already
+# land on the right joint. Occupancy stays at 1 mm and 20° of opposing heading.
 DEFAULT_GRID_MM = 100.0
 DEFAULT_SNAP_MM = 200.0
+# Untyped source edges whose lengths differ by more than this do not mate.
+EDGE_LENGTH_TOLERANCE_MM = 0.1
 # The current (since 2021) electronic connecting rail. Not the older plug piece 20515/20520.
 START_FINISH_ARTICLE = "20020518"
 # Analog bottleneck, two rails of 345 mm. Not the digital pieces 20030350 / 20030351.
@@ -106,8 +110,9 @@ class ConnectorSpec:
 
     ``target_source_id`` is the part an ``attachPoint`` names. A typed joint is
     ``exclusive``: it mates with that part, not with every joint that shares a
-    type string. ``has_neighbor`` stores the pose of that part's origin.
-    ``lane_points`` are the groove ends at this joint. Empty keeps the 100 mm pitch.
+    type string. ``has_neighbor`` stores that part's centre. The origin is
+    ``centre - rotate(center, angle)``. ``lane_points`` are the groove ends at
+    this joint. Empty keeps the 100 mm pitch.
     """
 
     name: str
@@ -121,10 +126,13 @@ class ConnectorSpec:
     edge_types: tuple[str, ...] = ()
     exclusive: bool = False
     has_neighbor: bool = False
+    # Attach-point coordinates. They name the neighbour's centre, not its origin.
     neighbor_x: float = 0.0
     neighbor_y: float = 0.0
     neighbor_angle: float = 0.0
     lane_points: tuple[tuple[float, float], ...] = ()
+    # Set on a source edge. Untyped edges mate within :data:`EDGE_LENGTH_TOLERANCE_MM`.
+    edge_length_mm: float | None = None
 
 
 # A slot path is geometry, not a paint special case. ``line`` uses the two endpoints.
@@ -297,6 +305,9 @@ class PartSpec:
     # False when the source catalogue does not offer this body on its own.
     # Those pieces belong to a placement template. A part drawn here stays listed.
     catalog_listed: bool = True
+    # Source ``center``. Attach points and template placeholders name this point.
+    center_x_mm: float = 0.0
+    center_y_mm: float = 0.0
 
 
 # A catalogue row, a catalogue row the user changed, or a part they created.
@@ -471,6 +482,23 @@ def rotate_xy(x_mm: float, y_mm: float, rotation_z_deg: float) -> tuple[float, f
     return rotate_point(x_mm, y_mm, rotation_z_deg)
 
 
+def origin_from_midpoint(
+    mid_x: float,
+    mid_y: float,
+    angle_deg: float,
+    center_x: float,
+    center_y: float,
+) -> tuple[float, float]:
+    """Origin of a part whose centre sits at ``(mid_x, mid_y)``.
+
+    Source attach points and template placeholders name the centre. The plan
+    stores the geometric origin. ``angle_deg`` is the part's own rotation in
+    degrees. A centre at the origin leaves the midpoint unchanged.
+    """
+    rotated_x, rotated_y = rotate_xy(center_x, center_y, angle_deg)
+    return (mid_x - rotated_x, mid_y - rotated_y)
+
+
 def world_xy(instance: PartInstance, x_mm: float, y_mm: float) -> tuple[float, float]:
     rotated_x, rotated_y = rotate_xy(x_mm, y_mm, instance.rotation_z_deg)
     return (instance.x_mm + rotated_x, instance.y_mm + rotated_y)
@@ -562,18 +590,49 @@ def connectors_compatible(
 ) -> bool:
     """Whether these two joints may meet.
 
-    Untyped rail ends share a lane list. A typed end mates only when an
-    attach point names the other part. Equal type strings are not enough.
+    Two exclusive joints still mate only when an attach point names the other
+    part. Equal type strings are not enough, so a digital switch keeps the
+    pairing it already had. A source edge mates by length and, when either
+    edge is typed, by that type. Untyped rails still share a lane list.
     """
     if left.kind != right.kind or left.kind not in CONNECTOR_KINDS:
         return False
-    if left.exclusive or right.exclusive:
-        if not (left.exclusive and right.exclusive):
-            return False
+    if left.exclusive and right.exclusive:
         if not left_source or not right_source:
             return False
         return left.target_source_id == right_source or right.target_source_id == left_source
+    if left.edge_length_mm is not None or right.edge_length_mm is not None:
+        return _edge_pair(left, right, left_source=left_source, right_source=right_source)
+    if left.exclusive or right.exclusive:
+        return False
     return left.lanes == right.lanes
+
+
+def _edge_pair(
+    left: ConnectorSpec,
+    right: ConnectorSpec,
+    *,
+    left_source: str,
+    right_source: str,
+) -> bool:
+    """Two original connector edges. Untyped lengths may differ by 0.1 mm."""
+    if left.edge_length_mm is None or right.edge_length_mm is None:
+        return False
+    if abs(left.edge_length_mm - right.edge_length_mm) > EDGE_LENGTH_TOLERANCE_MM:
+        return False
+    if not _edge_types_agree(left.edge_types, right.edge_types):
+        return False
+    left_names_other = not left.target_source_id or left.target_source_id == right_source
+    right_names_other = not right.target_source_id or right.target_source_id == left_source
+    return left_names_other and right_names_other
+
+
+def _edge_types_agree(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    if not left and not right:
+        return True
+    if not left or not right:
+        return False
+    return left == right
 
 
 def rails_can_join(left: ConnectorSpec, right: ConnectorSpec) -> bool:
@@ -942,7 +1001,12 @@ def _named_extend_pose(
         or target_joint.target_source_id != spec.source_id
     ):
         return None
-    pose = neighbor_pose(target, target_joint)
+    pose = neighbor_pose(
+        target,
+        target_joint,
+        center_x_mm=spec.center_x_mm,
+        center_y_mm=spec.center_y_mm,
+    )
     created = PartInstance("named", 0, pose.x_mm, pose.y_mm, rotation_z_deg=pose.rotation_z_deg)
     delta = placed_continuation_delta_deg(target, target_joint, created, spec)
     if delta is None or not _direction_matches(delta, direction):
@@ -950,9 +1014,27 @@ def _named_extend_pose(
     return pose
 
 
-def neighbor_pose(host: PartInstance, connector: ConnectorSpec) -> Pose:
-    """World pose of the part an attach point names."""
-    x_mm, y_mm = world_xy(host, connector.neighbor_x, connector.neighbor_y)
+def neighbor_pose(
+    host: PartInstance,
+    connector: ConnectorSpec,
+    *,
+    center_x_mm: float = 0.0,
+    center_y_mm: float = 0.0,
+) -> Pose:
+    """World origin of the part an attach point names.
+
+    The stored neighbour coordinates are that part's centre. ``center_x_mm``
+    and ``center_y_mm`` are the neighbour's own centre offset. Both are zero
+    for a part whose geometric origin is its centre.
+    """
+    local_x, local_y = origin_from_midpoint(
+        connector.neighbor_x,
+        connector.neighbor_y,
+        connector.neighbor_angle,
+        center_x_mm,
+        center_y_mm,
+    )
+    x_mm, y_mm = world_xy(host, local_x, local_y)
     return Pose(x_mm, y_mm, normalize_deg(host.rotation_z_deg + connector.neighbor_angle))
 
 
@@ -975,7 +1057,12 @@ def _named_neighbor_pose(
                     continue
                 if connector_occupied(host, connector, blockers, source_id=host_spec.source_id):
                     continue
-                seated = neighbor_pose(host, connector)
+                seated = neighbor_pose(
+                    host,
+                    connector,
+                    center_x_mm=spec.center_x_mm,
+                    center_y_mm=spec.center_y_mm,
+                )
                 distance = math.hypot(moving.x_mm - seated.x_mm, moving.y_mm - seated.y_mm)
                 if distance > snap_mm:
                     continue

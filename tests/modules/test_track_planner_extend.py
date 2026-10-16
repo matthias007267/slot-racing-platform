@@ -299,7 +299,8 @@ def test_library_filters_follow_scale_compatibility_and_reset(qtbot: QtBot, env:
     page.compatible.setChecked(True)
     articles = _articles(page)
     assert _contains(articles, "20509")
-    assert not _contains(articles, "20560")
+    # 20560 mates with the straight on its side edges, so the filter keeps it.
+    assert _contains(articles, "20560")
     assert not _contains(articles, "EB-F1")
     assert not _contains(articles, "EB-F43")
     page.canvas.scene().clearSelection()

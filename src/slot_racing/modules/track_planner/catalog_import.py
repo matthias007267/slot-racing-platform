@@ -172,6 +172,21 @@ def load_carrera_library() -> LibraryDraft:
     )
 
 
+def source_anchor(source_id: str) -> tuple[float, float, tuple[ConnectorSpec, ...]] | None:
+    """Centre and joints of one catalogue body.
+
+    ``None`` when that UUID is not a body in the bundled files. Catalogue reads
+    use this in place of the stored joint rows, so an older database gains the
+    edge joints without a rewrite of the part.
+    """
+    if not source_id:
+        return None
+    for spec in load_carrera_library().parts:
+        if spec.source_id == source_id:
+            return (spec.center_x_mm, spec.center_y_mm, spec.connectors)
+    return None
+
+
 def source_ids_hidden_from_collection() -> frozenset[str]:
     """Template shells and source bodies the catalogue does not offer on their own.
 
@@ -334,6 +349,7 @@ def _part_spec(
     article = str(part.get("partNumber") or "").strip()
     category = _category(article, len(slots))
     connectors = _connectors(part, source_id=source_id, lane_count=len(slots))
+    center_x, center_y = _center_xy(part)
     return PartSpec(
         article_number=article,
         scale=CATALOG_SCALE,
@@ -356,6 +372,8 @@ def _part_spec(
         systems=systems,
         selectable=source_id != HELPER_SOURCE,
         catalog_listed=part.get("listed") is not False,
+        center_x_mm=center_x,
+        center_y_mm=center_y,
     ), drawing_notes
 
 
@@ -530,24 +548,25 @@ def _extra_text(value: object) -> str:
 def _connectors(
     part: dict[str, object], *, source_id: str, lane_count: int
 ) -> tuple[ConnectorSpec, ...]:
-    edges = part.get("connectors") if isinstance(part.get("connectors"), list) else []
+    raw_edges = part.get("connectors")
+    edges: list[object] = list(raw_edges) if isinstance(raw_edges, list) else []
     slots = part.get("slots") if isinstance(part.get("slots"), list) else []
-    center = part.get("center") if isinstance(part.get("center"), dict) else {}
-    center_x = float(center.get("x") or 0.0) if isinstance(center, dict) else 0.0
-    center_y = float(center.get("y") or 0.0) if isinstance(center, dict) else 0.0
+    center_x, center_y = _center_xy(part)
     points = _slot_endpoints(slots)
     connectors: list[ConnectorSpec] = []
+    edge_joints: list[ConnectorSpec] = []
+    seen_edges: set[int] = set()
     attached = part.get("attachPoints")
-    rows: list[object] = []
-    if isinstance(attached, list):
-        rows.extend(attached)
+    rows: list[object] = list(attached) if isinstance(attached, list) else []
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
-        indices = [int(item) for item in row.get("connectorIndices") or []]
-        chosen = [
-            edges[item] for item in indices if isinstance(edges, list) and 0 <= item < len(edges)
+        indices = [
+            int(item)
+            for item in row.get("connectorIndices") or []
+            if isinstance(item, int) and not isinstance(item, bool) and 0 <= item < len(edges)
         ]
+        chosen = [edges[item] for item in indices]
         edge_points = _edge_points(chosen)
         if edge_points:
             mid_x = sum(point[0] for point in edge_points) / len(edge_points)
@@ -561,6 +580,7 @@ def _connectors(
         auto = bool(row.get("autoConnect"))
         lanes = () if auto or lane_count < 1 else tuple(range(1, lane_count + 1))
         lane_points = () if auto else _lane_points(points, (mid_x, mid_y), lane_count)
+        length = _segment_length(chosen[0]) if auto and len(indices) == 1 else None
         connectors.append(
             ConnectorSpec(
                 name=f"j{index}",
@@ -578,9 +598,93 @@ def _connectors(
                 neighbor_y=float(row.get("y") or 0.0),
                 neighbor_angle=float(row.get("angle") or 0.0),
                 lane_points=lane_points,
+                edge_length_mm=length,
             )
         )
-    return tuple(connectors)
+        if auto and len(indices) > 1:
+            for item in indices:
+                if item in seen_edges:
+                    continue
+                seen_edges.add(item)
+                joint = _border_edge_joint(
+                    edges[item],
+                    item,
+                    center_x,
+                    center_y,
+                    target_source_id=str(row.get("partId") or ""),
+                )
+                if joint is not None:
+                    edge_joints.append(joint)
+    if not rows:
+        for item, edge in enumerate(edges):
+            joint = _border_edge_joint(edge, item, center_x, center_y, target_source_id="")
+            if joint is not None:
+                edge_joints.append(joint)
+    return tuple(connectors + edge_joints)
+
+
+def _center_xy(part: Mapping[str, object]) -> tuple[float, float]:
+    center = part.get("center")
+    if not isinstance(center, dict):
+        return (0.0, 0.0)
+    return (float(center.get("x") or 0.0), float(center.get("y") or 0.0))
+
+
+def _segment_length(edge: object) -> float | None:
+    ends = _edge_ends(edge)
+    if ends is None:
+        return None
+    start, end = ends
+    length = math.hypot(end[0] - start[0], end[1] - start[1])
+    if not math.isfinite(length) or length <= 0.0:
+        return None
+    return length
+
+
+def _edge_ends(edge: object) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    if not isinstance(edge, dict):
+        return None
+    start = edge.get("p1")
+    end = edge.get("p2")
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return None
+    return (
+        (float(start.get("x") or 0.0), float(start.get("y") or 0.0)),
+        (float(end.get("x") or 0.0), float(end.get("y") or 0.0)),
+    )
+
+
+def _border_edge_joint(
+    edge: object,
+    index: int,
+    center_x: float,
+    center_y: float,
+    *,
+    target_source_id: str,
+) -> ConnectorSpec | None:
+    """One original connector edge, seated on its own midpoint."""
+    ends = _edge_ends(edge)
+    length = _segment_length(edge)
+    if ends is None or length is None:
+        return None
+    start, end = ends
+    mid_x = (start[0] + end[0]) / 2.0
+    mid_y = (start[1] + end[1]) / 2.0
+    kind = edge.get("type") if isinstance(edge, dict) else None
+    return ConnectorSpec(
+        name=f"e{index}",
+        x_mm=mid_x,
+        y_mm=mid_y,
+        z_mm=0.0,
+        direction_deg=_joint_direction(center_x, center_y, mid_x, mid_y, [edge]),
+        kind=BORDER_JOINT,
+        lanes=(),
+        target_source_id=target_source_id,
+        edge_types=(str(kind),) if kind else (),
+        exclusive=False,
+        has_neighbor=False,
+        edge_length_mm=length,
+    )
 
 
 def _edge_points(edges: list[object]) -> list[tuple[float, float]]:

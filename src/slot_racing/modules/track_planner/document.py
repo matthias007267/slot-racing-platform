@@ -33,6 +33,7 @@ from slot_racing.modules.track_planner.parts import (
     is_plate_draft,
     is_start_finish_part,
     join_pose,
+    origin_from_midpoint,
     rotate_xy,
     snap_pose,
     snap_selection,
@@ -648,8 +649,14 @@ def place_template(
     x_mm: float,
     y_mm: float,
     rotation_z_deg: float,
+    centers: Mapping[int, tuple[float, float]] | None = None,
 ) -> TrackPlan:
-    """Place every member of a template. The template itself is not an instance."""
+    """Place every member of a template. The template itself is not an instance.
+
+    Each stored offset is the member's centre. ``centers`` maps a part id to
+    that part's own centre. Missing entries stay at the origin, which is the
+    stored offset itself.
+    """
     if not members:
         raise ValidationError("error.planner.part")
     group_id = new_id() if len(members) > 1 else None
@@ -657,7 +664,9 @@ def place_template(
     for part_id, dx_mm, dy_mm, angle_deg in members:
         if isinstance(part_id, bool) or not isinstance(part_id, int) or part_id < 1:
             raise ValidationError("error.planner.part")
-        moved_x, moved_y = rotate_xy(dx_mm, dy_mm, rotation_z_deg)
+        center_x, center_y = (0.0, 0.0) if centers is None else centers.get(part_id, (0.0, 0.0))
+        origin_x, origin_y = origin_from_midpoint(dx_mm, dy_mm, angle_deg, center_x, center_y)
+        moved_x, moved_y = rotate_xy(origin_x, origin_y, rotation_z_deg)
         created.append(
             PartInstance(
                 id=new_id(),
