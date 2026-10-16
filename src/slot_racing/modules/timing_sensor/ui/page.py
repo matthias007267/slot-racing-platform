@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
+from collections.abc import Callable, Sequence
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from slot_racing.core.catalog import TrackCatalog
-from slot_racing.core.domain import TimingPositionType, TimingSetup, TrackId, default_timing_setup
+from slot_racing.core.catalog import TrackCatalog, TrackInfo
+from slot_racing.core.domain import TimingPosition, TimingPositionType, TimingSetup, TrackId
 from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing import TimingSetupService
@@ -39,17 +45,21 @@ from slot_racing.uikit import describe_error, make_table
 from slot_racing.uikit.theme import configure_page
 from slot_racing.uikit.widgets import StatusLabel, fill_table
 
+_DEFAULT_SENSORS = ("s1", "s2")
+TrackSource = TrackCatalog | Callable[[], TrackCatalog | None] | None
+SetupSource = TimingSetupService | Callable[[], TimingSetupService | None] | None
+
 
 class SensorTimingPage(QWidget):
-    """Simulation status, the track's sensor map, and the lines the shared link has seen."""
+    """Connection, the track's sensor map, and the lines the shared link has seen."""
 
     def __init__(
         self,
         translator: Translator,
         link: SensorLink,
         store: SensorConfigurationStore,
-        setups: TimingSetupService | None,
-        tracks: TrackCatalog | None,
+        setups: SetupSource,
+        tracks: TrackSource,
     ) -> None:
         super().__init__()
         self.setObjectName("sensor-page")
@@ -58,9 +68,11 @@ class SensorTimingPage(QWidget):
         self._store = store
         self._setups = setups
         self._tracks = tracks
-        self._rows: list[SensorAssignment] = []
         self._holding = False
-        self._shown_observations = 0
+        self._announced_session: str | None = None
+        self._track_snapshot: tuple[tuple[int, str, int, bool], ...] | None = None
+        self._row_signature: tuple[object, ...] | None = None
+        self._editors: dict[str, tuple[QComboBox, QComboBox]] = {}
         tr = translator.translate
         self.mode_label = QLabel(tr("sensor.mode.simulation"))
         self.mode_label.setObjectName("sensor-mode")
@@ -101,48 +113,25 @@ class SensorTimingPage(QWidget):
         self.track_combo = QComboBox()
         self.track_combo.setObjectName("sensor-track")
         self.track_combo.currentIndexChanged.connect(self._on_track)
-        self.assignments = make_table(
-            (
-                tr("sensor.column.physical"),
-                tr("sensor.column.position"),
-                tr("sensor.column.lane"),
-            ),
-            "sensor-assignments",
-        )
-        self.physical_edit = QLineEdit()
-        self.physical_edit.setObjectName("sensor-physical")
-        self.position_edit = QLineEdit()
-        self.position_edit.setObjectName("sensor-position")
-        self.lane_spin = QSpinBox()
-        self.lane_spin.setObjectName("sensor-lane")
-        self.lane_spin.setRange(1, 99)
-        add = QPushButton(tr("sensor.action.add"))
-        add.setObjectName("sensor-add")
-        add.clicked.connect(self._add_row)
-        remove = QPushButton(tr("sensor.action.remove"))
-        remove.setObjectName("sensor-remove")
-        remove.clicked.connect(self._remove_row)
+        self.setup_hint = QLabel("")
+        self.setup_hint.setObjectName("sensor-setup-hint")
+        self.setup_hint.setWordWrap(True)
+        self.prerequisites = QLabel("")
+        self.prerequisites.setObjectName("sensor-prerequisites")
+        self.prerequisites.setWordWrap(True)
+        self._open_timing = QPushButton(tr("sensor.action.open_timing"))
+        self._open_timing.setObjectName("sensor-open-timing")
+        self._open_timing.clicked.connect(self._open_timing_setup)
+        self._open_tracks = QPushButton(tr("sensor.action.open_tracks"))
+        self._open_tracks.setObjectName("sensor-open-tracks")
+        self._open_tracks.clicked.connect(self._open_track_list)
+        self._assignment_host = QWidget()
+        self._assignment_host.setObjectName("sensor-assignments")
+        self._assignment_grid = QGridLayout(self._assignment_host)
+        self._assignment_grid.setContentsMargins(0, 0, 0, 0)
         save = QPushButton(tr("sensor.action.save"))
         save.setObjectName("sensor-save")
         save.clicked.connect(self._save)
-        self.offset_edit = QLineEdit("0")
-        self.offset_edit.setObjectName("sensor-offset")
-        self.numerator_edit = QLineEdit("1")
-        self.numerator_edit.setObjectName("sensor-numerator")
-        self.denominator_edit = QLineEdit("1")
-        self.denominator_edit.setObjectName("sensor-denominator")
-        apply_mapping = QPushButton(tr("sensor.action.apply_mapping"))
-        apply_mapping.setObjectName("sensor-map-apply")
-        apply_mapping.clicked.connect(self._apply_mapping)
-        clear_mapping = QPushButton(tr("sensor.action.clear_mapping"))
-        clear_mapping.setObjectName("sensor-map-clear")
-        clear_mapping.clicked.connect(self._clear_mapping)
-        self.line_edit = QLineEdit()
-        self.line_edit.setObjectName("sensor-line")
-        self.line_edit.setPlaceholderText(tr("sensor.line.placeholder"))
-        inject = QPushButton(tr("sensor.action.inject"))
-        inject.setObjectName("sensor-inject")
-        inject.clicked.connect(self._inject)
         self.status = StatusLabel("sensor-status")
         self.log = make_table(
             (
@@ -155,9 +144,11 @@ class SensorTimingPage(QWidget):
             ),
             "sensor-log",
         )
+        self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        developer = self._developer_box()
         form = QFormLayout()
-        form.addRow(tr("sensor.field.mode"), self.mode_label)
-        form.addRow(tr("sensor.field.mode"), self.transport_combo)
+        form.addRow(tr("sensor.field.current"), self.mode_label)
+        form.addRow(tr("sensor.field.source"), self.transport_combo)
         form.addRow(tr("sensor.field.port"), self.port_combo)
         form.addRow(tr("sensor.field.baud"), self.baud_label)
         form.addRow(tr("sensor.field.identity"), self.identity_label)
@@ -166,39 +157,58 @@ class SensorTimingPage(QWidget):
         form.addRow(tr("sensor.field.sync"), self.sync_label)
         form.addRow(tr("sensor.field.readiness"), self.readiness_label)
         form.addRow(tr("sensor.field.track"), self.track_combo)
-        editor = QHBoxLayout()
-        editor.addWidget(self.physical_edit, 2)
-        editor.addWidget(self.position_edit, 2)
-        editor.addWidget(self.lane_spin)
-        editor.addWidget(add)
-        editor.addWidget(remove)
-        editor.addWidget(save)
-        mapping = QHBoxLayout()
-        mapping.addWidget(self.offset_edit)
-        mapping.addWidget(self.numerator_edit)
-        mapping.addWidget(self.denominator_edit)
-        mapping.addWidget(apply_mapping)
-        mapping.addWidget(clear_mapping)
-        frame = QHBoxLayout()
-        frame.addWidget(self.line_edit, 1)
-        frame.addWidget(inject)
-        layout = QVBoxLayout(self)
-        configure_page(layout)
+        actions = QHBoxLayout()
+        actions.addWidget(self._open_timing)
+        actions.addWidget(self._open_tracks)
+        actions.addWidget(save)
+        actions.addStretch(1)
         ports_row = QHBoxLayout()
         ports_row.addWidget(ports)
         ports_row.addWidget(connect)
         ports_row.addWidget(sync)
-        layout.addWidget(self.protocol_label)
-        layout.addLayout(form)
-        layout.addLayout(ports_row)
-        layout.addWidget(self.assignments)
-        layout.addLayout(editor)
-        layout.addLayout(mapping)
-        layout.addLayout(frame)
+        ports_row.addStretch(1)
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        configure_page(top_layout)
+        top_layout.addWidget(self.protocol_label)
+        top_layout.addLayout(form)
+        top_layout.addLayout(ports_row)
+        top_layout.addWidget(self.setup_hint)
+        top_layout.addLayout(actions)
+        top_layout.addWidget(self._assignment_host)
+        top_layout.addWidget(self.prerequisites)
+        top_layout.addWidget(developer)
+        top_layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setObjectName("sensor-controls-scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(top)
+        scroll.setMinimumHeight(120)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        log_title = QLabel(tr("sensor.log.title"))
+        log_title.setObjectName("sensor-log-title")
+        log_wrap = QWidget()
+        log_wrap.setObjectName("sensor-log-wrap")
+        log_layout = QVBoxLayout(log_wrap)
+        configure_page(log_layout)
+        log_layout.addWidget(log_title)
+        log_layout.addWidget(self.log, 1)
+        log_wrap.setMinimumHeight(180)
+        log_wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setObjectName("sensor-splitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(scroll)
+        splitter.addWidget(log_wrap)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        layout = QVBoxLayout(self)
+        configure_page(layout)
         layout.addWidget(self.status)
-        layout.addWidget(self.log, 1)
+        layout.addWidget(splitter, 1)
         self._fill_tracks()
-        self._reload_rows()
+        self._ensure_rows(force=True)
         self.refresh()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
@@ -217,68 +227,237 @@ class SensorTimingPage(QWidget):
         super().hideEvent(event)
 
     def refresh(self) -> None:
-        """Redraw status and any lines already read. Does not open a second transport."""
+        """Redraw status, the track list, and lines already read."""
+        self._fill_tracks()
+        self._ensure_rows()
         self._bind_saved()
         self._link.poll()
         self._paint_status()
+        self._paint_guidance()
         self._paint_log()
 
+    def _developer_box(self) -> QGroupBox:
+        tr = self._translator.translate
+        self.offset_edit = QLineEdit("0")
+        self.offset_edit.setObjectName("sensor-offset")
+        self.numerator_edit = QLineEdit("1")
+        self.numerator_edit.setObjectName("sensor-numerator")
+        self.denominator_edit = QLineEdit("1")
+        self.denominator_edit.setObjectName("sensor-denominator")
+        apply_mapping = QPushButton(tr("sensor.action.apply_mapping"))
+        apply_mapping.setObjectName("sensor-map-apply")
+        apply_mapping.clicked.connect(self._apply_mapping)
+        clear_mapping = QPushButton(tr("sensor.action.clear_mapping"))
+        clear_mapping.setObjectName("sensor-map-clear")
+        clear_mapping.clicked.connect(self._clear_mapping)
+        self.line_edit = QLineEdit()
+        self.line_edit.setObjectName("sensor-line")
+        self.line_edit.setPlaceholderText(tr("sensor.line.placeholder"))
+        inject = QPushButton(tr("sensor.action.inject"))
+        inject.setObjectName("sensor-inject")
+        inject.clicked.connect(self._inject)
+        content = QWidget()
+        content.setObjectName("sensor-developer-body")
+        form = QFormLayout(content)
+        form.addRow(tr("sensor.field.offset"), self.offset_edit)
+        form.addRow(tr("sensor.field.numerator"), self.numerator_edit)
+        form.addRow(tr("sensor.field.denominator"), self.denominator_edit)
+        mapping = QHBoxLayout()
+        mapping.addWidget(apply_mapping)
+        mapping.addWidget(clear_mapping)
+        form.addRow(tr("sensor.field.sync"), mapping)
+        frame = QHBoxLayout()
+        frame.addWidget(self.line_edit, 1)
+        frame.addWidget(inject)
+        form.addRow(tr("sensor.field.line"), frame)
+        box = QGroupBox(tr("sensor.developer"))
+        box.setObjectName("sensor-developer")
+        box.setCheckable(True)
+        box.setChecked(False)
+        outer = QVBoxLayout(box)
+        outer.addWidget(content)
+        content.setVisible(False)
+        box.toggled.connect(content.setVisible)
+        return box
+
+    def _catalog(self) -> TrackCatalog | None:
+        source = self._tracks
+        if isinstance(source, TrackCatalog):
+            return source
+        if source is None:
+            return None
+        found = source()
+        return found if isinstance(found, TrackCatalog) else None
+
+    def _setup_service(self) -> TimingSetupService | None:
+        source = self._setups
+        if isinstance(source, TimingSetupService):
+            return source
+        if source is None:
+            return None
+        found = source()
+        return found if isinstance(found, TimingSetupService) else None
+
     def _fill_tracks(self) -> None:
+        catalog = self._catalog()
+        tracks = () if catalog is None else tuple(catalog.list_tracks())
+        snapshot = tuple(
+            (int(track.id), track.name, track.lane_count, track.is_active) for track in tracks
+        )
+        if snapshot == self._track_snapshot:
+            return
+        current = self._track_id()
+        self._track_snapshot = snapshot
         self.track_combo.blockSignals(True)
         self.track_combo.clear()
-        if self._tracks is not None:
-            for track in self._tracks.list_tracks():
-                self.track_combo.addItem(track.name, int(track.id))
+        inactive = self._translator.translate("sensor.track.inactive")
+        for track_id, name, _lanes, active in snapshot:
+            label = name if active else f"{name} ({inactive})"
+            self.track_combo.addItem(label, track_id)
+        if current is not None:
+            index = self.track_combo.findData(current)
+            if index >= 0:
+                self.track_combo.setCurrentIndex(index)
         self.track_combo.blockSignals(False)
+        self._row_signature = None
 
     def _on_track(self) -> None:
-        self._reload_rows()
+        self._row_signature = None
+        self._ensure_rows(force=True)
         self.refresh()
 
-    def _reload_rows(self) -> None:
+    def _ensure_rows(self, *, force: bool = False) -> None:
         track_id = self._track_id()
-        self._rows = [] if track_id is None else list(self._store.track_assignments(track_id))
-        fill_table(
-            self.assignments,
-            [(row.physical_id, row.position_id, str(row.lane)) for row in self._rows],
-            list(range(len(self._rows))),
+        sensors = self._visible_sensors(track_id)
+        positions = self._position_choices(track_id)
+        lanes = self._lane_values(track_id)
+        signature = (track_id, sensors, positions, lanes)
+        if not force and signature == self._row_signature:
+            return
+        saved = {item.physical_id: item for item in self._saved(track_id)}
+        self._row_signature = signature
+        self._editors.clear()
+        while (item := self._assignment_grid.takeAt(0)) is not None:
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        if track_id is None:
+            return
+        tr = self._translator.translate
+        headers = (
+            tr("sensor.column.physical"),
+            tr("sensor.column.position"),
+            tr("sensor.column.lane"),
+        )
+        for column, text in enumerate(headers):
+            label = QLabel(text)
+            self._assignment_grid.addWidget(label, 0, column)
+        for row_index, physical in enumerate(sensors, start=1):
+            name = QLabel(physical)
+            name.setObjectName(f"sensor-name-{physical}")
+            position = QComboBox()
+            position.setObjectName(f"sensor-position-{physical}")
+            position.addItem(tr("sensor.position.choose"), "")
+            for position_id, caption in positions:
+                position.addItem(caption, position_id)
+            lane = QComboBox()
+            lane.setObjectName(f"sensor-lane-{physical}")
+            for value in lanes:
+                lane.addItem(self._translator.format("sensor.lane.value", lane=value), value)
+            known = saved.get(physical)
+            if known is not None:
+                _select_data(position, known.position_id)
+                if lane.findData(known.lane) < 0:
+                    lane.addItem(
+                        self._translator.format("sensor.lane.value", lane=known.lane),
+                        known.lane,
+                    )
+                _select_data(lane, known.lane)
+            self._assignment_grid.addWidget(name, row_index, 0)
+            self._assignment_grid.addWidget(position, row_index, 1)
+            self._assignment_grid.addWidget(lane, row_index, 2)
+            self._editors[physical] = (position, lane)
+
+    def _visible_sensors(self, track_id: int | None) -> tuple[str, ...]:
+        identity = self._link.identity
+        recognized = (
+            identity.sensors if identity is not None and identity.sensors else _DEFAULT_SENSORS
+        )
+        ordered = list(recognized)
+        for item in self._saved(track_id):
+            if item.physical_id not in ordered:
+                ordered.append(item.physical_id)
+        return tuple(ordered)
+
+    def _position_choices(self, track_id: int | None) -> tuple[tuple[str, str], ...]:
+        setup = None if track_id is None else self._stored_setup(track_id)
+        if setup is None:
+            return ()
+        return tuple(
+            (position.id, self._position_label(position)) for position in setup.layout.positions
         )
 
-    def _add_row(self) -> None:
-        try:
-            assignment = SensorAssignment(
-                physical_id=self.physical_edit.text().strip(),
-                position_id=self.position_edit.text().strip(),
-                lane=self.lane_spin.value(),
-            )
-        except ValueError as error:
-            self.status.show_error(str(error))
-            return
-        self._rows.append(assignment)
-        self._reload_table_from_rows()
-        self.status.clear_message()
+    def _position_label(self, position: TimingPosition) -> str:
+        if position.name:
+            return position.name
+        if position.type is TimingPositionType.START_FINISH:
+            return self._translator.translate("sensor.position.start_finish")
+        number = position.sector_number if position.sector_number is not None else 0
+        return self._translator.format("sensor.position.sector", number=number)
 
-    def _remove_row(self) -> None:
-        row = self.assignments.currentRow()
-        if row < 0 or row >= len(self._rows):
-            return
-        del self._rows[row]
-        self._reload_table_from_rows()
+    def _lane_values(self, track_id: int | None) -> tuple[int, ...]:
+        count = 0 if track_id is None else self._lane_count(track_id)
+        if count < 1:
+            return ()
+        return tuple(range(1, count + 1))
+
+    def _saved(self, track_id: int | None) -> tuple[SensorAssignment, ...]:
+        if track_id is None:
+            return ()
+        try:
+            return self._store.track_assignments(track_id)
+        except SensorConfigurationError:
+            return ()
+
+    def _form_rows(self) -> tuple[SensorAssignment, ...] | None:
+        rows: list[SensorAssignment] = []
+        for physical, (position, lane) in self._editors.items():
+            position_id = position.currentData()
+            lane_value = lane.currentData()
+            if not isinstance(position_id, str) or not position_id:
+                return None
+            if isinstance(lane_value, bool) or not isinstance(lane_value, int):
+                return None
+            rows.append(
+                SensorAssignment(physical_id=physical, position_id=position_id, lane=lane_value)
+            )
+        return tuple(rows)
 
     def _save(self) -> None:
         track_id = self._track_id()
         if track_id is None:
             self.status.show_error(self._translator.translate("sensor.error.no_track"))
             return
-        if self._rows:
-            issues = self._issues(self._rows)
-            if issues:
-                self.status.show_error(
-                    " ".join(self._translator.format(issue.key, **issue.params) for issue in issues)
-                )
-                return
+        if self._stored_setup(track_id) is None:
+            self.status.show_error(self._setup_message(track_id))
+            return
+        missing = self._missing_fields()
+        if missing:
+            self.status.show_error(missing[0])
+            return
+        rows = self._form_rows()
+        if rows is None:
+            self.status.show_error(self._translator.translate("sensor.error.no_track"))
+            return
+        issues = self._issues(rows)
+        if issues:
+            self.status.show_error(
+                " ".join(self._translator.format(issue.key, **issue.params) for issue in issues)
+            )
+            return
         try:
-            self._store.save_track(track_id, self._rows)
+            self._store.save_track(track_id, rows)
         except (SensorConfigurationError, ValueError) as error:
             self.status.show_error(describe_error(self._translator, error))
             return
@@ -323,13 +502,11 @@ class SensorTimingPage(QWidget):
         if track_id is None:
             self._link.bind_view((), {})
             return
-        setup = self._setup(track_id)
-        logical = {sensor.position_id: sensor.id for sensor in setup.sensors}
-        try:
-            saved = self._store.track_assignments(track_id)
-        except SensorConfigurationError:
-            saved = ()
-        self._link.bind_view(saved, logical)
+        setup = self._stored_setup(track_id)
+        logical = (
+            {} if setup is None else {sensor.position_id: sensor.id for sensor in setup.sensors}
+        )
+        self._link.bind_view(self._saved(track_id), logical)
 
     def _refresh_ports(self) -> None:
         current = self.port_combo.currentText()
@@ -362,6 +539,7 @@ class SensorTimingPage(QWidget):
                 self._translator.format("sensor.error.serial", detail=str(error))
             )
             return
+        self._announced_session = None
         self.refresh()
 
     def _request_sync(self) -> None:
@@ -371,6 +549,29 @@ class SensorTimingPage(QWidget):
             self.status.show_error(self._translator.translate("sensor.error.sync"))
             return
         self.refresh()
+
+    def _open_track_list(self) -> None:
+        self._navigate("tracks", None)
+
+    def _open_timing_setup(self) -> None:
+        self._navigate("tracks", self._track_id())
+
+    def _navigate(self, entry_id: str, track_id: int | None) -> None:
+        window = self.window()
+        select = getattr(window, "select", None)
+        if not callable(select):
+            self.status.show_error(self._translator.translate("sensor.error.timing_navigation"))
+            return
+        select(entry_id)
+        if track_id is None:
+            return
+        current = getattr(window, "current_page", None)
+        page = current() if callable(current) else None
+        show_config = getattr(page, "show_config", None)
+        if callable(show_config):
+            show_config(track_id)
+            return
+        self.status.show_error(self._translator.translate("sensor.error.timing_navigation"))
 
     def _paint_status(self) -> None:
         tr = self._translator.translate
@@ -383,6 +584,12 @@ class SensorTimingPage(QWidget):
             self.identity_label.setText(
                 f"{identity.device} {identity.firmware} {identity.session_id} {sensors}"
             )
+            if (
+                self._link.mode is TransportMode.SERIAL
+                and identity.session_id != self._announced_session
+            ):
+                self._announced_session = identity.session_id
+                self.status.show_info(tr("sensor.hint.sync_started"))
         samples, uncertainty, numerator, denominator, accepted = self._link.sync_quality
         if accepted:
             self.quality_label.setText(
@@ -404,6 +611,48 @@ class SensorTimingPage(QWidget):
         self.readiness_label.setText(
             tr("sensor.readiness.ready") if ready else tr("sensor.readiness.not_ready")
         )
+
+    def _paint_guidance(self) -> None:
+        track_id = self._track_id()
+        catalog = self._catalog()
+        self._open_tracks.setVisible(track_id is None)
+        setup_missing = track_id is not None and self._stored_setup(track_id) is None
+        self._open_timing.setVisible(setup_missing)
+        if catalog is None:
+            self.setup_hint.setText(self._translator.translate("sensor.hint.no_catalog"))
+        elif track_id is None:
+            self.setup_hint.setText(self._translator.translate("sensor.hint.no_tracks"))
+        elif setup_missing:
+            self.setup_hint.setText(self._setup_message(track_id))
+        else:
+            self.setup_hint.setText("")
+        notes = list(self._missing_fields())
+        rows = self._form_rows()
+        if rows is not None:
+            notes.extend(
+                self._translator.format(issue.key, **issue.params) for issue in self._issues(rows)
+            )
+        if rows is not None and rows != self._saved(track_id):
+            notes.append(self._translator.translate("sensor.hint.unsaved"))
+        self.prerequisites.setText(" ".join(notes))
+
+    def _setup_message(self, track_id: int) -> str:
+        track = self._track(track_id)
+        name = str(track_id) if track is None else track.name
+        return self._translator.format("sensor.hint.no_setup", name=name)
+
+    def _missing_fields(self) -> tuple[str, ...]:
+        notes: list[str] = []
+        for physical, (position, lane) in self._editors.items():
+            position_id = position.currentData()
+            lane_value = lane.currentData()
+            if not isinstance(position_id, str) or not position_id:
+                notes.append(
+                    self._translator.format("sensor.hint.position_missing", sensor=physical)
+                )
+            if isinstance(lane_value, bool) or not isinstance(lane_value, int):
+                notes.append(self._translator.format("sensor.hint.lane_missing", sensor=physical))
+        return tuple(notes)
 
     def _paint_log(self) -> None:
         observations = self._link.observations
@@ -433,19 +682,16 @@ class SensorTimingPage(QWidget):
             return False
         if self._link.sync is not SyncStatus.SYNCHRONIZED:
             return False
-        try:
-            saved = self._store.track_assignments(track_id)
-        except SensorConfigurationError:
+        if self._stored_setup(track_id) is None:
             return False
-        return not self._issues(saved)
+        saved = self._saved(track_id)
+        return bool(saved) and not self._issues(saved)
 
-    def _issues(
-        self, rows: list[SensorAssignment] | tuple[SensorAssignment, ...]
-    ) -> tuple[ValidationError, ...]:
+    def _issues(self, rows: Sequence[SensorAssignment]) -> tuple[ValidationError, ...]:
         track_id = self._track_id()
-        if track_id is None:
+        setup = None if track_id is None else self._stored_setup(track_id)
+        if track_id is None or setup is None:
             return ()
-        setup = self._setup(track_id)
         start_finish = next(
             position.id
             for position in setup.layout.positions
@@ -458,20 +704,23 @@ class SensorTimingPage(QWidget):
             start_finish_id=start_finish,
         )
 
-    def _setup(self, track_id: int) -> TimingSetup:
-        if self._setups is not None:
-            stored = self._setups.get_setup(TrackId(track_id))
-            if stored is not None:
-                return stored
-        return default_timing_setup()
+    def _stored_setup(self, track_id: int) -> TimingSetup | None:
+        service = self._setup_service()
+        if service is None:
+            return None
+        return service.get_setup(TrackId(track_id))
 
     def _lane_count(self, track_id: int) -> int:
-        if self._tracks is None:
-            return 0
-        track = self._tracks.get_track(TrackId(track_id))
+        track = self._track(track_id)
         if track is None:
             return 0
         return track.lane_count
+
+    def _track(self, track_id: int) -> TrackInfo | None:
+        catalog = self._catalog()
+        if catalog is None:
+            return None
+        return catalog.get_track(TrackId(track_id))
 
     def _track_id(self) -> int | None:
         data = self.track_combo.currentData()
@@ -479,12 +728,11 @@ class SensorTimingPage(QWidget):
             return None
         return data
 
-    def _reload_table_from_rows(self) -> None:
-        fill_table(
-            self.assignments,
-            [(row.physical_id, row.position_id, str(row.lane)) for row in self._rows],
-            list(range(len(self._rows))),
-        )
+
+def _select_data(combo: QComboBox, value: object) -> None:
+    index = combo.findData(value)
+    if index >= 0:
+        combo.setCurrentIndex(index)
 
 
 def _parse_int(text: str) -> int:
