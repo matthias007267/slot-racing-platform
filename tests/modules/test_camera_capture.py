@@ -95,6 +95,7 @@ class ScriptedCapture:
         self.open_count = 0
         self.close_count = 0
         self.reads = 0
+        self._waiting = 0
         self._items: deque[GrayFrame | BaseException] = deque()
         self._cond = threading.Condition()
 
@@ -118,7 +119,11 @@ class ScriptedCapture:
     def read(self) -> GrayFrame:
         with self._cond:
             while self.opened and not self._items:
-                self._cond.wait(timeout=0.2)
+                self._waiting += 1
+                try:
+                    self._cond.wait(timeout=0.2)
+                finally:
+                    self._waiting -= 1
             if not self.opened:
                 raise CameraClosedError()
             self.reads += 1
@@ -126,6 +131,11 @@ class ScriptedCapture:
         if isinstance(item, BaseException):
             raise item
         return item
+
+    def waiting(self) -> int:
+        """Readers blocked inside ``read``. Zero while a frame is being handled."""
+        with self._cond:
+            return self._waiting
 
     def close(self) -> None:
         with self._cond:
@@ -174,6 +184,58 @@ def wait_for(predicate: Callable[[], bool]) -> None:
 
 def test_a_device_without_a_capture_clock_keeps_the_host_clock() -> None:
     assert capture_clock_of(ScriptedCapture()) is None
+
+
+def test_settled_is_reached_before_the_capture_thread_reads_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publishing a frame must not wait for the following ``read``.
+
+    The capture thread is held inside ``put`` after the frame is stored. The
+    next read has not started. ``wait_settled`` still returns, and the unread
+    frame is already in the one-deep slot.
+    """
+    device = ScriptedCapture()
+    frames = CameraFrameSource(device)
+    release = threading.Event()
+    original = LatestFrameBuffer.put
+
+    def stalled(
+        self: LatestFrameBuffer, frame: TimedFrame, *, ready: Callable[[], None] | None = None
+    ) -> None:
+        original(self, frame, ready=ready)
+        release.wait(5)
+
+    monkeypatch.setattr(LatestFrameBuffer, "put", stalled)
+    frames.start()
+    try:
+        device.push(blank())
+        assert frames.wait_settled(1, 2.0)
+        assert frames.read_attempts == 1
+        assert frames.sequence == 1
+        assert frames.settled == 1
+        assert frames.queued == 1
+        assert device.reads == 1
+        assert device.waiting() == 0
+    finally:
+        release.set()
+        frames.stop()
+
+
+def test_a_paused_grab_settles_without_publishing() -> None:
+    device = ScriptedCapture()
+    frames = CameraFrameSource(device)
+    frames.start()
+    try:
+        frames.pause()
+        device.push(blank())
+        assert frames.wait_settled(1, 2.0)
+        assert frames.sequence == 1
+        assert frames.settled == 1
+        assert frames.queued == 0
+        assert frames.dropped == 0
+    finally:
+        frames.stop()
 
 
 def test_a_taken_frame_is_kept_when_the_next_one_is_published() -> None:

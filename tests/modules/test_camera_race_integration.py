@@ -8,8 +8,10 @@ here pushes a SensorTriggered straight into the engine.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 
 import pytest
@@ -42,7 +44,12 @@ from slot_racing.modules.races.ui.live_view import LiveRaceView
 from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.races.ui.results_view import ResultsView
 from slot_racing.modules.timing_camera.camera_config import CameraConfig
-from slot_racing.modules.timing_camera.capture import MAX_FRAMES_PER_POLL, MAX_QUEUED_FRAMES
+from slot_racing.modules.timing_camera.capture import (
+    MAX_FRAMES_PER_POLL,
+    MAX_QUEUED_FRAMES,
+    CameraFrameSource,
+    LatestFrameBuffer,
+)
 from slot_racing.modules.timing_camera.configuration import (
     CameraConfiguration,
     NormalizedRoi,
@@ -56,6 +63,7 @@ from slot_racing.modules.timing_camera.detection import (
     effective_block_size,
     sensitivity_profile,
 )
+from slot_racing.modules.timing_camera.frame_source import TimedFrame
 from slot_racing.modules.timing_camera.frames import GrayFrame
 from slot_racing.modules.timing_camera.geometry import DetectionRoi
 from slot_racing.modules.timing_camera.lease import CameraBusyError, CameraLease
@@ -129,12 +137,14 @@ class ScriptedClock:
 
 
 class SyncCapture(ScriptedCapture):
-    """Scripted device that reports when the capture thread has queued a frame.
+    """Scripted device whose grab clock the race can read.
 
-    ``entries`` grows at the start of every ``read``. After a frame is taken,
-    the thread queues it and only then enters ``read`` again. Waiting for both
-    a new read and a new entry means the frame is already in the race queue.
-    ``capture_clock`` supplies the grab stamps. A real camera has no such clock.
+    ``entries`` counts calls into ``read``, including the call that is still
+    blocked. ``reads`` counts frames and errors actually popped. Neither one
+    means the picture has been stored for detection: that is
+    ``CameraFrameSource.settled``, which advances when the frame is queued or
+    when a pause skips it. ``capture_clock`` supplies the grab stamps. A real
+    camera has no such clock.
     """
 
     def __init__(self, *, fail_open: bool = False) -> None:
@@ -278,7 +288,7 @@ def pass_again(
     race debounce, on the same clock the detector reads.
     """
     previous = [event.timestamp_ns for event in events if isinstance(event, SensorTriggered)]
-    consume(device, blank(width, height))
+    consume(device, blank(width, height), runner)
     drive(runner)
     cross(device, *rois, runner=runner, width=width, height=height)
     drive(runner)
@@ -387,12 +397,13 @@ def camera_report(runner: RaceRunner) -> str:
         pending = getattr(source, "_pending", None)
         parts.append(
             "observed={observed} taken={taken} dropped={dropped} seq={seq} "
-            "analyzed={analyzed} samples={samples} pending={pending} "
+            "settled={settled} analyzed={analyzed} samples={samples} pending={pending} "
             "capture_dt_ms={dt} detect_max_ms={detect} failure={failure} zone={zone}".format(
                 observed=getattr(source, "frames_observed", None),
                 taken=getattr(frames, "frames_taken", None),
                 dropped=getattr(frames, "dropped", getattr(frames, "replaced", None)),
                 seq=getattr(frames, "sequence", None),
+                settled=getattr(frames, "settled", None),
                 analyzed=analyzed,
                 samples=samples,
                 pending=None if pending is None else len(pending),
@@ -416,7 +427,7 @@ def publish_taken(device: SyncCapture, frame: GrayFrame, runner: RaceRunner) -> 
     """
     taken = frames_taken(runner)
     dropped = frames_dropped(runner)
-    consume(device, frame)
+    consume(device, frame, runner)
 
     def held() -> bool:
         return frames_taken(runner) > taken
@@ -450,27 +461,120 @@ def wait_until(predicate: Callable[[], bool], message: str | Callable[[], str]) 
     raise AssertionError(message() if callable(message) else message)
 
 
+def _camera_source(runner: RaceRunner) -> CameraFrameSource:
+    """The capture source that reads the device, including a session-owned one."""
+    found: list[CameraFrameSource] = []
+    for source in _sources(runner):
+        frames = _frame_source(source)
+        if isinstance(frames, CameraFrameSource):
+            found.append(frames)
+            continue
+        session = getattr(frames, "_session", None)
+        owned = getattr(session, "_source", None)
+        if isinstance(owned, CameraFrameSource):
+            found.append(owned)
+    if len(found) != 1:
+        raise AssertionError(f"expected one camera capture, found {len(found)}")
+    return found[0]
+
+
+def _thread_dump() -> str:
+    """Stacks of every thread, taken when a frame was not acknowledged."""
+    stacks = sys._current_frames()
+    parts: list[str] = []
+    for thread in threading.enumerate():
+        parts.append(
+            f"{thread.name} alive={thread.is_alive()} daemon={thread.daemon} ident={thread.ident}"
+        )
+        frame = stacks.get(thread.ident) if thread.ident is not None else None
+        if frame is not None:
+            parts.append("".join(traceback.format_stack(frame)).rstrip())
+    return "\n".join(parts)
+
+
+def _capture_miss(device: SyncCapture, runner: RaceRunner, reads: int, target: int) -> str:
+    source_error = None
+    try:
+        source = _camera_source(runner)
+    except AssertionError as error:
+        source = None
+        source_error = error
+    return "\n".join(
+        (
+            "capture missed the frame "
+            f"(reads now={device.reads}, reads before={reads}, "
+            f"entries={device.entry_count()}, waiting={device.waiting()}, "
+            f"pending={device.pending()}, opened={device.opened}, "
+            f"settled target={target}, "
+            f"settled now={None if source is None else source.settled})",
+            f"source lookup={source_error}",
+            camera_report(runner),
+            _thread_dump(),
+        )
+    )
+
+
 def wait_armed(device: SyncCapture) -> None:
-    """Block until the capture thread is waiting for the next frame."""
+    """Block until the capture thread is inside ``read``, with nothing queued.
+
+    ``entries`` only counts how often ``read`` was called. A stopped thread
+    still has a positive count. ``waiting`` is positive only while that call
+    is blocked on the next frame.
+    """
 
     def armed() -> bool:
-        return device.opened and device.entry_count() >= 1 and device.pending() == 0
+        return device.opened and device.waiting() >= 1 and device.pending() == 0
 
     wait_until(armed, "capture thread did not start")
-    time.sleep(0.01)
-    if not armed():
-        raise AssertionError("capture thread did not stay armed")
 
 
-def consume(device: SyncCapture, frame: GrayFrame) -> None:
-    """Push one frame and return only after the capture thread has queued it."""
+def _capture_paused(runner: RaceRunner) -> bool:
+    """True when this grab is not offered to detection.
+
+    A paused capture thread still reads, then skips the slot. Waiting for a
+    hand-off would time out. A running race publishes, and the next push must
+    not replace a frame detection has not taken yet.
+    """
+    for source in _sources(runner):
+        if getattr(source, "_paused", False):
+            return True
+        frames = _frame_source(source)
+        if getattr(frames, "_paused", False):
+            return True
+    return False
+
+
+def consume(device: SyncCapture, frame: GrayFrame, runner: RaceRunner) -> None:
+    """Push one frame and return once capture has settled that grab.
+
+    Settled means the picture is in the latest-frame slot, or a pause skipped
+    it. ``reads`` is only the device pop. The following ``read`` call is not
+    required: it starts after publish, and detection can occupy the interpreter
+    in between without the frame having been lost. ``settled`` is signaled
+    before detection wakes.
+
+    On a running race the frame is also waited on until detection has taken it.
+    Analysis may still be running. Taking it is what stops the next push from
+    replacing an unread picture.
+    """
     wait_armed(device)
-    entries = device.entry_count()
+    source = _camera_source(runner)
+    target = source.settled + 1
+    taken = frames_taken(runner)
     reads = device.reads
+    paused = _capture_paused(runner)
     device.push(frame)
+    if not source.wait_settled(target, 2.0) or device.reads <= reads:
+        raise AssertionError(_capture_miss(device, runner, reads, target))
+    if paused:
+        return
+
+    def handed_off() -> bool:
+        return frames_taken(runner) > taken
+
     wait_until(
-        lambda: device.reads > reads and device.entry_count() > entries,
-        f"capture missed the frame (reads={device.reads}, entries={device.entry_count()})",
+        handed_off,
+        lambda: "detection did not take the queued frame; " + camera_report(runner),
     )
 
 
@@ -567,11 +671,11 @@ def test_a_saved_configuration_completes_a_camera_race(env: Env) -> None:
         assert lease.holder() == CameraLease.RACE
 
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
-        consume(device, painted((CAR_OUTSIDE,)))
+        consume(device, painted((CAR_OUTSIDE,)), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
@@ -624,7 +728,7 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         save_document(
             env,
@@ -633,7 +737,7 @@ def test_a_running_race_keeps_the_snapshot_when_the_document_changes(env: Env) -
         )
         assert CameraConfigurationStore(env.runtime.database).load().camera.device_index == 9
 
-        consume(device, painted((CAR_OUTSIDE,)))
+        consume(device, painted((CAR_OUTSIDE,)), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
@@ -656,7 +760,7 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
     first = env.controller.start_race(first_id)
     try:
         device = first_hub.live()
-        consume(device, blank())
+        consume(device, blank(), first)
         drive(first)
         cross(device, zone_rect(ZONE_X), runner=first)
         drive(first)
@@ -681,9 +785,9 @@ def test_a_new_factory_loads_the_stored_document_for_the_next_race(env: Env) -> 
             CameraConfig(device_index=8, width=WIDTH, height=HEIGHT, fps=15)
         }
         device = second_hub.live()
-        consume(device, blank())
+        consume(device, blank(), second)
         drive(second)
-        consume(device, painted((CAR_IN_ZONE,)))
+        consume(device, painted((CAR_IN_ZONE,)), second)
         drive(second)
         assert of_type(second_events, SensorTriggered) == []
         cross(device, zone_rect(0.0), runner=second)
@@ -714,7 +818,7 @@ def test_one_frame_with_two_lanes_keeps_one_timestamp_and_finishes_both(env: Env
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), zone_rect(ZONE_X, y=0.50), runner=runner)
@@ -766,7 +870,7 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), zone_rect(0.50), zone_rect(0.80), runner=runner)
@@ -788,7 +892,7 @@ def test_two_positions_in_one_frame_follow_the_existing_race_rules(env: Env) -> 
         assert of_type(events, LapCompleted) == []
         assert runner.status is RaceStatus.RUNNING
 
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         cross(device, zone_rect(ZONE_X), zone_rect(0.80), runner=runner)
         drive(runner)
@@ -814,25 +918,25 @@ def test_pause_drops_frames_and_resume_does_not_count_a_car_already_in_the_zone(
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
         runner.pause()
         assert runner.status is RaceStatus.PAUSED
         reads_before = device.reads
-        consume(device, painted((CAR_IN_ZONE,)))
+        consume(device, painted((CAR_IN_ZONE,)), runner)
         drive(runner)
         assert device.reads == reads_before + 1
         assert of_type(events, SensorTriggered) == []
 
         runner.resume()
         assert runner.snapshot().status is RaceStatus.RUNNING
-        consume(device, painted((zone_rect(ZONE_X),)))
+        consume(device, painted((zone_rect(ZONE_X),)), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
 
@@ -886,9 +990,9 @@ def test_stop_releases_the_camera_and_a_held_preview_blocks_the_race(env: Env) -
         assert hub.created[-1].open_count == 0
         device = hub.live()
         assert device.open_count == 1
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
-        consume(device, painted((CAR_IN_ZONE,)))
+        consume(device, painted((CAR_IN_ZONE,)), runner)
         runner.stop()
         assert runner.status is RaceStatus.FINISHED
         assert runner.snapshot().aborted
@@ -921,14 +1025,14 @@ def test_a_backlog_drops_old_frames_before_they_reach_the_race(env: Env) -> None
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         # A repeated car in the same blocks is not a crossing. The slot also
         # keeps only the newest unread frame, so a burst cannot replay history.
         for _ in range(4):
-            consume(device, painted((CAR_IN_ZONE,)))
-        consume(device, blank())
-        consume(device, blank())
+            consume(device, painted((CAR_IN_ZONE,)), runner)
+        consume(device, blank(), runner)
+        consume(device, blank(), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
         assert runner.status is RaceStatus.RUNNING
@@ -1024,6 +1128,52 @@ def test_repeated_read_failures_are_recorded_without_crashing_the_race(env: Env)
     assert camera_threads() == []
 
 
+def test_a_queued_frame_is_acked_before_the_capture_thread_reads_again(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``consume`` returns when the frame is stored, not when ``read`` is entered again.
+
+    The capture thread is held after the slot accepts the picture and before it
+    loops back to the device. Detection may already be analyzing that picture.
+    The old acknowledgement waited for the next ``read`` entry, so this stall
+    made ``consume`` time out even though the frame had not been lost.
+    """
+    hub = DeviceHub()
+    save_document(env, (zone("start_finish", 1, x=ZONE_X),))
+    attach(env, hub)
+    race_id, _track = create_camera_race(env, lanes=1)
+    events = listen(env)
+    runner = env.controller.start_race(race_id)
+    release = threading.Event()
+    original = LatestFrameBuffer.put
+
+    def stalled(
+        self: LatestFrameBuffer,
+        frame: TimedFrame,
+        *,
+        ready: Callable[[], None] | None = None,
+    ) -> None:
+        original(self, frame, ready=ready)
+        release.wait(5)
+
+    monkeypatch.setattr(LatestFrameBuffer, "put", stalled)
+    try:
+        device = hub.live()
+        consume(device, blank(), runner)
+        source = _camera_source(runner)
+        assert source.read_attempts == 1
+        assert source.sequence == 1
+        assert source.settled == 1
+        assert device.reads == 1
+        release.set()
+        drive(runner)
+        assert runner.snapshot().source_errors == ()
+        assert of_type(events, SensorTriggered) == []
+    finally:
+        release.set()
+        runner.close()
+
+
 @pytest.mark.parametrize(
     ("width", "height", "expected"),
     [
@@ -1057,9 +1207,9 @@ def test_saved_zones_scale_to_the_stored_resolution(
         loaded = CameraConfigurationStore(env.runtime.database).load()
         assert roi_to_pixels(loaded.detection.zones[0].roi, width, height) == expected
         device = hub.live()
-        consume(device, blank(width, height))
+        consume(device, blank(width, height), runner)
         drive(runner)
-        consume(device, painted((DetectionRoi(0, 0, 4, 4),), width, height))
+        consume(device, painted((DetectionRoi(0, 0, 4, 4),), width, height), runner)
         drive(runner)
         assert of_type(events, SensorTriggered) == []
         cross(device, expected, runner=runner, width=width, height=height)
@@ -1100,7 +1250,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         assert not live.start_lights.isVisible()
         assert live.findChildren(CameraStage) == []
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         live.refresh()
         assert live.status_label.text().endswith("Läuft")
         assert runner.snapshot().name == "Kamera"
@@ -1119,7 +1269,7 @@ def test_the_live_view_shows_a_camera_race_without_a_camera_widget(qtbot: QtBot,
         assert live.status_label.text().endswith("Läuft")
         assert column_text(live.table, 0, "Runden") == "0"
 
-        consume(device, blank())
+        consume(device, blank(), runner)
         live.refresh()
         cross(device, zone_rect(ZONE_X), runner=runner)
         live.refresh()
@@ -1157,7 +1307,7 @@ def test_two_motion_samples_inside_the_window_keep_the_grab_stamp(env: Env) -> N
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         issued = len(device.capture_clock.stamps())
         cross(device, zone_rect(ZONE_X), runner=runner)
@@ -1189,7 +1339,7 @@ def test_motion_samples_outside_the_window_emit_nothing(env: Env) -> None:
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         observed = frames_observed(runner)
         issued = len(device.capture_clock.stamps())
@@ -1249,7 +1399,7 @@ def test_start_finish_uses_the_delivered_frame_instead_of_the_request(
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank(frame_width, frame_height))
+        consume(device, blank(frame_width, frame_height), runner)
         drive(runner)
         assert runner.snapshot().source_errors == ()
         assert of_type(events, SensorTriggered) == []
@@ -1318,7 +1468,7 @@ def test_a_camera_race_starts_on_go_and_ignores_the_countdown(qtbot: QtBot, env:
         live.refresh()
         assert runner.snapshot().elapsed_ns == 2_000_000_000
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
@@ -1383,7 +1533,7 @@ def test_three_and_four_lanes_each_report_a_crossing(env: Env) -> None:
         runner = env.controller.start_race(race_id)
         try:
             device = hub.live()
-            consume(device, blank())
+            consume(device, blank(), runner)
             drive(runner)
             cross(
                 device,
@@ -1425,7 +1575,7 @@ def test_a_camera_time_trial_keeps_running_after_a_lap_until_it_is_stopped(env: 
     runner = env.controller.start_race(race.id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
@@ -1450,7 +1600,7 @@ def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) 
     runner = env.controller.start_race(race_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         runner.stop()
         assert runner.snapshot().aborted is True
@@ -1465,7 +1615,7 @@ def test_an_aborted_camera_race_can_be_restarted_without_its_old_laps(env: Env) 
     again = env.controller.start_race(restarted.id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), again)
         drive(again)
         cross(device, zone_rect(ZONE_X), runner=again)
         drive(again)

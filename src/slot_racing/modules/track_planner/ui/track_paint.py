@@ -52,6 +52,9 @@ _MIN_PX = 1.2
 # Red and white are paint, not the identity of a border strip.
 STRIP_WHITE = "#f4f4f4"
 STRIP_RED = "#d0121a"
+# One cubic stays within 90°. Past that the radial error of the approximation grows.
+_MAX_CUBIC_DEG = 90.0
+_ARC_CUBIC = 4.0 / 3.0
 
 
 @dataclass(slots=True)
@@ -555,14 +558,54 @@ def _add_arc(
     *,
     move: bool,
 ) -> None:
-    """Qt angles grow the other way from the part coordinates. Negate them."""
+    """Circular arc as cubics that start and end on the mathematical points.
+
+    ``arcTo`` stops short of that end. The next span then looks disconnected,
+    and a filled contour closes only the last fragment, which draws the chord
+    across a curve or a border.
+    """
     if radius <= 0.0 or sweep_deg == 0.0:
         return
-    left = cx - radius
-    top = cy - radius
-    size = radius * 2.0
-    qt_start = -start_deg
-    qt_sweep = -sweep_deg
-    if move:
-        path.arcMoveTo(left, top, size, size, qt_start)
-    path.arcTo(left, top, size, size, qt_start, qt_sweep)
+    start = _arc_xy(cx, cy, radius, start_deg)
+    if move or path.isEmpty():
+        path.moveTo(*start)
+    elif not _same_point(path.currentPosition(), start):
+        path.lineTo(*start)
+    covered = 0.0
+    while abs(sweep_deg - covered) > 1e-9:
+        room = sweep_deg - covered
+        step = math.copysign(min(abs(room), _MAX_CUBIC_DEG), room)
+        _add_arc_cubic(path, cx, cy, radius, start_deg + covered, step)
+        covered += step
+
+
+def _add_arc_cubic(
+    path: QPainterPath,
+    cx: float,
+    cy: float,
+    radius: float,
+    start_deg: float,
+    sweep_deg: float,
+) -> None:
+    """One cubic of at most 90°. The end point is the arc point, not Qt's."""
+    theta0 = math.radians(start_deg)
+    theta1 = math.radians(start_deg + sweep_deg)
+    arm = radius * _ARC_CUBIC * math.tan(math.radians(sweep_deg) / 4.0)
+    end = _arc_xy(cx, cy, radius, start_deg + sweep_deg)
+    path.cubicTo(
+        cx + radius * math.cos(theta0) - arm * math.sin(theta0),
+        cy + radius * math.sin(theta0) + arm * math.cos(theta0),
+        end[0] + arm * math.sin(theta1),
+        end[1] - arm * math.cos(theta1),
+        end[0],
+        end[1],
+    )
+
+
+def _arc_xy(cx: float, cy: float, radius: float, deg: float) -> tuple[float, float]:
+    theta = math.radians(deg)
+    return (cx + radius * math.cos(theta), cy + radius * math.sin(theta))
+
+
+def _same_point(current: QPointF, point: tuple[float, float]) -> bool:
+    return math.hypot(current.x() - point[0], current.y() - point[1]) <= 1e-6

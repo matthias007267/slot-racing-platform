@@ -190,7 +190,7 @@ def test_default_layout_does_not_drop_a_start_finish_only_camera(env: Env) -> No
     runner = env.controller.start_race(race.id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
@@ -234,7 +234,7 @@ def test_race_consumer_gets_frames_and_one_detection_is_one_timing_event(env: En
         assert len(attached) == 1
         assert attached[0].reason == "race_started"
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         source = runner._engine._sources[0]
         assert isinstance(source, CameraTimingProvider)
@@ -262,7 +262,7 @@ def test_a_new_race_builds_a_new_detector(env: Env) -> None:
     first = env.controller.start_race(first_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), first)
         drive(first)
         cross(device, zone_rect(ZONE_X), runner=first)
         drive(first)
@@ -280,7 +280,7 @@ def test_a_new_race_builds_a_new_detector(env: Env) -> None:
     second = env.controller.start_race(second_id)
     try:
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), second)
         drive(second)
         second_source = second._engine._sources[0]
         assert isinstance(second_source, CameraTimingProvider)
@@ -320,7 +320,7 @@ def test_audio_on_and_off_still_deliver_a_camera_timing_event(qtbot: QtBot, env:
             live.advance_start_cue()
         assert runner.status is RaceStatus.RUNNING
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), runner)
         drive(runner)
         cross(device, zone_rect(ZONE_X), runner=runner)
         drive(runner)
@@ -343,7 +343,7 @@ def test_audio_on_and_off_still_deliver_a_camera_timing_event(qtbot: QtBot, env:
             live.advance_start_cue()
         assert again.status is RaceStatus.RUNNING
         device = hub.live()
-        consume(device, blank())
+        consume(device, blank(), again)
         drive(again)
         cross(device, zone_rect(ZONE_X), runner=again)
         drive(again)
