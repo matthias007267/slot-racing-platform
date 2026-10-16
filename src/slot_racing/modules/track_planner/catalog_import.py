@@ -172,18 +172,26 @@ def load_carrera_library() -> LibraryDraft:
     )
 
 
-def source_anchor(source_id: str) -> tuple[float, float, tuple[ConnectorSpec, ...]] | None:
-    """Centre and joints of one catalogue body.
+def source_anchor(
+    source_id: str,
+) -> tuple[float, float, float, str, tuple[ConnectorSpec, ...]] | None:
+    """Centre, label angle, short label and joints of one catalogue body.
 
     ``None`` when that UUID is not a body in the bundled files. Catalogue reads
     use this in place of the stored joint rows, so an older database gains the
-    edge joints without a rewrite of the part.
+    edge joints without a rewrite of the part. The label is paint, not a column.
     """
     if not source_id:
         return None
     for spec in load_carrera_library().parts:
         if spec.source_id == source_id:
-            return (spec.center_x_mm, spec.center_y_mm, spec.connectors)
+            return (
+                spec.center_x_mm,
+                spec.center_y_mm,
+                spec.center_angle_deg,
+                spec.short_label,
+                spec.connectors,
+            )
     return None
 
 
@@ -374,6 +382,8 @@ def _part_spec(
         catalog_listed=part.get("listed") is not False,
         center_x_mm=center_x,
         center_y_mm=center_y,
+        short_label=_short_label(part),
+        center_angle_deg=_center_angle(part),
     ), drawing_notes
 
 
@@ -628,6 +638,29 @@ def _center_xy(part: Mapping[str, object]) -> tuple[float, float]:
     if not isinstance(center, dict):
         return (0.0, 0.0)
     return (float(center.get("x") or 0.0), float(center.get("y") or 0.0))
+
+
+def _center_angle(part: Mapping[str, object]) -> float:
+    center = part.get("center")
+    if not isinstance(center, dict):
+        return 0.0
+    return float(center.get("angle") or 0.0)
+
+
+def _short_label(part: Mapping[str, object]) -> str:
+    """German text when the file has one, otherwise the first filled language."""
+    raw = part.get("shortLabel")
+    if isinstance(raw, str):
+        return raw.strip()
+    if not isinstance(raw, dict):
+        return ""
+    german = raw.get("de")
+    if isinstance(german, str) and german.strip():
+        return german.strip()
+    for value in raw.values():
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _segment_length(edge: object) -> float | None:

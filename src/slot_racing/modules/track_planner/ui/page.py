@@ -291,6 +291,12 @@ class PlannerPage(QWidget):
         set_role(self.color_coding, "ghost")
         self.color_coding.setChecked(self._color_coding)
         self.color_coding.toggled.connect(self._color_coding_changed)
+        self.short_labels = QPushButton(translate("planner.short_labels"))
+        self.short_labels.setObjectName("planner-short-labels")
+        self.short_labels.setCheckable(True)
+        set_role(self.short_labels, "ghost")
+        self.short_labels.setChecked(False)
+        self.short_labels.toggled.connect(self._short_labels_changed)
         self.mode_unlimited = QPushButton(translate("planner.mode.unlimited"))
         self.mode_unlimited.setObjectName("planner-mode-unlimited")
         self.mode_unlimited.setCheckable(True)
@@ -526,6 +532,7 @@ class PlannerPage(QWidget):
             self.save_button,
             self.save_as_button,
             self.color_coding,
+            self.short_labels,
             self.jump_button,
             self.discard_button,
             self.reset_button,
@@ -1427,6 +1434,10 @@ class PlannerPage(QWidget):
             return
         created = updated.instances[-1].id if updated.instances else None
         self._commit(updated, created)
+
+    def _short_labels_changed(self, enabled: bool) -> None:
+        """Session switch. Softyroyal hides the badge until the plan asks for it."""
+        self.canvas.set_short_labels(enabled)
 
     def _color_coding_changed(self, enabled: bool) -> None:
         self._color_coding = enabled

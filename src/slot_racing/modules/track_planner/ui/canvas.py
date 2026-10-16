@@ -57,7 +57,7 @@ from slot_racing.modules.track_planner.parts import (
     world_xy,
 )
 from slot_racing.modules.track_planner.ui.library_view import PART_MIME
-from slot_racing.modules.track_planner.ui.track_paint import paint_part
+from slot_racing.modules.track_planner.ui.track_paint import paint_part, short_label_rect
 from slot_racing.uikit.theme import COLORS
 
 CELL = 16
@@ -129,6 +129,7 @@ class PlanCanvas(QGraphicsView):
         self._loading = False
         self._zoom = 1.0
         self._color_coding = False
+        self._short_labels = False
         self._panning = False
         self._pan_at = QPointF()
         self._rubber_at: QPoint | None = None
@@ -169,6 +170,14 @@ class PlanCanvas(QGraphicsView):
         for item in self._scene.items():
             if isinstance(item, InstanceItem):
                 item.set_color_coding(enabled)
+        self.viewport().update()
+
+    def set_short_labels(self, enabled: bool) -> None:
+        """Show or hide Kurzbezeichnung on parts already on the plan."""
+        self._short_labels = enabled
+        for item in self._scene.items():
+            if isinstance(item, InstanceItem):
+                item.set_short_labels(enabled)
         self.viewport().update()
 
     def center_on_mm(self, x_mm: float, y_mm: float) -> None:
@@ -212,6 +221,7 @@ class PlanCanvas(QGraphicsView):
                     continue
                 placed = InstanceItem(instance, spec, self._report_group)
                 placed.set_color_coding(self._color_coding)
+                placed.set_short_labels(self._short_labels)
                 placed.set_shortage(placed.item_id in extra)
                 self._scene.addItem(placed)
                 placed.setSelected(placed.item_id in chosen)
@@ -764,6 +774,7 @@ class InstanceItem(QGraphicsItem):
         self.attachment_slot = instance.attachment_slot
         self._start_straight = instance.start_straight
         self._color_coding = False
+        self._short_labels = False
         self._shortage = False
         self._report = report
         self._ready = False
@@ -774,9 +785,7 @@ class InstanceItem(QGraphicsItem):
             [QPointF(x * MM, y * MM) for x, y in outline]
             or [QPointF(-8, -8), QPointF(8, -8), QPointF(8, 8), QPointF(-8, 8)]
         )
-        # Stroke and a later shoulder may sit just outside the roadway outline.
-        bounds = self._polygon.boundingRect().adjusted(-4, -4, 4, 4)
-        self._bounds = bounds
+        self._bounds = self._content_bounds()
         flags = (
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
             | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
@@ -808,6 +817,26 @@ class InstanceItem(QGraphicsItem):
         self._color_coding = enabled
         self.update()
 
+    def set_short_labels(self, enabled: bool) -> None:
+        if self._short_labels == enabled:
+            return
+        if self.scene() is not None:
+            self.prepareGeometryChange()
+        self._short_labels = enabled
+        self._bounds = self._content_bounds()
+        self.update()
+
+    def _content_bounds(self) -> QRectF:
+        """Update region. The hit shape stays the outline, label or not."""
+        bounds = self._polygon.boundingRect().adjusted(-4, -4, 4, 4)
+        if not self._short_labels:
+            return bounds
+        rect = short_label_rect(self.spec)
+        if rect is None or rect.isEmpty():
+            return bounds
+        badge = QRectF(rect.x() * MM, rect.y() * MM, rect.width() * MM, rect.height() * MM)
+        return bounds.united(badge.adjusted(-2, -2, 2, 2))
+
     def set_shortage(self, enabled: bool) -> None:
         if self._shortage == enabled:
             return
@@ -826,6 +855,7 @@ class InstanceItem(QGraphicsItem):
             start_straight=self._start_straight,
             shortage=self._shortage,
             attachment_slot=self.attachment_slot,
+            show_short_label=self._short_labels,
         )
         painter.restore()
 

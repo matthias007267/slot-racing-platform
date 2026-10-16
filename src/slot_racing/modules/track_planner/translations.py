@@ -93,6 +93,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "planner.saved_as": "Die Strecke wurde als eigene Strecke gespeichert.",
         "planner.jump_start": "Zur Startgeraden springen",
         "planner.color_coding": "Farbcodierung",
+        "planner.short_labels": "Kurzbezeichnung",
         "planner.start_straight": "Startgerade",
         "planner.start_straight.missing": "Es ist keine Startgerade platziert.",
         "planner.missing_parts": (

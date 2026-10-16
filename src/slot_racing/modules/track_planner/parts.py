@@ -308,6 +308,10 @@ class PartSpec:
     # Source ``center``. Attach points and template placeholders name this point.
     center_x_mm: float = 0.0
     center_y_mm: float = 0.0
+    # Paint only. The source file overlays both on read. Neither is geometry,
+    # and neither moves a joint, a hit target or a saved pose.
+    short_label: str = ""
+    center_angle_deg: float = 0.0
 
 
 # A catalogue row, a catalogue row the user changed, or a part they created.

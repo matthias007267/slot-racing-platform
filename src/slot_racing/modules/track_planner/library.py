@@ -1470,11 +1470,14 @@ class PartLibrary:
         )
         center_x_mm = 0.0
         center_y_mm = 0.0
+        center_angle_deg = 0.0
+        short_label = ""
         # The file stays the geometry of an untouched catalogue body. Stored
         # rows are not rewritten. A part the user has changed keeps its joints.
+        # The short label is paint and is not a stored column.
         anchor = source_anchor(definition.source_id or "")
         if anchor is not None:
-            center_x_mm, center_y_mm, file_connectors = anchor
+            center_x_mm, center_y_mm, center_angle_deg, short_label, file_connectors = anchor
             if definition.origin == ORIGIN_CATALOG:
                 stored_connectors = file_connectors
         spec = PartSpec(
@@ -1502,6 +1505,8 @@ class PartLibrary:
             selectable=bool(definition.selectable),
             center_x_mm=center_x_mm,
             center_y_mm=center_y_mm,
+            short_label=short_label,
+            center_angle_deg=center_angle_deg,
         )
         return PartRecord(
             definition.id,
