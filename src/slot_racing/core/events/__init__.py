@@ -5,6 +5,7 @@ from slot_racing.core.events.bus import EventBus, EventDispatcher, Subscription
 from slot_racing.core.events.types import (
     LapCompleted,
     LapStarted,
+    MeasurementsReset,
     PersistentStoreReplacing,
     PluginDisabled,
     PluginEnabled,
@@ -24,6 +25,7 @@ __all__ = [
     "EventDispatcher",
     "LapCompleted",
     "LapStarted",
+    "MeasurementsReset",
     "PersistentStoreReplacing",
     "PluginDisabled",
     "PluginEnabled",

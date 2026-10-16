@@ -23,7 +23,11 @@ Race rules implemented here:
 * A free session uses :class:`~slot_racing.core.domain.scoring.FreeRaceScoring`. Laps are counted
   with the same crossing rules, but the session has no winner and no classified result. Replacing
   the driver or vehicle on one lane drops that lane's open lap and its completed times. A crossing
-  timestamped before the replacement does not start the new assignment's lap.
+  timestamped before the replacement does not start the new assignment's lap. Resetting the
+  measurements does the same for every lane and keeps the drivers: the next accepted crossing is
+  only the new lap reference and stores no lap. The crossing after that reference completes one
+  lap, measured from the reference. A layout with sectors still has to pass those sectors in
+  order before the finish line can close that lap.
 * Events arriving while the race is paused are ignored. An event whose timestamp falls inside a
   pause is ignored even when it is delivered after ``resume``. Paused time is excluded from
   race time.
@@ -62,6 +66,7 @@ from slot_racing.core.events import (
     EventDispatcher,
     LapCompleted,
     LapStarted,
+    MeasurementsReset,
     RaceFinished,
     RacePaused,
     RaceResumed,
@@ -151,6 +156,7 @@ class RaceEngine:
         self._paused_total_ns = 0
         self._pause_intervals: list[tuple[int, int]] = []
         self._last_accepted_ns: dict[tuple[int, str], int] = {}
+        self._resetting = False
         self._finish_counter = 0
         self._final_elapsed_ns = 0
         self._winner_determined = False
@@ -238,15 +244,47 @@ class RaceEngine:
                 continue
             if state.participant.driver_id == participant.driver_id:
                 raise RaceStateError("each driver can only participate once")
-        self._states[lane] = _ParticipantState(participant, accept_after_ns=at_ns)
-        self._last_accepted_ns = {
-            key: stamp for key, stamp in self._last_accepted_ns.items() if key[0] != lane
-        }
+        self._replace_lane_clock(participant, at_ns=at_ns)
         kept = tuple(person for person in self._config.participants if person.lane != lane)
         self._config = replace(
             self._config,
             participants=tuple(sorted((*kept, participant), key=lambda person: person.lane)),
         )
+
+    def reset_measurements(self, at_ns: int) -> None:
+        """Drop every lane's laps and open clock. The drivers and the race stay.
+
+        The next accepted crossing on a lane is the new timing reference, exactly as the first
+        crossing after the start is on a one-position layout and exactly as a lane change is.
+        That crossing stores no lap. The following completed pass stores one lap, measured from
+        the reference, so the reset itself does not invent a lap from the old timestamps.
+
+        ``at_ns`` is the clock reading of the reset. A crossing taken earlier is ignored, including
+        one delivered while this method is still publishing the reset. The debounce window still
+        applies to crossings accepted after the reset. The running clock, the timing sources and
+        the start signal are left alone.
+        """
+        if self._config.mode is not RaceMode.FREE:
+            raise RaceStateError("only a free session can reset its measurements")
+        if self._status not in (RaceStatus.RUNNING, RaceStatus.PAUSED):
+            raise RaceStateError(f"cannot reset measurements while the race is {self._status}")
+        if at_ns < 0:
+            raise ValueError("at_ns must not be negative")
+        self._resetting = True
+        try:
+            for state in self._states.values():
+                self._replace_lane_clock(state.participant, at_ns=at_ns)
+            self._bus.publish(MeasurementsReset(timestamp_ns=at_ns, race_id=self._config.race_id))
+        finally:
+            self._resetting = False
+
+    def _replace_lane_clock(self, participant: Participant, *, at_ns: int) -> None:
+        """Start one lane over. The next accepted crossing only opens its lap clock."""
+        lane = participant.lane
+        self._states[lane] = _ParticipantState(participant, accept_after_ns=at_ns)
+        self._last_accepted_ns = {
+            key: stamp for key, stamp in self._last_accepted_ns.items() if key[0] != lane
+        }
 
     def close(self) -> None:
         """Detach from the bus and stop timing sources without publishing anything."""
@@ -314,6 +352,14 @@ class RaceEngine:
             position=event.position_id,
             source=event.source_id,
         )
+        if self._resetting:
+            self._note_timing(
+                "TIMING_EVENT_IGNORED",
+                "reset",
+                lane=event.lane,
+                position=event.position_id,
+            )
+            return
         if self._status is not RaceStatus.RUNNING:
             self._note_timing("TIMING_EVENT_IGNORED", "race_not_running", lane=event.lane)
             return
