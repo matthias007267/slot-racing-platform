@@ -27,6 +27,22 @@ class SensorTriggered(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TimingDecision(Event):
+    """What the race engine did with one sensor crossing.
+
+    Publishing this does not change which crossings become laps. ``result`` is the same
+    reason the engine already records, such as ``invalid_timestamp`` or ``completed``.
+    """
+
+    race_id: RaceId
+    source_id: str
+    position_id: str
+    lane: int
+    result: str
+    race_start_ns: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RaceStarting(Event):
     race_id: RaceId
 
@@ -35,6 +51,8 @@ class RaceStarting(Event):
 class RaceStarted(Event):
     race_id: RaceId
     participants: tuple[Participant, ...]
+    mode: str = ""
+    timing_provider: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

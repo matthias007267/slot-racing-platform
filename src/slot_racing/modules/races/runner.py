@@ -401,6 +401,7 @@ class RaceController:
             participants=tuple(domain_participants),
             layout=layout,
             mode=race.mode,
+            timing_provider=race.timing_provider,
         )
         engine = RaceEngine(config, self._bus, self._clock, [source])
         race_id = race.id

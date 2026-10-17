@@ -11,13 +11,16 @@ sensors it can serve may pass that number as :class:`DeviceCapacity`.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from slot_racing.core.errors import ProviderConfigurationError, ValidationError
 from slot_racing.modules.timing_sensor.protocol import is_sensor_token
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+ACCEPTED_SCHEMA_VERSIONS = frozenset({1, 2})
+OperatingMode = Literal["simulation", "serial"]
 
 
 class DeviceCapacity:
@@ -86,20 +89,128 @@ class TrackSensorMap(BaseModel):
         return self
 
 
+class DeviceHint(BaseModel):
+    """Stable facts used to recognise one USB device again.
+
+    A display name is not an identity and is not stored. ``port`` is only the
+    last port name. It is not enough when more than one candidate matches.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    vid: int | None = None
+    pid: int | None = None
+    serial_number: str = ""
+    location: str = ""
+    port: str = ""
+
+    @field_validator("vid", "pid", mode="before")
+    @classmethod
+    def _usb_id(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("usb id must be an integer")
+        if value < 0 or value > 0xFFFF:
+            raise ValueError("usb id is out of range")
+        return value
+
+    @field_validator("serial_number", "location", "port", mode="before")
+    @classmethod
+    def _hint_text(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("device hint text must be a string")
+        text = value.strip()
+        if any(character.isspace() for character in text):
+            raise ValueError("device hint text must be a single token")
+        if len(text) > 128:
+            raise ValueError("device hint text is too long")
+        return text
+
+
 class SensorConfiguration(BaseModel):
-    """Every track's physical sensor map. Tracks that are absent have none."""
+    """Sensor preferences and every track's physical sensor map.
+
+    Documents written as version 1 are still read. Saving writes version 2.
+    Tracks that are absent have no assignments.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = SCHEMA_VERSION
     tracks: tuple[TrackSensorMap, ...] = ()
+    mode: OperatingMode = "simulation"
+    port: str = ""
+    device: DeviceHint = Field(default_factory=DeviceHint)
+    track_id: int | None = None
+    developer_expanded: bool = False
+    developer_offset_ns: int | None = None
+    developer_numerator: int | None = None
+    developer_denominator: int | None = None
 
-    @field_validator("schema_version")
+    @field_validator("schema_version", mode="before")
     @classmethod
-    def _version(cls, value: int) -> int:
-        if value != SCHEMA_VERSION:
+    def _version(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("unsupported sensor configuration version")
+        if value not in ACCEPTED_SCHEMA_VERSIONS:
             raise ValueError("unsupported sensor configuration version")
         return value
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _mode(cls, value: object) -> object:
+        if value not in {"simulation", "serial"}:
+            raise ValueError("operating mode must be simulation or serial")
+        return value
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _port(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("port must be text")
+        text = value.strip()
+        if any(character.isspace() for character in text) or len(text) > 64:
+            raise ValueError("port must be a single token")
+        return text
+
+    @field_validator("track_id", mode="before")
+    @classmethod
+    def _track_id(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("track id must be a positive integer")
+        return value
+
+    @field_validator("developer_expanded", mode="before")
+    @classmethod
+    def _expanded(cls, value: object) -> object:
+        if not isinstance(value, bool):
+            raise ValueError("developer_expanded must be a boolean")
+        return value
+
+    @field_validator(
+        "developer_offset_ns",
+        "developer_numerator",
+        "developer_denominator",
+        mode="before",
+    )
+    @classmethod
+    def _developer_int(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("developer clock value must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def _developer_rate(self) -> SensorConfiguration:
+        if self.developer_numerator is not None and self.developer_numerator < 1:
+            raise ValueError("developer numerator must be positive")
+        if self.developer_denominator is not None and self.developer_denominator < 1:
+            raise ValueError("developer denominator must be positive")
+        return self
 
     @model_validator(mode="after")
     def _one_row_per_track(self) -> SensorConfiguration:

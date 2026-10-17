@@ -47,11 +47,16 @@ class SensorConfigurationStore:
             raise SensorConfigurationError("stored sensor configuration is invalid") from error
 
     def save(self, configuration: SensorConfiguration) -> None:
-        """Replace the saved document."""
+        """Replace the saved document. The written schema version is current."""
         if not isinstance(configuration, SensorConfiguration):
             raise TypeError("configuration must be a SensorConfiguration")
+        if configuration.schema_version != SCHEMA_VERSION:
+            configuration = configuration.model_copy(update={"schema_version": SCHEMA_VERSION})
         document = configuration.model_dump(mode="json")
-        SensorConfiguration.model_validate(document)
+        try:
+            SensorConfiguration.model_validate(document)
+        except ValidationError as error:
+            raise SensorConfigurationError("sensor configuration is invalid") from error
         with self._database.session() as session:
             row = session.get(Setting, SENSOR_CONFIGURATION_KEY)
             if row is None:
@@ -70,4 +75,18 @@ class SensorConfigurationStore:
         if assignments:
             kept.append(TrackSensorMap(track_id=track_id, assignments=tuple(assignments)))
         kept.sort(key=lambda track: track.track_id)
-        self.save(SensorConfiguration(schema_version=SCHEMA_VERSION, tracks=tuple(kept)))
+        self.save(current.model_copy(update={"tracks": tuple(kept)}))
+
+    def save_preferences(self, **changes: object) -> None:
+        """Update connection and developer preferences. Assignments stay as they are.
+
+        Invalid values raise :class:`SensorConfigurationError` and are not written.
+        """
+        current = self.load()
+        document = current.model_dump(mode="python")
+        document.update(changes)
+        try:
+            updated = SensorConfiguration.model_validate(document)
+        except ValidationError as error:
+            raise SensorConfigurationError("sensor configuration is invalid") from error
+        self.save(updated)
