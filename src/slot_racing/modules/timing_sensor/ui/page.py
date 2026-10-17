@@ -221,7 +221,9 @@ class SensorTimingPage(QWidget):
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
         self._timer.stop()
-        if self._holding:
+        # USB stays open. Closing the port resets the board, the next hello is a
+        # new session, and the race that shares this link then stops publishing.
+        if self._holding and self._link.mode is not TransportMode.SERIAL:
             self._link.release()
             self._holding = False
         super().hideEvent(event)
@@ -663,6 +665,12 @@ class SensorTimingPage(QWidget):
         )
 
     def _log_row(self, item: SensorObservation) -> tuple[str, str, str, str, str, str]:
+        detail = item.detail
+        if item.kind == "withheld":
+            detail = self._translator.translate(
+                f"sensor.withheld.{item.detail}",
+                default=item.detail,
+            )
         return (
             item.physical_id or "",
             item.position_id or "",
@@ -672,7 +680,7 @@ class SensorTimingPage(QWidget):
             self._translator.format(
                 f"sensor.observation.{item.kind}",
                 gap=item.gap,
-                detail=item.detail,
+                detail=detail,
             ),
         )
 
