@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -28,7 +31,20 @@ from slot_racing.core.errors import ValidationError
 from slot_racing.core.i18n import Translator
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
-from slot_racing.modules.timing_sensor.configuration import SensorAssignment, assignment_issues
+from slot_racing.modules.timing_sensor.configuration import (
+    DeviceHint,
+    SensorAssignment,
+    assignment_issues,
+)
+from slot_racing.modules.timing_sensor.devices import (
+    PortMatch,
+    SerialPortFacts,
+    attach_remembered_serial,
+    classify_port,
+    list_serial_devices,
+    remembered_hint,
+)
+from slot_racing.modules.timing_sensor.diagnostics import sensor_diagnostic
 from slot_racing.modules.timing_sensor.intake import SensorObservation
 from slot_racing.modules.timing_sensor.link import SensorLink, TransportMode
 from slot_racing.modules.timing_sensor.protocol import BAUD_RATE
@@ -37,9 +53,9 @@ from slot_racing.modules.timing_sensor.store import (
     SensorConfigurationStore,
 )
 from slot_racing.modules.timing_sensor.transport import (
+    SensorTransport,
     SerialSensorTransport,
     SimulatedSensorTransport,
-    list_serial_ports,
 )
 from slot_racing.uikit import describe_error, make_table
 from slot_racing.uikit.theme import configure_page
@@ -48,6 +64,8 @@ from slot_racing.uikit.widgets import StatusLabel, fill_table
 _DEFAULT_SENSORS = ("s1", "s2")
 TrackSource = TrackCatalog | Callable[[], TrackCatalog | None] | None
 SetupSource = TimingSetupService | Callable[[], TimingSetupService | None] | None
+PortLister = Callable[[], tuple[SerialPortFacts, ...]]
+TransportOpener = Callable[[str], SensorTransport]
 
 
 class SensorTimingPage(QWidget):
@@ -60,6 +78,9 @@ class SensorTimingPage(QWidget):
         store: SensorConfigurationStore,
         setups: SetupSource,
         tracks: TrackSource,
+        *,
+        ports: PortLister | None = None,
+        serial_transport: TransportOpener | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("sensor-page")
@@ -68,8 +89,12 @@ class SensorTimingPage(QWidget):
         self._store = store
         self._setups = setups
         self._tracks = tracks
+        self._port_lister = ports
+        self._serial_transport = serial_transport
         self._holding = False
+        self._applying_preferences = False
         self._announced_session: str | None = None
+        self._stored_session: str | None = None
         self._track_snapshot: tuple[tuple[int, str, int, bool], ...] | None = None
         self._row_signature: tuple[object, ...] | None = None
         self._editors: dict[str, tuple[QComboBox, QComboBox]] = {}
@@ -89,9 +114,9 @@ class SensorTimingPage(QWidget):
         self.identity_label.setObjectName("sensor-identity")
         self.quality_label = QLabel(tr("sensor.quality.none"))
         self.quality_label.setObjectName("sensor-quality")
-        ports = QPushButton(tr("sensor.action.ports"))
-        ports.setObjectName("sensor-ports")
-        ports.clicked.connect(self._refresh_ports)
+        ports_button = QPushButton(tr("sensor.action.ports"))
+        ports_button.setObjectName("sensor-ports")
+        ports_button.clicked.connect(self._refresh_ports)
         connect = QPushButton(tr("sensor.action.connect"))
         connect.setObjectName("sensor-connect")
         connect.clicked.connect(self._connect)
@@ -163,9 +188,13 @@ class SensorTimingPage(QWidget):
         actions.addWidget(save)
         actions.addStretch(1)
         ports_row = QHBoxLayout()
-        ports_row.addWidget(ports)
+        export = QPushButton(tr("sensor.action.export"))
+        export.setObjectName("sensor-export")
+        export.clicked.connect(self._export_diagnostic)
+        ports_row.addWidget(ports_button)
         ports_row.addWidget(connect)
         ports_row.addWidget(sync)
+        ports_row.addWidget(export)
         ports_row.addStretch(1)
         top = QWidget()
         top_layout = QVBoxLayout(top)
@@ -208,11 +237,13 @@ class SensorTimingPage(QWidget):
         layout.addWidget(self.status)
         layout.addWidget(splitter, 1)
         self._fill_tracks()
+        self._load_preferences()
         self._ensure_rows(force=True)
         self.refresh()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
+        self._attach_remembered()
         if not self._holding:
             self._link.acquire()
             self._holding = True
@@ -279,7 +310,8 @@ class SensorTimingPage(QWidget):
         outer = QVBoxLayout(box)
         outer.addWidget(content)
         content.setVisible(False)
-        box.toggled.connect(content.setVisible)
+        self._developer_body = content
+        box.toggled.connect(self._on_developer_toggled)
         return box
 
     def _catalog(self) -> TrackCatalog | None:
@@ -326,6 +358,10 @@ class SensorTimingPage(QWidget):
     def _on_track(self) -> None:
         self._row_signature = None
         self._ensure_rows(force=True)
+        if not self._applying_preferences:
+            track_id = self._track_id()
+            if track_id is not None:
+                self._save_preferences(track_id=track_id)
         self.refresh()
 
     def _ensure_rows(self, *, force: bool = False) -> None:
@@ -467,19 +503,32 @@ class SensorTimingPage(QWidget):
         self.refresh()
 
     def _apply_mapping(self) -> None:
-        try:
-            mapping = DeviceClockMapping(
-                offset_ns=_parse_int(self.offset_edit.text()),
-                numerator=_parse_int(self.numerator_edit.text()),
-                denominator=_parse_int(self.denominator_edit.text()),
+        parsed = self._developer_ints()
+        if parsed is None:
+            self.status.show_error(
+                self._translator.format("sensor.error.mapping", detail="not an integer")
             )
+            return
+        offset, numerator, denominator = parsed
+        try:
+            mapping = DeviceClockMapping(offset, numerator, denominator)
         except (TypeError, ValueError) as error:
             self.status.show_error(
                 self._translator.format("sensor.error.mapping", detail=str(error))
             )
             return
-        self._link.set_time_mapping(mapping)
-        self.status.show_info(self._translator.translate("sensor.mapping.applied"))
+        if not self._save_preferences(
+            developer_offset_ns=offset,
+            developer_numerator=numerator,
+            developer_denominator=denominator,
+            developer_expanded=True,
+        ):
+            return
+        if self._link.mode is TransportMode.SIMULATION:
+            self._link.set_time_mapping(mapping)
+            self.status.show_info(self._translator.translate("sensor.mapping.applied"))
+        else:
+            self.status.show_info(self._translator.translate("sensor.mapping.stored"))
         self.refresh()
 
     def _clear_mapping(self) -> None:
@@ -513,10 +562,14 @@ class SensorTimingPage(QWidget):
     def _refresh_ports(self) -> None:
         current = self.port_combo.currentText()
         self.port_combo.clear()
-        for name in list_serial_ports():
-            self.port_combo.addItem(name)
+        for facts in self._listed_ports():
+            self.port_combo.addItem(facts.device)
         if current:
             self.port_combo.setCurrentText(current)
+            return
+        # Listing ports must not select an arbitrary device.
+        self.port_combo.setCurrentIndex(-1)
+        self.port_combo.setEditText("")
 
     def _connect(self) -> None:
         mode = self.transport_combo.currentData()
@@ -526,13 +579,15 @@ class SensorTimingPage(QWidget):
                 if not port:
                     self.status.show_error(self._translator.translate("sensor.error.port"))
                     return
-                self._link.use_transport(SerialSensorTransport(port), TransportMode.SERIAL)
+                self._link.use_transport(self._open_serial(port), TransportMode.SERIAL)
                 self.mode_label.setText(self._translator.translate("sensor.mode.serial"))
                 self.status.show_info(self._translator.translate("sensor.connected_serial"))
+                self._save_preferences(mode=TransportMode.SERIAL.value, port=port)
             else:
                 self._link.use_transport(SimulatedSensorTransport(), TransportMode.SIMULATION)
                 self.mode_label.setText(self._translator.translate("sensor.mode.simulation"))
                 self.status.clear_message()
+                self._save_preferences(mode=TransportMode.SIMULATION.value)
         except RuntimeError:
             self.status.show_error(self._translator.translate("sensor.error.race_holds_reader"))
             return
@@ -591,6 +646,7 @@ class SensorTimingPage(QWidget):
                 and identity.session_id != self._announced_session
             ):
                 self._announced_session = identity.session_id
+                self._remember_device()
                 self.status.show_info(tr("sensor.hint.sync_started"))
         samples, uncertainty, numerator, denominator, accepted = self._link.sync_quality
         if accepted:
@@ -628,7 +684,11 @@ class SensorTimingPage(QWidget):
             self.setup_hint.setText(self._setup_message(track_id))
         else:
             self.setup_hint.setText("")
-        notes = list(self._missing_fields())
+        device_note = self._device_note()
+        if device_note:
+            notes = [device_note, *self._missing_fields()]
+        else:
+            notes = list(self._missing_fields())
         rows = self._form_rows()
         if rows is not None:
             notes.extend(
@@ -665,23 +725,33 @@ class SensorTimingPage(QWidget):
         )
 
     def _log_row(self, item: SensorObservation) -> tuple[str, str, str, str, str, str]:
-        detail = item.detail
-        if item.kind == "withheld":
-            detail = self._translator.translate(
-                f"sensor.withheld.{item.detail}",
-                default=item.detail,
-            )
         return (
             item.physical_id or "",
             item.position_id or "",
             "" if item.lane is None else str(item.lane),
             "" if item.device_time_ns is None else str(item.device_time_ns),
             "" if item.host_time_ns is None else str(item.host_time_ns),
-            self._translator.format(
-                f"sensor.observation.{item.kind}",
-                gap=item.gap,
-                detail=detail,
-            ),
+            self._result_text(item),
+        )
+
+    def _result_text(self, item: SensorObservation) -> str:
+        """Name the delivery stage. A parsed line is not described as accepted by the race."""
+        translate = self._translator.translate
+        if item.engine_result == "completed":
+            return translate("sensor.delivery.lap")
+        if item.engine_result:
+            return translate(f"sensor.engine.{item.engine_result}", default=item.engine_result)
+        if item.kind == "withheld":
+            detail = translate(f"sensor.withheld.{item.detail}", default=item.detail)
+            return self._translator.format("sensor.observation.withheld", detail=detail)
+        if item.kind == "accepted" and item.delivery == "published":
+            return translate("sensor.delivery.published")
+        if item.kind == "accepted":
+            return translate("sensor.delivery.received")
+        return self._translator.format(
+            f"sensor.observation.{item.kind}",
+            gap=item.gap,
+            detail=item.detail,
         )
 
     def _measurement_ready(self) -> bool:
@@ -689,6 +759,8 @@ class SensorTimingPage(QWidget):
         if track_id is None or not self._link.connected:
             return False
         if self._link.sync is not SyncStatus.SYNCHRONIZED:
+            return False
+        if self._link.mode is TransportMode.SERIAL and self._link.mapping_origin != "measured":
             return False
         if self._stored_setup(track_id) is None:
             return False
@@ -735,6 +807,193 @@ class SensorTimingPage(QWidget):
         if isinstance(data, bool) or not isinstance(data, int):
             return None
         return data
+
+    def save_persistent(self) -> None:
+        """Store the last accepted operating choices. Invalid developer text is left untouched."""
+        changes: dict[str, object] = {}
+        mode = self.transport_combo.currentData()
+        if mode in {TransportMode.SIMULATION.value, TransportMode.SERIAL.value}:
+            changes["mode"] = mode
+        port = self.port_combo.currentText().strip()
+        if port and not any(character.isspace() for character in port) and len(port) <= 64:
+            changes["port"] = port
+        track_id = self._track_id()
+        if track_id is not None:
+            changes["track_id"] = track_id
+        developer = self.findChild(QGroupBox, "sensor-developer")
+        if isinstance(developer, QGroupBox):
+            changes["developer_expanded"] = developer.isChecked()
+        parsed = self._developer_ints()
+        if parsed is not None:
+            offset, numerator, denominator = parsed
+            changes["developer_offset_ns"] = offset
+            changes["developer_numerator"] = numerator
+            changes["developer_denominator"] = denominator
+        if changes:
+            self._save_preferences(**changes)
+
+    def diagnostic_payload(self) -> dict[str, object]:
+        """The export document, including the last race attempt still held by the link."""
+        track_id = self._track_id()
+        setup = None if track_id is None else self._stored_setup(track_id)
+        positions = (
+            () if setup is None else tuple(position.id for position in setup.layout.positions)
+        )
+        return sensor_diagnostic(
+            self._link,
+            track_id=track_id,
+            positions=positions,
+            assignments=self._saved(track_id),
+        )
+
+    def write_diagnostic(self, path: str | Path) -> None:
+        target = Path(path)
+        text = json.dumps(self.diagnostic_payload(), indent=2, ensure_ascii=False)
+        target.write_text(text + "\n", encoding="utf-8")
+
+    def _export_diagnostic(self) -> None:
+        translate = self._translator.translate
+        selected, _chosen = QFileDialog.getSaveFileName(
+            self,
+            translate("sensor.export.title"),
+            "sensor-diagnostic.json",
+            "JSON (*.json)",
+        )
+        if not selected:
+            return
+        try:
+            self.write_diagnostic(selected)
+        except OSError:
+            self.status.show_error(translate("sensor.export.failed"))
+            return
+        self.status.show_info(translate("sensor.export.saved"))
+
+    def _load_preferences(self) -> None:
+        try:
+            configuration = self._store.load()
+        except SensorConfigurationError:
+            self.status.show_error(self._translator.translate("sensor.error.configuration"))
+            return
+        self._applying_preferences = True
+        try:
+            mode_index = self.transport_combo.findData(configuration.mode)
+            if mode_index >= 0:
+                self.transport_combo.setCurrentIndex(mode_index)
+            self._refresh_ports()
+            _status, match = classify_port(remembered_hint(configuration), self._listed_ports())
+            if match is not None:
+                self.port_combo.setCurrentText(match.device)
+            if configuration.track_id is not None:
+                track_index = self.track_combo.findData(configuration.track_id)
+                if track_index >= 0:
+                    self.track_combo.setCurrentIndex(track_index)
+            developer = self.findChild(QGroupBox, "sensor-developer")
+            if isinstance(developer, QGroupBox):
+                developer.setChecked(configuration.developer_expanded)
+            if configuration.developer_offset_ns is not None:
+                self.offset_edit.setText(str(configuration.developer_offset_ns))
+            if configuration.developer_numerator is not None:
+                self.numerator_edit.setText(str(configuration.developer_numerator))
+            if configuration.developer_denominator is not None:
+                self.denominator_edit.setText(str(configuration.developer_denominator))
+        finally:
+            self._applying_preferences = False
+
+    def _save_preferences(self, **changes: object) -> bool:
+        try:
+            self._store.save_preferences(**changes)
+        except SensorConfigurationError:
+            self.status.show_error(self._translator.translate("sensor.error.configuration"))
+            return False
+        return True
+
+    def _attach_remembered(self) -> None:
+        if self._link.connected or self._link.race_bound:
+            return
+        try:
+            configuration = self._store.load()
+        except SensorConfigurationError:
+            return
+        try:
+            attach_remembered_serial(
+                self._link,
+                configuration,
+                self._listed_ports(),
+                open_port=self._open_serial,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            self.status.show_error(
+                self._translator.format("sensor.error.serial", detail=str(error))
+            )
+
+    def _open_serial(self, port: str) -> SensorTransport:
+        if self._serial_transport is not None:
+            return self._serial_transport(port)
+        return SerialSensorTransport(port)
+
+    def _listed_ports(self) -> tuple[SerialPortFacts, ...]:
+        if self._port_lister is not None:
+            return self._port_lister()
+        return list_serial_devices()
+
+    def _remember_device(self) -> None:
+        identity = self._link.identity
+        if (
+            self._link.mode is not TransportMode.SERIAL
+            or identity is None
+            or identity.session_id == self._stored_session
+        ):
+            return
+        facts = next(
+            (item for item in self._listed_ports() if item.device == self._link.port),
+            None,
+        )
+        try:
+            hint = DeviceHint(
+                vid=None if facts is None else facts.vid,
+                pid=None if facts is None else facts.pid,
+                serial_number="" if facts is None else facts.serial_number,
+                location="" if facts is None else facts.location,
+                port=self._link.port,
+            )
+        except ValueError:
+            return
+        if not self._save_preferences(mode="serial", port=hint.port, device=hint):
+            return
+        self._stored_session = identity.session_id
+
+    def _device_note(self) -> str:
+        if self._link.connected:
+            return ""
+        try:
+            configuration = self._store.load()
+        except SensorConfigurationError:
+            return ""
+        if configuration.mode != "serial":
+            return ""
+        hint = remembered_hint(configuration)
+        status, _match = classify_port(hint, self._listed_ports())
+        if status is PortMatch.AMBIGUOUS:
+            return self._translator.translate("sensor.hint.device_ambiguous")
+        if status is PortMatch.ABSENT and (hint.port or hint.serial_number or hint.vid is not None):
+            return self._translator.translate("sensor.hint.device_absent")
+        return ""
+
+    def _on_developer_toggled(self, checked: bool) -> None:
+        self._developer_body.setVisible(checked)
+        if self._applying_preferences:
+            return
+        self._save_preferences(developer_expanded=checked)
+
+    def _developer_ints(self) -> tuple[int, int, int] | None:
+        try:
+            return (
+                _parse_int(self.offset_edit.text()),
+                _parse_int(self.numerator_edit.text()),
+                _parse_int(self.denominator_edit.text()),
+            )
+        except ValueError:
+            return None
 
 
 def _select_data(combo: QComboBox, value: object) -> None:
