@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from slot_racing import __version__
 from slot_racing.app.diagnostics_ui import install_qt_messages, remember_qt_versions
+from slot_racing.app.icon import install_application_icon, use_windows_taskbar_identity
 from slot_racing.app.main_window import MainWindow
 from slot_racing.app.runtime import Runtime
 from slot_racing.core.config import app_data_dir, default_config_path, load_config
@@ -20,6 +21,7 @@ from slot_racing.uikit.theme import apply_theme
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    use_windows_taskbar_identity()
     parser = argparse.ArgumentParser(prog="slot-racing", description="Slot-Racing Platform")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
@@ -48,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         install_qt_messages()
         remember_qt_versions()
         apply_theme(app)
+        install_application_icon(app)
         window = MainWindow(runtime)
         window.show_at_start()
         if args.smoke_test:
