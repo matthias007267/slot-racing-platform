@@ -66,8 +66,8 @@ def test_unavailable_providers_are_shown_but_cannot_be_chosen(qtbot: QtBot, env:
     register(env, offline("raspberry_pi"))
     _, wizard = wizard_at_track_step(qtbot, env)
     assert items(wizard.provider_combo) == [
-        ("Kamera - nicht verfügbar", "camera", False),
-        ("raspberry_pi - nicht verfügbar", "raspberry_pi", False),
+        ("Kamera - Die gewählte Zeitmessung ist nicht verfügbar.", "camera", False),
+        ("raspberry_pi - Die gewählte Zeitmessung ist nicht verfügbar.", "raspberry_pi", False),
         ("Simulation", "simulation", True),
     ]
     assert wizard.provider_combo.currentData() == "simulation"

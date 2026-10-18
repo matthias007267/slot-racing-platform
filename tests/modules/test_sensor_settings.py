@@ -157,6 +157,53 @@ def test_a_unique_device_is_opened_only_after_the_protocol_hello() -> None:
     link.release()
 
 
+def test_an_open_port_is_not_replaced_when_the_page_is_shown(qtbot: QtBot) -> None:
+    stream = _Stream()
+    transport = SerialSensorTransport("COM11", stream=stream, clock=_Clock(), sync_gap_ns=0)
+    link = SensorLink()
+    store = SensorConfigurationStore(migrated_database())
+    store.save_preferences(
+        mode="serial",
+        port="COM5",
+        device=DeviceHint(serial_number="BOARD1", vid=0x2341, pid=0x0042, port="COM5"),
+    )
+    opened = attach_remembered_serial(
+        link, store.load(), (_BOARD,), hold=True, open_port=lambda _port: transport
+    )
+    assert opened is not None
+    _identify(link, transport, stream)
+    _sync(link, transport)
+    mapping = link._state.mapping
+    assert mapping is not None and link.mapping_origin == "measured"
+
+    def refuse(port: str) -> SerialSensorTransport:
+        raise AssertionError(port)
+
+    page = SensorTimingPage(
+        _translator(),
+        link,
+        store,
+        _Setups(),
+        _Tracks(),
+        ports=lambda: (_BOARD,),
+        serial_transport=refuse,
+    )
+    qtbot.addWidget(page)
+    page.show()
+    QApplication.processEvents()
+    assert link._state.mapping == mapping
+    assert link.mapping_origin == "measured"
+    assert stream.closed is False
+    page.port_combo.setCurrentText("COM11")
+    _click(page, "sensor-connect")
+    assert page.status.text() == "Der USB-Leser ist bereits verbunden."
+    assert link._state.mapping == mapping
+    page.hide()
+    assert page._timer.isActive() is True
+    assert stream.closed is False
+    link.release()
+
+
 def test_ambiguous_devices_are_not_opened() -> None:
     link = SensorLink()
     store = SensorConfigurationStore(migrated_database())

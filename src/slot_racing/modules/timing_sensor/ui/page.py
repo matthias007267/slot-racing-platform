@@ -251,10 +251,13 @@ class SensorTimingPage(QWidget):
         self.refresh()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
+        # USB stays open and keeps being read. Closing the port resets the board,
+        # and stopping here leaves a finished clock exchange invisible to a new race.
+        if self._link.mode is TransportMode.SERIAL:
+            super().hideEvent(event)
+            return
         self._timer.stop()
-        # USB stays open. Closing the port resets the board, the next hello is a
-        # new session, and the race that shares this link then stops publishing.
-        if self._holding and self._link.mode is not TransportMode.SERIAL:
+        if self._holding:
             self._link.release()
             self._holding = False
         super().hideEvent(event)
@@ -578,6 +581,15 @@ class SensorTimingPage(QWidget):
                 port = self.port_combo.currentText().strip()
                 if not port:
                     self.status.show_error(self._translator.translate("sensor.error.port"))
+                    return
+                if (
+                    self._link.mode is TransportMode.SERIAL
+                    and self._link.port == port
+                    and self._link.port_open
+                ):
+                    self.status.show_info(self._translator.translate("sensor.already_open"))
+                    self._save_preferences(mode=TransportMode.SERIAL.value, port=port)
+                    self.refresh()
                     return
                 self._link.use_transport(self._open_serial(port), TransportMode.SERIAL)
                 self.mode_label.setText(self._translator.translate("sensor.mode.serial"))
@@ -908,7 +920,7 @@ class SensorTimingPage(QWidget):
         return True
 
     def _attach_remembered(self) -> None:
-        if self._link.connected or self._link.race_bound:
+        if self._link.port_open or self._link.connected or self._link.race_bound:
             return
         try:
             configuration = self._store.load()

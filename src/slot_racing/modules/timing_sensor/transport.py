@@ -174,10 +174,13 @@ class SerialSensorTransport:
         return self._port
 
     @property
+    def opened(self) -> bool:
+        """True after the port is open, including the handshake before the first hello."""
+        return self._running and self._stream is not None
+
+    @property
     def connected(self) -> bool:
-        return (
-            self._running and self._identified and self._fault is None and self._stream is not None
-        )
+        return self.opened and self._identified and self._fault is None
 
     @property
     def fault(self) -> str | None:

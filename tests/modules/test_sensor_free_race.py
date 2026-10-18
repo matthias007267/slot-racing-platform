@@ -18,6 +18,7 @@ from slot_racing.core.timing import TimingSetupService, TimingSourceFactory
 from slot_racing.modules.races.runner import RaceRunner
 from slot_racing.modules.races.ui.formatting import format_lap_time
 from slot_racing.modules.races.ui.live_view import LiveRaceView
+from slot_racing.modules.races.ui.races_page import RacesPage
 from slot_racing.modules.timing_sensor.clock_map import SyncStatus
 from slot_racing.modules.timing_sensor.configuration import DeviceHint, SensorAssignment
 from slot_racing.modules.timing_sensor.devices import SerialPortFacts
@@ -35,6 +36,8 @@ from tests.modules.test_sensor_timing import (
     _cell as log_cell,
 )
 from tests.modules.test_sensor_usb import _HELLO, _Clock, _identify, _Stream, _sync
+from tests.modules.test_ui_management import open_page
+from tests.modules.test_ui_provider import items
 
 _LANE_1 = 3_000_000_000
 _LANE_1_AGAIN = 4_000_000_000
@@ -63,7 +66,7 @@ def test_a_free_race_counts_sensor_laps_after_the_diagnostic_page_closes(
     page.hide()
     QApplication.processEvents()
     assert page.isVisible() is False
-    assert page._timer.isActive() is False
+    assert page._timer.isActive() is True
     assert stream.closed is False
     assert link.connected is True
     assert link.mode is TransportMode.SERIAL
@@ -118,7 +121,7 @@ def test_a_free_race_counts_sensor_laps_after_the_diagnostic_page_closes(
     _push(stream, transport, _FINISH)
     live.refresh()
     assert page.isVisible() is False
-    assert page._timer.isActive() is False
+    assert page._timer.isActive() is True
     assert len(seen) == 6
     assert [event.timestamp_ns for event in seen] == sorted(event.timestamp_ns for event in seen)
     lane_1 = [event for event in seen if event.lane == 1]
@@ -208,7 +211,7 @@ def test_free_and_time_trial_count_laps_on_the_shared_sensor_link(
     page.hide()
     QApplication.processEvents()
     assert page.isVisible() is False
-    assert page._timer.isActive() is False
+    assert page._timer.isActive() is True
     assert stream.closed is False
 
     race = env.races.create_free_race("Sensor frei", track.id, timing_provider="sensor")
@@ -392,6 +395,27 @@ def test_a_sector_sensor_is_not_treated_as_the_finish_line(qtbot: QtBot, env: En
     assert "Runde abgeschlossen" in _result_texts(page)
     assert page.isVisible() is False
     runner.stop()
+
+
+def test_a_synced_sensor_can_be_chosen_for_a_new_race(qtbot: QtBot, env: Env) -> None:
+    page, link, _transport, stream, track = _shared(qtbot, env)
+    page.hide()
+    QApplication.processEvents()
+    assert link.mapping_origin == "measured"
+    assert stream.closed is False
+    _window, races = open_page(qtbot, env, "races")
+    assert isinstance(races, RacesPage)
+    races.new_race()
+    wizard = races.wizard
+    wizard.name_edit.setText("Sensorrennen")
+    assert wizard.go_next()
+    assert wizard.track_combo.findData(track.id) >= 0
+    wizard.track_combo.setCurrentIndex(wizard.track_combo.findData(track.id))
+    sensor = next(item for item in items(wizard.provider_combo) if item[1] == "sensor")
+    assert sensor == ("Sensor", "sensor", True)
+    wizard.provider_combo.setCurrentIndex(wizard.provider_combo.findData("sensor"))
+    assert wizard.provider_status.text() == "Status: verfügbar"
+    assert wizard.go_next()
 
 
 def test_hiding_the_simulation_page_still_releases_the_reader(qtbot: QtBot) -> None:
