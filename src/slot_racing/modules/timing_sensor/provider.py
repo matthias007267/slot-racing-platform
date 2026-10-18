@@ -19,12 +19,13 @@ from slot_racing.core.timing import (
     TimingSource,
     TimingSourceFactory,
 )
+from slot_racing.modules.timing_sensor.clock_map import SyncStatus
 from slot_racing.modules.timing_sensor.configuration import (
     DeviceCapacity,
     SensorAssignment,
     require_assignments,
 )
-from slot_racing.modules.timing_sensor.link import SENSOR_SOURCE_ID, SensorLink
+from slot_racing.modules.timing_sensor.link import SENSOR_SOURCE_ID, SensorLink, TransportMode
 from slot_racing.modules.timing_sensor.store import (
     SensorConfigurationError,
     SensorConfigurationStore,
@@ -108,6 +109,12 @@ class SensorTimingFactory(TimingSourceFactory):
         return ProviderCapabilities(supports_test_mode=False, supports_multiple_lanes=True)
 
     def availability(self) -> ProviderAvailability:
+        # A typed developer offset is not a USB race clock. Only a mapping
+        # produced by the protocol exchange makes the serial provider usable.
+        if self._link.mode is TransportMode.SERIAL and self._link.mapping_origin != "measured":
+            if self._link.sync is SyncStatus.LOST:
+                return ProviderAvailability.unavailable("error.timing_provider.sensor_time_lost")
+            return ProviderAvailability.unavailable("error.timing_provider.sensor_time_unmeasured")
         sync = self._link.sync.value
         if sync == "synchronized":
             return ProviderAvailability.ok()

@@ -235,6 +235,8 @@ source_modules = [
     "slot_racing.modules.timing_sensor.clock_map",
     "slot_racing.modules.timing_sensor.clock_sync",
     "slot_racing.modules.timing_sensor.configuration",
+    "slot_racing.modules.timing_sensor.devices",
+    "slot_racing.modules.timing_sensor.diagnostics",
     "slot_racing.modules.timing_sensor.intake",
     "slot_racing.modules.timing_sensor.link",
     "slot_racing.modules.timing_sensor.protocol",

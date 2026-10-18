@@ -378,7 +378,7 @@ def test_the_diagnostic_page_shows_simulation_mapping_and_a_gap(
     page.line_edit.setText(_frame("sess", 4, 40, "s2"))
     _click(page, "sensor-inject")
     texts = [_cell(page, row, 5) for row in range(page.log.rowCount())]
-    assert texts == ["Übernommen", "Duplikat", "Lücke (2)"]
+    assert texts == ["Empfangen", "Duplikat", "Lücke (2)"]
     assert _cell(page, 0, 1) == "start_finish"
     assert _cell(page, 0, 4) == "1025"
     assert _cell(page, 2, 3) == "40"

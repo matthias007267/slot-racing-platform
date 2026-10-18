@@ -16,6 +16,7 @@ from slot_racing.core.events.types import (
     RaceStarting,
     SectorCompleted,
     SensorTriggered,
+    TimingDecision,
     WinnerDetermined,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "SectorCompleted",
     "SensorTriggered",
     "Subscription",
+    "TimingDecision",
     "WinnerDetermined",
 ]

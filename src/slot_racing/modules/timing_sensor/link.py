@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from slot_racing.core.events import SensorTriggered
@@ -34,6 +34,18 @@ from slot_racing.modules.timing_sensor.transport import (
 
 SENSOR_SOURCE_ID = "sensor"
 _LOG_LIMIT = 400
+_CHANGE_LIMIT = 80
+
+
+@dataclass(frozen=True, slots=True)
+class RaceWatch:
+    """The last race attempt this link was told about. It holds no personal names."""
+
+    race_id: int | None = None
+    mode: str = ""
+    state: str = ""
+    provider: str = ""
+    started_at_ns: int | None = None
 
 
 class TransportMode(StrEnum):
@@ -74,6 +86,9 @@ class SensorLink:
         self._mute_reason = ""
         self._seen_fault: str | None = None
         self._mapping_key: tuple[int, int, int] | None = None
+        self._mapping_origin = ""
+        self._changes: deque[tuple[str, str]] = deque(maxlen=_CHANGE_LIMIT)
+        self._race_watch = RaceWatch()
 
     @property
     def mode(self) -> TransportMode:
@@ -105,6 +120,24 @@ class SensorLink:
         if identity is None:
             return None
         return len(identity.sensors)
+
+    @property
+    def port(self) -> str:
+        found = getattr(self._transport, "port", "")
+        return found if isinstance(found, str) else ""
+
+    @property
+    def mapping_origin(self) -> str:
+        """``measured`` after a protocol exchange, ``manual`` after an explicit mapping."""
+        return self._mapping_origin
+
+    @property
+    def race_watch(self) -> RaceWatch:
+        return self._race_watch
+
+    @property
+    def changes(self) -> tuple[tuple[str, str], ...]:
+        return tuple(self._changes)
 
     @property
     def sync_quality(self) -> tuple[int, int, int, int, bool]:
@@ -160,15 +193,31 @@ class SensorLink:
         if self._holders > 0:
             previous.close()
         self._reset_session()
+        self._change("transport", mode.value)
 
-    def set_time_mapping(self, mapping: DeviceClockMapping, *, resume: bool = True) -> None:
+    def set_time_mapping(
+        self,
+        mapping: DeviceClockMapping,
+        *,
+        resume: bool = True,
+        origin: str = "manual",
+    ) -> None:
         """Replace the clock assignment. Arrival time is not an input.
 
         ``resume`` is for an explicit mapping. An automatic exchange keeps a
-        race muted after a disconnect or a controller restart.
+        race muted after a disconnect or a controller restart. ``origin``
+        ``manual`` is not a measured USB clock and is not an anchor for a later
+        exchange.
         """
+        if origin not in {"manual", "measured"}:
+            raise ValueError("mapping origin must be manual or measured")
         self._state = with_mapping(self._state, mapping)
         self._mapping_key = (mapping.offset_ns, mapping.numerator, mapping.denominator)
+        self._mapping_origin = origin
+        if origin == "manual":
+            self._last_device_ns = None
+            self._last_host_ns = None
+            self._change("mapping", "manual")
         if resume:
             self._mute_race = False
             self._mute_reason = ""
@@ -177,6 +226,8 @@ class SensorLink:
         """Lock capture. A mapping that was valid is shown as lost, not as a continued clock."""
         self._state = without_mapping(self._state)
         self._mapping_key = None
+        self._mapping_origin = ""
+        self._change("mapping", "cleared")
 
     def bind_view(
         self,
@@ -203,12 +254,14 @@ class SensorLink:
         self._mute_race = False
         self._mute_reason = ""
         self._pending.clear()
+        self._change("race_bound", "bound")
 
     def unbind_race(self) -> None:
         """Stop publishing. The clock and the sequence are left as they are."""
         self._race_bound = False
         self._race_lanes = frozenset()
         self._pending.clear()
+        self._change("race_unbound", "unbound")
 
     def inject(self, line: str) -> None:
         """Queue one simulator line. Refused outside simulation mode and while closed."""
@@ -253,7 +306,16 @@ class SensorLink:
                     observation,
                     kind="withheld",
                     detail=self._mute_reason or "muted",
+                    delivery="withheld",
                 )
+            elif event is not None and self._race_bound:
+                observation = replace(
+                    observation,
+                    delivery="published",
+                    race_start_ns=self._race_watch.started_at_ns,
+                )
+            elif observation.kind in {"accepted", "gap"}:
+                observation = replace(observation, delivery="received")
             self._remember(observation)
             self._observations.append(observation)
             if event is None or not self._race_bound or self._mute_race:
@@ -267,8 +329,66 @@ class SensorLink:
         self._pending.clear()
         return found
 
+    def note_race_started(self, race_id: int, mode: str, provider: str, started_at_ns: int) -> None:
+        """Remember one race attempt. Names of drivers are not accepted here."""
+        if isinstance(race_id, bool) or not isinstance(race_id, int):
+            return
+        if isinstance(started_at_ns, bool) or not isinstance(started_at_ns, int):
+            return
+        if started_at_ns < 0:
+            return
+        watched_mode = mode if isinstance(mode, str) else ""
+        watched_provider = provider if isinstance(provider, str) else ""
+        self._race_watch = RaceWatch(
+            race_id=race_id,
+            mode=watched_mode,
+            state="running",
+            provider=watched_provider,
+            started_at_ns=started_at_ns,
+        )
+        self._change("race_started", f"{watched_mode} {watched_provider}".strip())
+
+    def note_race_finished(self, race_id: int) -> None:
+        watch = self._race_watch
+        if isinstance(race_id, bool) or not isinstance(race_id, int) or watch.race_id != race_id:
+            return
+        self._race_watch = replace(watch, state="finished")
+        self._change("race_finished", watch.mode)
+
+    def note_timing_decision(
+        self,
+        *,
+        timestamp_ns: int,
+        source_id: str,
+        position_id: str,
+        lane: int,
+        result: str,
+        race_start_ns: int,
+    ) -> None:
+        """Attach the engine result to the crossing that was already logged."""
+        if source_id != self._source_id or not result:
+            return
+        if isinstance(timestamp_ns, bool) or not isinstance(timestamp_ns, int):
+            return
+        for index in range(len(self._observations) - 1, -1, -1):
+            item = self._observations[index]
+            if item.engine_result or item.host_time_ns != timestamp_ns:
+                continue
+            if item.lane != lane or item.position_id != position_id:
+                continue
+            delivery = "lap" if result == "completed" else "engine"
+            start = race_start_ns if race_start_ns >= 0 else item.race_start_ns
+            self._observations[index] = replace(
+                item,
+                delivery=delivery,
+                engine_result=result,
+                race_start_ns=start,
+            )
+            return
+
     def _remember(self, observation: SensorObservation) -> None:
         if observation.kind in {"hello", "restart"}:
+            self._change("session", observation.session_id or "")
             identity = _hello_from_observation(observation)
             if identity is not None:
                 self._identity = identity
@@ -278,7 +398,8 @@ class SensorLink:
         if observation.kind in {"restart", "time_fault"}:
             self._break_race(observation.kind)
         if (
-            observation.kind in {"accepted", "gap"}
+            self._mapping_origin == "measured"
+            and observation.kind in {"accepted", "gap"}
             and observation.device_time_ns is not None
             and observation.host_time_ns is not None
             and not self._mute_race
@@ -309,8 +430,23 @@ class SensorLink:
         mapping = self._estimator.mapping
         if mapping is None:
             return
+        # A running race keeps a measured clock. A later sample may only
+        # continue an event that was already published. It does not install a
+        # new absolute offset, and a manual offset is never that anchor.
+        race_holds_measured = (
+            self._race_bound
+            and not self._mute_race
+            and self._state.sync is SyncStatus.SYNCHRONIZED
+            and self._mapping_origin == "measured"
+        )
+        if race_holds_measured and (self._last_device_ns is None or self._last_host_ns is None):
+            return
         installed = mapping
-        if self._last_device_ns is not None and self._last_host_ns is not None:
+        if (
+            self._mapping_origin == "measured"
+            and self._last_device_ns is not None
+            and self._last_host_ns is not None
+        ):
             anchored = continuous_mapping(
                 mapping,
                 last_device_ns=self._last_device_ns,
@@ -322,15 +458,11 @@ class SensorLink:
         key = (installed.offset_ns, installed.numerator, installed.denominator)
         if key == self._mapping_key:
             return
-        self.set_time_mapping(installed, resume=False)
+        self.set_time_mapping(installed, resume=False, origin="measured")
         quality = self._estimator.quality
-        self._observations.append(
-            SensorObservation(
-                kind="sync",
-                raw="",
-                detail=f"{quality.samples} {quality.uncertainty_ns}",
-            )
-        )
+        detail = f"{quality.samples} {quality.uncertainty_ns}"
+        self._change("sync", f"measured {detail}")
+        self._observations.append(SensorObservation(kind="sync", raw="", detail=detail))
 
     def _note_transport(self) -> None:
         transport = self._transport
@@ -345,6 +477,7 @@ class SensorLink:
         self._seen_fault = fault
         kind = "handshake" if fault.startswith("handshake") or fault == "protocol" else "disconnect"
         self._observations.append(SensorObservation(kind=kind, raw="", detail=fault))
+        self._change(kind, fault)
         if kind == "disconnect":
             self._break_race(fault)
 
@@ -356,9 +489,11 @@ class SensorLink:
         self._last_host_ns = None
         self._estimator.clear()
         self._mapping_key = None
+        self._mapping_origin = ""
         self._state = without_mapping(self._state)
         self._state = replace(self._state, session_id=None, last_sequence=None)
         self._pending.clear()
+        self._change("break", detail or "muted")
 
     def _reset_session(self) -> None:
         self._state = IntakeState()
@@ -370,7 +505,11 @@ class SensorLink:
         self._mute_reason = ""
         self._seen_fault = None
         self._mapping_key = None
+        self._mapping_origin = ""
         self._pending.clear()
+
+    def _change(self, kind: str, detail: str) -> None:
+        self._changes.append((kind, detail))
 
 
 def _hello_from_observation(observation: SensorObservation) -> HelloFrame | None:

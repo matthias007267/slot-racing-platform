@@ -360,6 +360,49 @@ def test_a_new_session_mutes_the_race_until_an_explicit_mapping() -> None:
     link.release()
 
 
+def test_a_running_race_keeps_its_measured_clock_until_an_event_anchors_it() -> None:
+    clock = _Clock()
+    stream = _Stream()
+    transport = SerialSensorTransport("COM7", stream=stream, clock=clock, sync_gap_ns=0)
+    link = SensorLink(transport, mode=TransportMode.SERIAL)
+    link.acquire()
+    _identify(link, transport, stream)
+    _sync(link, transport)
+    installed = link._state.mapping
+    assert installed is not None
+    assert link.mapping_origin == "measured"
+    link.bind_race(
+        (_assignment("s1", "start_finish", 1), _assignment("s2", "start_finish", 2)),
+        _LOGICAL,
+        frozenset({1, 2}),
+    )
+    link._estimator.clear()
+    clock.now += 50_000_000_000_000
+    link.request_sync(5)
+    _sync(link, transport)
+    assert link._state.mapping == installed
+    assert link.mapping_origin == "measured"
+    link.release()
+
+
+def test_a_manual_serial_mapping_does_not_stay_the_race_clock() -> None:
+    link, transport, stream = _reader()
+    link.acquire()
+    link.set_time_mapping(DeviceClockMapping(0))
+    assert link.mapping_origin == "manual"
+    link.bind_race(
+        (_assignment("s1", "start_finish", 1), _assignment("s2", "start_finish", 2)),
+        _LOGICAL,
+        frozenset({1, 2}),
+    )
+    _identify(link, transport, stream)
+    _sync(link, transport)
+    mapping = link._state.mapping
+    assert link.mapping_origin == "measured"
+    assert mapping is not None and mapping.offset_ns != 0
+    link.release()
+
+
 def test_an_empty_port_name_is_refused_and_com5_is_not_implied() -> None:
     with pytest.raises(ValueError, match="empty"):
         SerialSensorTransport("   ")

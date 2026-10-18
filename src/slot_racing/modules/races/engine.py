@@ -75,6 +75,7 @@ from slot_racing.core.events import (
     SectorCompleted,
     SensorTriggered,
     Subscription,
+    TimingDecision,
     WinnerDetermined,
 )
 from slot_racing.core.timing import TimingSource
@@ -99,6 +100,7 @@ class RaceConfig:
     participants: tuple[Participant, ...]
     layout: TimingLayout
     mode: RaceMode = RaceMode.LAPS
+    timing_provider: str = ""
 
     def __post_init__(self) -> None:
         mode = RaceMode(self.mode)
@@ -195,7 +197,13 @@ class RaceEngine:
         self._status = RaceStatus.RUNNING
         self._subscription = self._bus.subscribe(SensorTriggered, self._on_sensor)
         self._bus.publish(
-            RaceStarted(timestamp_ns=now, race_id=race_id, participants=self._config.participants)
+            RaceStarted(
+                timestamp_ns=now,
+                race_id=race_id,
+                participants=self._config.participants,
+                mode=self._config.mode.value,
+                timing_provider=self._config.timing_provider,
+            )
         )
         if not self._single_point:
             for state in self._states.values():
@@ -359,9 +367,11 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "reset")
             return
         if self._status is not RaceStatus.RUNNING:
             self._note_timing("TIMING_EVENT_IGNORED", "race_not_running", lane=event.lane)
+            self._publish_decision(event, "race_not_running")
             return
         if event.timestamp_ns < self._started_at_ns:
             self._note_timing(
@@ -370,11 +380,13 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "invalid_timestamp")
             return
         if self._timestamp_in_pause(event.timestamp_ns):
             self._note_timing(
                 "TIMING_EVENT_IGNORED", "paused", lane=event.lane, position=event.position_id
             )
+            self._publish_decision(event, "paused")
             return
         state = self._states.get(event.lane)
         if state is None:
@@ -384,6 +396,7 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "unknown_lane")
             return
         if state.finished:
             self._note_timing(
@@ -392,6 +405,7 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "no_participant")
             return
         if event.timestamp_ns < state.accept_after_ns:
             self._note_timing(
@@ -400,6 +414,7 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "stale_assignment")
             return
         point = self._sequence[0 if not state.clock_started else state.next_point]
         if event.position_id != point.id:
@@ -413,6 +428,7 @@ class RaceEngine:
                 position=event.position_id,
                 expected=point.id,
             )
+            self._publish_decision(event, "wrong_position")
             return
         if self._repeats_same_pass(event.lane, event.position_id, event.timestamp_ns):
             self._note_timing(
@@ -421,6 +437,7 @@ class RaceEngine:
                 lane=event.lane,
                 position=event.position_id,
             )
+            self._publish_decision(event, "duplicate")
             return
         self._last_accepted_ns[(event.lane, event.position_id)] = event.timestamp_ns
 
@@ -439,6 +456,7 @@ class RaceEngine:
                 lap=state.lap_number,
             )
             self._publish_lap_started(state, event.timestamp_ns, race_time)
+            self._publish_decision(event, "started")
             return
 
         participant = state.participant
@@ -458,11 +476,29 @@ class RaceEngine:
         state.sector_start_ns = race_time
         state.next_point = (state.next_point + 1) % len(self._sequence)
         if state.next_point != 0:
+            self._publish_decision(event, "sector")
             return
+        # The decision is published before the lap event so a finished race still ends
+        # on RaceFinished. The lap rules below are unchanged.
+        self._publish_decision(event, "completed")
         self._complete_lap(state, event.timestamp_ns, race_time)
 
     def _note_timing(self, event: str, result: str, **fields: object) -> None:
         record(event, module="races", page="races", result=result, **fields)
+
+    def _publish_decision(self, event: SensorTriggered, result: str) -> None:
+        """Tell listeners the engine's existing decision. Lap rules stay in the caller."""
+        self._bus.publish(
+            TimingDecision(
+                timestamp_ns=event.timestamp_ns,
+                race_id=self._config.race_id,
+                source_id=event.source_id,
+                position_id=event.position_id,
+                lane=event.lane,
+                result=result,
+                race_start_ns=self._started_at_ns,
+            )
+        )
 
     def _complete_lap(self, state: _ParticipantState, timestamp_ns: int, race_time: int) -> None:
         participant = state.participant

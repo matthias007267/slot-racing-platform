@@ -57,6 +57,9 @@ class SensorObservation:
     host_time_ns: int | None = None
     gap: int = 0
     detail: str = ""
+    delivery: str = ""
+    engine_result: str = ""
+    race_start_ns: int | None = None
 
 
 def consume_line(
