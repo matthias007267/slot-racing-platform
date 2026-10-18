@@ -61,6 +61,12 @@ class SensorObservation:
     delivery: str = ""
     engine_result: str = ""
     race_start_ns: int | None = None
+    sync_status: str = ""
+    classification: str = ""
+    classification_reason: str = ""
+    window_opened_ns: int | None = None
+    released_ns: int | None = None
+    release_delta_ns: int | None = None
 
 
 def consume_line(

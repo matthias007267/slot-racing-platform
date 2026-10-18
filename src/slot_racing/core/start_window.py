@@ -31,8 +31,16 @@ class StartWindowWatch(Protocol):
     def poll_start_window(self) -> tuple[FalseStartNotice, ...]:
         """Read lines that are already waiting and return every false start so far."""
 
-    def close_start_window(self, released_ns: int) -> tuple[FalseStartNotice, ...]:
-        """The race is released at ``released_ns``. Later capture times are race crossings."""
+    def close_start_window(
+        self, released_ns: int, race_id: int | None = None
+    ) -> tuple[FalseStartNotice, ...]:
+        """The race is released at ``released_ns``. A capture at or after it is a race crossing.
+
+        A release for another race than the open window is ignored.
+        """
+
+    def cancel_start_window(self, race_id: int | None = None) -> None:
+        """The start sequence ended without a release. No crossing is a false start any more."""
 
     def clear_false_starts(self) -> None:
         """Drop the notices. The open window, if any, stays open."""

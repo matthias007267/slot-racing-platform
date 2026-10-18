@@ -290,7 +290,7 @@ class SensorTimingPlugin(Plugin):
             )
             # The engine publishes this before it binds the reader. Lines already
             # in the buffer are classified by their capture time, not by now.
-            link.close_start_window(event.timestamp_ns)
+            link.close_start_window(event.timestamp_ns, int(event.race_id))
             if event.timing_provider == "sensor":
                 link.request_arm()
 

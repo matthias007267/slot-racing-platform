@@ -64,6 +64,13 @@ class TimingSource(ABC):
         regularly while a race runs, so no source needs a thread of its own.
         """
 
+    def activate_lane(self, lane: int) -> None:  # noqa: B027
+        """A lane that was empty at the start now has a participant.
+
+        A source that filters by lane starts to deliver that lane. It does not change
+        the connection, the clock or any other lane.
+        """
+
     def pause(self) -> None:  # noqa: B027
         """The race was paused. Sources that keep their own timeline (simulation) freeze it."""
 

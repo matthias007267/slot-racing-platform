@@ -404,6 +404,8 @@ class LiveRaceView(QWidget):
         self._phase_mark = None
         if cue is not None:
             started = cue.started
+            if not started:
+                self._cancel_false_start_window()
             cue.blockSignals(True)
             cue.stop()
             self._remember_deviation(cue)
@@ -841,6 +843,15 @@ class LiveRaceView(QWidget):
         if runner is None or watch is None:
             return
         watch.open_start_window(int(runner.race.id), self._controller.clock.now_ns())
+
+    def _cancel_false_start_window(self) -> None:
+        """A sequence that ends without a release leaves no window behind."""
+        runner = self._runner
+        watch = self._start_watch()
+        self._false_start_lanes = frozenset()
+        if runner is None or watch is None:
+            return
+        watch.cancel_start_window(int(runner.race.id))
 
     def _read_false_starts(self, *, during_cue: bool) -> None:
         watch = self._start_watch()

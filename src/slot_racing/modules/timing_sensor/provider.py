@@ -79,6 +79,12 @@ class SensorTimingSource(TimingSource):
         self._link.unbind_race()
         self._link.release()
 
+    def activate_lane(self, lane: int) -> None:
+        """Let a lane that was empty at the start deliver. The connection is not touched."""
+        self._lanes = self._lanes | {lane}
+        if self._started:
+            self._link.activate_race_lane(lane)
+
     def poll(self) -> None:
         if not self._started or self._sink is None:
             return
