@@ -19,9 +19,12 @@ from math import gcd
 
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, to_host_ns
 
-# Samples wider than this are not used. USB can be slower; the bound only
-# rejects a sample, it does not describe gate accuracy.
-MAX_UNCERTAINTY_NS = 20_000_000
+# One-way delay still trusted for an offset. A Mega 2560 USB-serial reply on
+# Windows is often slower than 20 ms, and a short line used to sit until the
+# serial read timed out, so every real sample was dropped. A stable offset
+# cancels in lap differences. Slower samples are rejected and reported. The
+# crossing time stays the device timestamp converted by the mapping.
+MAX_UNCERTAINTY_NS = 250_000_000
 MIN_SAMPLES = 4
 # Below this span a rate fit is smaller than the delay noise, so the rate stays 1.
 MIN_RATE_SPAN_NS = 2_000_000_000
@@ -91,10 +94,16 @@ class ClockSync:
         self.mapping = None
         self.rewound = False
 
-    def add(self, sample: SyncSample) -> None:
-        """Add one sample. A device clock that steps backwards clears the window."""
+    def add(self, sample: SyncSample) -> str | None:
+        """Add one sample. A device clock that steps backwards clears the window.
+
+        Returns ``uncertainty`` when the sample is too slow to use, ``rewind``
+        when the device clock stepped backwards, and ``None`` when the sample
+        joined the window.
+        """
         if not isinstance(sample, SyncSample):
             raise TypeError("sample must be a SyncSample")
+        reason: str | None = None
         if (
             self._samples
             and sample.device_mid_ns + MAX_UNCERTAINTY_NS < self._samples[-1].device_mid_ns
@@ -102,9 +111,13 @@ class ClockSync:
             self._samples.clear()
             self.mapping = None
             self.rewound = True
-        if sample.uncertainty_ns <= MAX_UNCERTAINTY_NS:
-            self._samples.append(sample)
+            reason = "rewind"
+        if sample.uncertainty_ns > MAX_UNCERTAINTY_NS:
+            self.quality, self.mapping = mapping_for(tuple(self._samples))
+            return "uncertainty"
+        self._samples.append(sample)
         self.quality, self.mapping = mapping_for(tuple(self._samples))
+        return reason
 
 
 def evaluate(samples: tuple[SyncSample, ...]) -> SyncQuality:

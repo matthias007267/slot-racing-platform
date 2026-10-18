@@ -16,7 +16,11 @@ from enum import StrEnum
 
 from slot_racing.core.events import SensorTriggered
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
-from slot_racing.modules.timing_sensor.clock_sync import ClockSync, continuous_mapping
+from slot_racing.modules.timing_sensor.clock_sync import (
+    MAX_UNCERTAINTY_NS,
+    ClockSync,
+    continuous_mapping,
+)
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment
 from slot_racing.modules.timing_sensor.intake import (
     IntakeState,
@@ -428,7 +432,13 @@ class SensorLink:
             return
         rewound = False
         for sample in transport.take_sync_samples():
-            self._estimator.add(sample)
+            reason = self._estimator.add(sample)
+            if reason == "uncertainty":
+                detail = f"{sample.uncertainty_ns} ns, Grenze {MAX_UNCERTAINTY_NS} ns"
+                self._observations.append(
+                    SensorObservation(kind="sync_rejected", raw="", detail=detail)
+                )
+                self._change("sync_rejected", detail)
             if self._estimator.rewound:
                 rewound = True
                 self._estimator.rewound = False
