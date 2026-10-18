@@ -49,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         remember_qt_versions()
         apply_theme(app)
         window = MainWindow(runtime)
-        window.show()
+        window.show_at_start()
         if args.smoke_test:
             # Quit only this loop. QApplication.quit() sets a thread flag that
             # makes every later QEventLoop return immediately, so a smoke test

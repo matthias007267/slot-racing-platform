@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self._tr = runtime.translator.translate
         self.setWindowTitle(self._tr("app.title"))
         self.setMinimumSize(_MIN_WINDOW_WIDTH, _MIN_WINDOW_HEIGHT)
+        self._start_fullscreen = False
         self._restore_window_geometry()
 
         self._sidebar = Sidebar(self._tr("shell.brand"))
@@ -137,6 +138,18 @@ class MainWindow(QMainWindow):
         self.refresh_navigation()
         bind_crash_dialog(self, self._tr)
         offer_previous_session(self, self._tr, on_create=self._export_diagnostics)
+
+    def show_at_start(self) -> None:
+        """Open the shell. Every launch starts in fullscreen."""
+        self._start_fullscreen = True
+        self.show()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._start_fullscreen:
+            return
+        self._start_fullscreen = False
+        self.showFullScreen()
 
     def navigation_ids(self) -> list[str]:
         return self._sidebar.ids()

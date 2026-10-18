@@ -386,6 +386,18 @@ def test_quit_stays_open_when_saving_fails(
     assert window.isVisible()
 
 
+def test_the_program_opens_fullscreen(qtbot: QtBot, runtime: Runtime) -> None:
+    runtime.config.window_width = 800
+    runtime.config.window_height = 600
+    runtime.config.window_x = 10
+    runtime.config.window_y = 10
+    window = make_window(qtbot, runtime)
+    window.show_at_start()
+    qtbot.waitUntil(window.isFullScreen)
+    assert window.isVisible()
+    assert window.isFullScreen()
+
+
 def test_the_window_restores_and_stores_its_size(
     qtbot: QtBot, runtime: Runtime, tmp_path: object
 ) -> None:
