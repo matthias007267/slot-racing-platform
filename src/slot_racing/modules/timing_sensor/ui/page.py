@@ -32,6 +32,7 @@ from slot_racing.core.i18n import Translator
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
 from slot_racing.modules.timing_sensor.configuration import (
+    BoardName,
     DeviceHint,
     SensorAssignment,
     assignment_issues,
@@ -39,9 +40,12 @@ from slot_racing.modules.timing_sensor.configuration import (
 from slot_racing.modules.timing_sensor.devices import (
     PortMatch,
     SerialPortFacts,
+    assign_board_name,
     attach_remembered_serial,
+    board_name_for,
     classify_port,
     list_serial_devices,
+    port_choice_label,
     remembered_hint,
 )
 from slot_racing.modules.timing_sensor.diagnostics import sensor_diagnostic
@@ -107,7 +111,10 @@ class SensorTimingPage(QWidget):
         self.transport_combo.addItem(tr("sensor.mode.serial"), TransportMode.SERIAL.value)
         self.port_combo = QComboBox()
         self.port_combo.setObjectName("sensor-port")
-        self.port_combo.setEditable(True)
+        self.port_combo.currentIndexChanged.connect(self._on_board_selected)
+        self.board_name = QLineEdit()
+        self.board_name.setObjectName("sensor-board-name")
+        self.board_name.setPlaceholderText(tr("sensor.board_name.placeholder"))
         self.baud_label = QLabel(str(BAUD_RATE))
         self.baud_label.setObjectName("sensor-baud")
         self.identity_label = QLabel(tr("sensor.identity.none"))
@@ -175,6 +182,13 @@ class SensorTimingPage(QWidget):
         form.addRow(tr("sensor.field.current"), self.mode_label)
         form.addRow(tr("sensor.field.source"), self.transport_combo)
         form.addRow(tr("sensor.field.port"), self.port_combo)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.board_name, 1)
+        save_name = QPushButton(tr("sensor.action.board_name"))
+        save_name.setObjectName("sensor-board-name-save")
+        save_name.clicked.connect(self._save_board_name)
+        name_row.addWidget(save_name)
+        form.addRow(tr("sensor.field.board_name"), name_row)
         form.addRow(tr("sensor.field.baud"), self.baud_label)
         form.addRow(tr("sensor.field.identity"), self.identity_label)
         form.addRow(tr("sensor.field.quality"), self.quality_label)
@@ -563,22 +577,29 @@ class SensorTimingPage(QWidget):
         self._link.bind_view(self._saved(track_id), logical)
 
     def _refresh_ports(self) -> None:
-        current = self.port_combo.currentText()
-        self.port_combo.clear()
-        for facts in self._listed_ports():
-            self.port_combo.addItem(facts.device)
-        if current:
-            self.port_combo.setCurrentText(current)
-            return
-        # Listing ports must not select an arbitrary device.
-        self.port_combo.setCurrentIndex(-1)
-        self.port_combo.setEditText("")
+        selected = self._selected_device()
+        ports = self._listed_ports()
+        boards = self._stored_boards()
+        self.port_combo.blockSignals(True)
+        try:
+            self.port_combo.clear()
+            for facts in ports:
+                self.port_combo.addItem(port_choice_label(facts, boards, ports), facts.device)
+            if selected:
+                index = self.port_combo.findData(selected)
+                if index >= 0:
+                    self.port_combo.setCurrentIndex(index)
+                    return
+            # Listing ports must not select an arbitrary device.
+            self.port_combo.setCurrentIndex(-1)
+        finally:
+            self.port_combo.blockSignals(False)
 
     def _connect(self) -> None:
         mode = self.transport_combo.currentData()
         try:
             if mode == TransportMode.SERIAL.value:
-                port = self.port_combo.currentText().strip()
+                port = self._selected_device()
                 if not port:
                     self.status.show_error(self._translator.translate("sensor.error.port"))
                     return
@@ -826,7 +847,7 @@ class SensorTimingPage(QWidget):
         mode = self.transport_combo.currentData()
         if mode in {TransportMode.SIMULATION.value, TransportMode.SERIAL.value}:
             changes["mode"] = mode
-        port = self.port_combo.currentText().strip()
+        port = self._selected_device()
         if port and not any(character.isspace() for character in port) and len(port) <= 64:
             changes["port"] = port
         track_id = self._track_id()
@@ -894,7 +915,10 @@ class SensorTimingPage(QWidget):
             self._refresh_ports()
             _status, match = classify_port(remembered_hint(configuration), self._listed_ports())
             if match is not None:
-                self.port_combo.setCurrentText(match.device)
+                port_index = self.port_combo.findData(match.device)
+                if port_index >= 0:
+                    self.port_combo.setCurrentIndex(port_index)
+            self._show_board_name()
             if configuration.track_id is not None:
                 track_index = self.track_combo.findData(configuration.track_id)
                 if track_index >= 0:
@@ -942,6 +966,68 @@ class SensorTimingPage(QWidget):
         if self._serial_transport is not None:
             return self._serial_transport(port)
         return SerialSensorTransport(port)
+
+    def _save_board_name(self) -> None:
+        facts = self._selected_facts()
+        if facts is None:
+            self.status.show_error(self._translator.translate("sensor.board_name.no_port"))
+            return
+        ports = self._listed_ports()
+        try:
+            boards = assign_board_name(self._stored_boards(), facts, self.board_name.text(), ports)
+        except ValueError as error:
+            key = (
+                "sensor.board_name.taken" if str(error) == "taken" else "sensor.board_name.invalid"
+            )
+            self.status.show_error(self._translator.translate(key))
+            return
+        hint = DeviceHint(
+            vid=facts.vid,
+            pid=facts.pid,
+            serial_number=facts.serial_number,
+            location=facts.location,
+            port=facts.device,
+        )
+        if not self._save_preferences(board_names=boards, device=hint, port=facts.device):
+            return
+        self._refresh_ports()
+        self._show_board_name()
+        saved = board_name_for(facts, boards, ports)
+        self.status.show_info(self._translator.format("sensor.board_name.saved", name=saved))
+
+    def _on_board_selected(self) -> None:
+        if self._applying_preferences:
+            return
+        self._show_board_name()
+
+    def _show_board_name(self) -> None:
+        facts = self._selected_facts()
+        if facts is None:
+            self.board_name.clear()
+            return
+        ports = self._listed_ports()
+        self.board_name.setText(board_name_for(facts, self._stored_boards(), ports))
+
+    def _selected_device(self) -> str:
+        data = self.port_combo.currentData()
+        if not isinstance(data, str):
+            return ""
+        return data
+
+    def _selected_facts(self) -> SerialPortFacts | None:
+        device = self._selected_device()
+        if not device:
+            return None
+        for facts in self._listed_ports():
+            if facts.device == device:
+                return facts
+        return None
+
+    def _stored_boards(self) -> tuple[BoardName, ...]:
+        try:
+            return self._store.load().board_names
+        except SensorConfigurationError:
+            return ()
 
     def _listed_ports(self) -> tuple[SerialPortFacts, ...]:
         if self._port_lister is not None:

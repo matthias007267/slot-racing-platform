@@ -524,7 +524,8 @@ def _shared(
     qtbot.addWidget(page)
     page.show()
     QApplication.processEvents()
-    assert page.port_combo.currentText() == "COM11"
+    assert page.port_combo.currentData() == "COM11"
+    assert page.port_combo.currentText() == "BOARD1"
     developer = page.findChild(QGroupBox, "sensor-developer")
     assert developer is not None and developer.isChecked() is True
     assert page.offset_edit.text() == "0"
