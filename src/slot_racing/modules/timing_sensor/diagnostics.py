@@ -91,6 +91,7 @@ def sensor_diagnostic(
             ],
         },
         "race": race,
+        "start_window": link.start_window_state(),
         "event_limit": _EVENT_LIMIT,
         "events": [_event(item, watch.started_at_ns) for item in crossings[-_EVENT_LIMIT:]],
     }
@@ -110,6 +111,13 @@ def _event(item: SensorObservation, race_started_ns: int | None) -> dict[str, ob
         "lane": item.lane,
         "stage": stage["stage"],
         "reason": stage["reason"],
+        "converted_host_time_ns": item.host_time_ns,
+        "start_phase_begin_ns": item.window_opened_ns,
+        "release_ns": item.released_ns,
+        "delta_to_release_ns": item.release_delta_ns,
+        "sync_status": item.sync_status,
+        "classification": item.classification,
+        "classification_reason": item.classification_reason,
     }
 
 

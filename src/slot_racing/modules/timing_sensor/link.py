@@ -304,6 +304,17 @@ class SensorLink:
         self._held.clear()
         self._change("race_bound", "bound")
 
+    def activate_race_lane(self, lane: int) -> None:
+        """Take one more lane into the bound race. Sync, sequence and the other lanes stay."""
+        if isinstance(lane, bool) or not isinstance(lane, int) or lane < 1:
+            raise ValueError("lane must be a positive int")
+        if not self._race_bound:
+            return
+        if lane in self._race_lanes:
+            return
+        self._race_lanes = self._race_lanes | {lane}
+        self._change("lane_activated", str(lane))
+
     def unbind_race(self) -> None:
         """Stop publishing. The clock and the sequence are left as they are."""
         self._race_bound = False
@@ -338,22 +349,55 @@ class SensorLink:
         self._window_opened_ns = opened_ns
         self._window_released_ns = None
         self._window_open = True
+        self._change("start_window", f"opened {opened_ns}")
 
     def poll_start_window(self) -> tuple[FalseStartNotice, ...]:
         """Read waiting lines. Capture time, not the time this method runs, decides."""
         self.poll()
         return self.false_starts()
 
-    def close_start_window(self, released_ns: int) -> tuple[FalseStartNotice, ...]:
-        """Release the race at ``released_ns`` and classify lines already in the reader."""
+    def close_start_window(
+        self, released_ns: int, race_id: int | None = None
+    ) -> tuple[FalseStartNotice, ...]:
+        """Release the race at ``released_ns`` and classify lines already in the reader.
+
+        ``released_ns`` is the stamp the engine started with. A release for another race than
+        the open window is ignored, and so is a second release of a window that was released.
+        """
         if isinstance(released_ns, bool) or not isinstance(released_ns, int) or released_ns < 0:
             return self.false_starts()
-        if self._window_opened_ns is None:
+        if self._window_opened_ns is None or self._window_released_ns is not None:
+            return self.false_starts()
+        if race_id is not None and race_id != self._window_race_id:
             return self.false_starts()
         self._window_released_ns = released_ns
         self._window_open = False
+        self._change("start_window", f"released {released_ns}")
         self.poll()
         return self.false_starts()
+
+    def cancel_start_window(self, race_id: int | None = None) -> None:
+        """End a start sequence that never released the race. A released window stays as it is."""
+        if self._window_opened_ns is None or self._window_released_ns is not None:
+            return
+        if race_id is not None and race_id != self._window_race_id:
+            return
+        self._window_race_id = None
+        self._window_opened_ns = None
+        self._window_open = False
+        self._false_starts.clear()
+        self._held.clear()
+        self._change("start_window", "cancelled")
+
+    def start_window_state(self) -> dict[str, object]:
+        """The start phase as the diagnostic export shows it. No names, only stamps."""
+        return {
+            "race_id": self._window_race_id,
+            "begin_ns": self._window_opened_ns,
+            "release_ns": self._window_released_ns,
+            "active": self._window_open,
+            "false_starts": len(self._false_starts),
+        }
 
     def clear_false_starts(self) -> None:
         """Drop the displayed notices. An open window keeps watching."""
@@ -381,6 +425,7 @@ class SensorLink:
             return
         lanes = self._race_lanes if self._race_bound else None
         for line in self._transport.read_available():
+            sync_before = self._state.sync
             state, observation, event = consume_line(
                 self._state,
                 line,
@@ -407,7 +452,7 @@ class SensorLink:
                 )
             elif observation.kind in {"accepted", "gap"}:
                 observation = replace(observation, delivery="received")
-            notice = None if event is None else self._false_start_notice(event)
+            notice, observation = self._classify(observation, event, sync_before)
             if notice is not None:
                 observation = replace(
                     observation,
@@ -626,28 +671,72 @@ class SensorLink:
         self._race_view = None
         self._restore_race_view = False
 
-    def _false_start_notice(self, event: SensorTriggered) -> FalseStartNotice | None:
-        """A crossing inside the start window and before the release.
+    def _classify(
+        self,
+        observation: SensorObservation,
+        event: SensorTriggered | None,
+        sync_before: SyncStatus,
+    ) -> tuple[FalseStartNotice | None, SensorObservation]:
+        """Name why a crossing line is or is not a false start.
 
-        ``event.timestamp_ns`` is the mapped capture time. Lines read after the
-        release still count as false starts when that capture time is earlier.
+        ``event.timestamp_ns`` is the device time converted to the host monotonic clock. It is
+        compared with the window's own stamps, which are host monotonic nanoseconds too. The
+        moment this method runs is never an input. A line without a valid time base is a
+        time base error and is not a false start.
         """
+        if observation.sequence is None:
+            return None, observation
         opened = self._window_opened_ns
-        race_id = self._window_race_id
-        if opened is None or race_id is None or event.timestamp_ns < opened:
-            return None
         released = self._window_released_ns
-        if released is None:
-            if not self._window_open:
-                return None
-        elif event.timestamp_ns >= released:
-            return None
-        return FalseStartNotice(
+        sync = sync_before.value
+        if event is None:
+            if observation.kind in {"unsynchronized", "clock_error"}:
+                reason = "clock_error" if observation.kind == "clock_error" else sync_before.value
+                return None, replace(
+                    observation,
+                    classification="time_base_error",
+                    classification_reason=reason,
+                    sync_status=sync,
+                    window_opened_ns=opened,
+                    released_ns=released,
+                )
+            return None, replace(
+                observation, sync_status=sync, window_opened_ns=opened, released_ns=released
+            )
+        captured = event.timestamp_ns
+        delta = None if released is None else captured - released
+        race_id = self._window_race_id
+        if opened is None or race_id is None:
+            classification, reason = "race_crossing", "no_start_sequence"
+        elif captured < opened:
+            classification, reason = "race_crossing", "before_start_phase"
+        elif released is None:
+            if self._window_open:
+                classification, reason = "false_start", "release_pending"
+            else:
+                classification, reason = "race_crossing", "no_start_sequence"
+        elif captured >= released:
+            classification, reason = "race_crossing", "at_or_after_release"
+        else:
+            classification, reason = "false_start", "before_release"
+        annotated = replace(
+            observation,
+            classification=classification,
+            classification_reason=reason,
+            release_delta_ns=delta,
+            sync_status=sync,
+            window_opened_ns=opened,
+            released_ns=released,
+        )
+        if classification != "false_start" or race_id is None:
+            return None, annotated
+        notice = FalseStartNotice(
             race_id=race_id,
             lane=event.lane,
             position_id=event.position_id,
-            captured_ns=event.timestamp_ns,
+            captured_ns=captured,
         )
+        return notice, annotated
 
     def _remember_false_start(self, notice: FalseStartNotice) -> None:
         key = (notice.lane, notice.captured_ns)

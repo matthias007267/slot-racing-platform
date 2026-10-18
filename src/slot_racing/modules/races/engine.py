@@ -258,6 +258,7 @@ class RaceEngine:
             self._config,
             participants=tuple(sorted((*kept, participant), key=lambda person: person.lane)),
         )
+        self._for_each_source("activate_lane", lambda source: source.activate_lane(lane))
 
     def reset_measurements(self, at_ns: int) -> None:
         """Drop every lane's laps and open clock. The drivers and the race stay.
