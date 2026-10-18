@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 from slot_racing.core.events import (
     EventDispatcher,
+    HeatAttemptDiscarded,
     LapCompleted,
     MeasurementsReset,
     RaceFinished,
@@ -44,6 +45,7 @@ class RaceRecorder:
             bus.subscribe(LapCompleted, self._on_lap),
             bus.subscribe(RaceFinished, self._on_finished),
             bus.subscribe(MeasurementsReset, self._on_reset),
+            bus.subscribe(HeatAttemptDiscarded, self._on_discarded),
         ]
 
     def close(self) -> None:
@@ -80,6 +82,12 @@ class RaceRecorder:
 
     def _on_reset(self, event: MeasurementsReset) -> None:
         """Drop sector times that belonged to the attempt that was just cleared."""
+        self._sectors = {
+            key: value for key, value in self._sectors.items() if key[0] != event.race_id
+        }
+
+    def _on_discarded(self, event: HeatAttemptDiscarded) -> None:
+        """Drop sector times of a heat attempt that will be driven again."""
         self._sectors = {
             key: value for key, value in self._sectors.items() if key[0] != event.race_id
         }

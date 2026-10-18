@@ -411,7 +411,7 @@ def test_existing_races_gain_one_repetition_without_losing_their_laps() -> None:
     with database.engine.connect() as connection:
         stored = connection.exec_driver_sql("SELECT target_laps, repetitions FROM races").one()
     assert stored == (8, 1)
-    assert database.schema_revision() == "0025"
+    assert database.schema_revision() == "0026"
     database.dispose()
 
 

@@ -89,6 +89,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "race.heat.change": "{driver}: Bahn {from_lane} → Bahn {to_lane}",
         "race.heat.ready_hint": "Bitte Fahrer bereitmachen.",
         "race.heat.start": "Fahrer bereit / Durchlauf starten",
+        "race.heat.repeat": "Durchlauf wiederholen",
         "race.heat.postpone": "Kann jetzt nicht fahren",
         "race.heat.disqualify": "Disqualifizieren",
         "race.heat.confirm_dq": (
@@ -116,6 +117,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "race.live.confirm_stop_free": "Das freie Rennen beenden und die Zeitmessung stoppen?",
         "race.live.reset_values": "Werte zurücksetzen",
+        "race.live.repeat_heat": "Durchlauf wiederholen",
+        "race.live.repeat_confirm": "Wiederholen",
+        "race.live.repeat_cancel": "Abbrechen",
+        "race.live.confirm_repeat": (
+            "Diesen Durchlauf verwerfen und mit denselben Fahrern, Fahrzeugen und Spuren "
+            "neu starten? Ein laufender Durchlauf wird beendet. Seine Runden, Zeiten und "
+            "Frühstarts zählen nicht. Die Durchlaufnummer und die folgenden Durchläufe "
+            "bleiben unverändert."
+        ),
+        "race.live.false_start": "Frühstart: Bahn {lanes}",
+        "race.live.false_start_status": "Frühstart",
         "race.live.reset_confirm": "Zurücksetzen",
         "race.live.reset_cancel": "Abbrechen",
         "race.live.confirm_reset": (
@@ -350,6 +362,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "error.race.not_startable": (
             "Ein Rennen mit dem Status „{status}“ kann nicht gestartet werden."
         ),
+        "error.race.not_repeatable": "Dieser Durchlauf kann nicht wiederholt werden.",
         "error.race.not_restartable": (
             "Nur ein abgeschlossenes oder abgebrochenes Rennen kann neu gestartet werden."
         ),

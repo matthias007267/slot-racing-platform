@@ -9,6 +9,7 @@ from PySide6.QtCore import QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QHideEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -35,6 +36,7 @@ from slot_racing.core.events import (
     WinnerDetermined,
 )
 from slot_racing.core.i18n import Translator
+from slot_racing.core.start_window import StartWindowWatch
 from slot_racing.modules.races.hud import (
     RECORDS_MIN_HEIGHT,
     VIEW_BETWEEN,
@@ -73,7 +75,7 @@ from slot_racing.modules.races.ui.start_lights import StartLightWidget
 from slot_racing.modules.races.ui.time_trial_board_view import TimeTrialBoardView
 from slot_racing.uikit import describe_error
 from slot_racing.uikit.errors import is_expected
-from slot_racing.uikit.theme import configure_page
+from slot_racing.uikit.theme import configure_page, set_role
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,7 @@ class LiveRaceView(QWidget):
         broadcast: LiveBroadcast | None = None,
         drivers: DriverCatalog | None = None,
         vehicles: VehicleCatalog | None = None,
+        start_window: Callable[[], StartWindowWatch | None] | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -140,6 +143,9 @@ class LiveRaceView(QWidget):
             == QMessageBox.StandardButton.Yes
         )
         self.confirm_reset: Callable[[str], bool] = self._ask_reset
+        self.confirm_repeat: Callable[[str], bool] = self._ask_repeat
+        self._start_window = start_window
+        self._false_start_lanes: frozenset[int] = frozenset()
 
         self.stage = LiveHudStage(translator)
         self.clock = self.stage.clock
@@ -166,6 +172,11 @@ class LiveRaceView(QWidget):
         self.board.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.board.setMinimumHeight(RECORDS_MIN_HEIGHT)
         self.heat_gate = HeatGate(translator)
+        self.false_start_banner = QLabel()
+        self.false_start_banner.setObjectName("live-false-start")
+        self.false_start_banner.setWordWrap(True)
+        set_role(self.false_start_banner, "danger")
+        self.false_start_banner.hide()
         self.start_lights = StartLightWidget(self)
         self.start_lights.use_as_overlay()
 
@@ -190,10 +201,22 @@ class LiveRaceView(QWidget):
         self.reset_button.clicked.connect(self.reset_measurements)
         switch_layout.addWidget(self.reset_button)
         self._switch_row.hide()
+        self._repeat_row = QWidget()
+        self._repeat_row.setObjectName("live-repeat-row")
+        repeat_layout = QHBoxLayout(self._repeat_row)
+        repeat_layout.setContentsMargins(0, 0, 0, 0)
+        self.repeat_button = QPushButton(translator.translate("race.live.repeat_heat"))
+        self.repeat_button.setObjectName("live-repeat-heat")
+        self.repeat_button.clicked.connect(self.repeat_heat)
+        repeat_layout.addWidget(self.repeat_button)
+        repeat_layout.addStretch(1)
+        self._repeat_row.hide()
 
+        layout.addWidget(self.false_start_banner)
         layout.addWidget(self.heat_gate, 1)
         layout.addWidget(self.stage, 1)
         layout.addWidget(self._switch_row)
+        layout.addWidget(self._repeat_row)
         layout.addWidget(self.board, 1)
 
         self._timer = QTimer(self)
@@ -210,6 +233,7 @@ class LiveRaceView(QWidget):
         self.board.results_button.clicked.connect(lambda: self._show_results())
         self.board.back_button.clicked.connect(self._leave)
         self.heat_gate.start_requested.connect(self._start_next_heat)
+        self.heat_gate.repeat_requested.connect(self.repeat_heat)
         self.heat_gate.postpone_requested.connect(self._postpone_driver)
         self.heat_gate.disqualify_requested.connect(self._disqualify_driver)
         self._subscriptions = [self._listen(event_type) for event_type in _RACE_EVENTS]
@@ -287,11 +311,13 @@ class LiveRaceView(QWidget):
         cue.changed.connect(self._play_start_sound)
         cue.finished.connect(self._hide_cue)
         self._cue = cue
+        self._open_false_start_window()
         cue.hold()
         schedule = cue.schedule
         if schedule is not None:
             self._hand_schedule(schedule.to_document(), revoked=False)
         cue.wake()
+        self._show_false_start_banner()
         self._publish_reached_phase()
         self._publish_live()
 
@@ -464,7 +490,9 @@ class LiveRaceView(QWidget):
             return
         self._busy = True
         try:
+            self._read_false_starts(during_cue=True)
             self._guard(runner.tick)
+            self._read_false_starts(during_cue=False)
             self._render()
         finally:
             self._busy = False
@@ -537,12 +565,47 @@ class LiveRaceView(QWidget):
         self._guard(self._controller.reset_measurements)
         self.refresh()
 
+    def repeat_heat(self) -> None:
+        """Drive the current or just finished heat again after confirmation.
+
+        A running heat is closed first. The plan does not gain another heat.
+        """
+        runner = self._runner
+        if runner is None or not self._repeat_offered(runner):
+            return
+        question = self.translator.translate("race.live.confirm_repeat")
+        if not self.confirm_repeat(question):
+            return
+        race_id = runner.race.id
+        self._cancel_cue()
+        try:
+            self._controller.repeat_heat()
+            prepared = self._controller.prepare_race(race_id)
+        except Exception as error:
+            self._runner = self._controller.active
+            self._update_buttons()
+            self._show_false_start_banner()
+            if not is_expected(error):
+                logger.exception("Could not repeat the heat")
+            self.messages.show_warning(describe_error(self.translator, error))
+            return
+        self.open_for_start(prepared)
+
     def _ask_reset(self, text: str) -> bool:
         box = reset_question(self, self.translator)
         box.setText(text)
         box.exec()
         clicked = box.clickedButton()
         accepted = clicked is not None and clicked.objectName() == "live-reset-accept"
+        box.deleteLater()
+        return accepted
+
+    def _ask_repeat(self, text: str) -> bool:
+        box = repeat_question(self, self.translator)
+        box.setText(text)
+        box.exec()
+        clicked = box.clickedButton()
+        accepted = clicked is not None and clicked.objectName() == "live-repeat-accept"
         box.deleteLater()
         return accepted
 
@@ -625,6 +688,7 @@ class LiveRaceView(QWidget):
             mode=runner.race.mode,
             lane_count=self._shown_lanes(runner),
             duration_minutes=runner.race.duration_minutes,
+            false_start_lanes=self._false_start_lanes,
         )
         if self.table.rowCount() and self.table.currentRow() < 0:
             self.table.selectRow(0)
@@ -738,6 +802,20 @@ class LiveRaceView(QWidget):
         self._switch_row.setVisible(free)
         self.reset_button.setVisible(free)
         self.reset_button.setEnabled(active)
+        offered = self._repeat_offered(runner)
+        self._repeat_row.setVisible(offered)
+        self.repeat_button.setVisible(offered)
+        self.repeat_button.setEnabled(
+            offered
+            and status
+            in (
+                RaceStatus.CREATED,
+                RaceStatus.RUNNING,
+                RaceStatus.PAUSED,
+                RaceStatus.FINISHED,
+            )
+        )
+        self._show_false_start_banner()
         shown = 0 if runner is None else self._shown_lanes(runner)
         for lane, button in self.switch_buttons.items():
             button.setEnabled(active)
@@ -745,6 +823,47 @@ class LiveRaceView(QWidget):
         self.board.set_controls(
             pause=running, resume=paused, stop=active, results=finished and not free
         )
+
+    def _repeat_offered(self, runner: RaceRunner | None) -> bool:
+        if runner is None or self._service is None or runner.race.mode is RaceMode.FREE:
+            return False
+        return self._service.has_heat_plan(runner.race.id)
+
+    def _start_watch(self) -> StartWindowWatch | None:
+        if self._start_window is None:
+            return None
+        return self._start_window()
+
+    def _open_false_start_window(self) -> None:
+        runner = self._runner
+        watch = self._start_watch()
+        self._false_start_lanes = frozenset()
+        if runner is None or watch is None:
+            return
+        watch.open_start_window(int(runner.race.id), self._controller.clock.now_ns())
+
+    def _read_false_starts(self, *, during_cue: bool) -> None:
+        watch = self._start_watch()
+        runner = self._runner
+        if watch is None or runner is None:
+            return
+        cue = self._cue
+        if during_cue and cue is not None and not cue.started:
+            watch.poll_start_window()
+        lanes = {
+            notice.lane for notice in watch.false_starts() if notice.race_id == int(runner.race.id)
+        }
+        self._false_start_lanes = frozenset(lanes)
+
+    def _show_false_start_banner(self) -> None:
+        lanes = ", ".join(str(lane) for lane in sorted(self._false_start_lanes))
+        if not lanes:
+            self.false_start_banner.hide()
+            return
+        self.false_start_banner.setText(
+            self.translator.format("race.live.false_start", lanes=lanes)
+        )
+        self.false_start_banner.show()
 
     def _stored_race_is_over(self, race_id: RaceId) -> bool:
         if self._service is None:
@@ -1007,6 +1126,27 @@ class LiveRaceView(QWidget):
         for subscription in self._subscriptions:
             subscription.cancel()
         self._subscriptions.clear()
+
+
+def repeat_question(parent: QWidget, translator: Translator) -> QMessageBox:
+    """Confirmation for driving a heat again. Cancel is the default button."""
+    box = QMessageBox(parent)
+    box.setObjectName("live-repeat-question")
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(translator.translate("race.live.repeat_heat"))
+    box.setText(translator.translate("race.live.confirm_repeat"))
+    accept = box.addButton(
+        translator.translate("race.live.repeat_confirm"),
+        QMessageBox.ButtonRole.AcceptRole,
+    )
+    accept.setObjectName("live-repeat-accept")
+    cancel = box.addButton(
+        translator.translate("race.live.repeat_cancel"),
+        QMessageBox.ButtonRole.RejectRole,
+    )
+    cancel.setObjectName("live-repeat-cancel")
+    box.setDefaultButton(cancel)
+    return box
 
 
 def reset_question(parent: QWidget, translator: Translator) -> QMessageBox:

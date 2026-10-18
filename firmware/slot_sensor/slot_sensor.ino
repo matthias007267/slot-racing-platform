@@ -105,6 +105,10 @@ void edge0() { on_edge(0); }
 void edge1() { on_edge(1); }
 
 void handle_line(uint64_t received_ns) {
+  if (slot_sensor::parse_arm_command(g_rx)) {
+    g_engine.rearm();
+    return;
+  }
   uint32_t host_seq = 0;
   if (!slot_sensor::parse_sync_command(g_rx, &host_seq)) {
     Serial.print(F("PSF/1 ERROR "));

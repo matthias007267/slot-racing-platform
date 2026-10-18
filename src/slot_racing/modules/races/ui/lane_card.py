@@ -206,6 +206,7 @@ class LaneCard(QFrame):
         ended: bool,
         elapsed_ns: int = 0,
         duration_minutes: int | None = None,
+        false_start: bool = False,
     ) -> None:
         self._mode = mode
         self._remaining_laps = remaining_laps(row.laps_completed, laps)
@@ -222,11 +223,17 @@ class LaneCard(QFrame):
         self.best_label.setText(number)
         self.best_time_label.setText(best_time)
         self.total_label.setText(format_duration(row.total_time_ns))
-        self.status_label.setText(
-            self._translator.translate(
-                participant_status_key(finished=row.finished, paused=paused, ended=ended)
+        self.status_label.setProperty("falseStart", false_start)
+        if false_start:
+            self.status_label.setText(self._translator.translate("race.live.false_start_status"))
+            set_role(self.status_label, "danger")
+        else:
+            self.status_label.setText(
+                self._translator.translate(
+                    participant_status_key(finished=row.finished, paused=paused, ended=ended)
+                )
             )
-        )
+            set_role(self.status_label, "")
         self._paint_style()
 
     def show_free(self, free: str, *, show_total: bool = True) -> None:
@@ -245,6 +252,8 @@ class LaneCard(QFrame):
         self.best_time_label.setText("-")
         self.total_label.setText("-")
         self.status_label.setText(EMPTY_DISPLAY)
+        self.status_label.setProperty("falseStart", False)
+        set_role(self.status_label, "")
         self._paint_style()
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
@@ -368,6 +377,7 @@ class LaneCardBoard(QWidget):
         lane_count: int,
         mode: RaceMode,
         duration_minutes: int | None = None,
+        false_start_lanes: frozenset[int] = frozenset(),
     ) -> None:
         self._ensure(lane_count)
         by_lane = {row.lane: row for row in snapshot.rows if row.seated}
@@ -387,6 +397,7 @@ class LaneCardBoard(QWidget):
                     ended=ended,
                     elapsed_ns=snapshot.elapsed_ns,
                     duration_minutes=duration_minutes,
+                    false_start=lane in false_start_lanes,
                 )
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802

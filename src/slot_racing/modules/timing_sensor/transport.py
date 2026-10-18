@@ -25,6 +25,7 @@ from slot_racing.modules.timing_sensor.protocol import (
     HelloFrame,
     SensorProtocolError,
     SyncReply,
+    format_arm_command,
     format_sync_command,
     parse_sensor_line,
 )
@@ -168,6 +169,7 @@ class SerialSensorTransport:
         self._next_periodic = 0
         self._periodic = False
         self._sync_gap_ns = sync_gap_ns
+        self._arm_requested = False
 
     @property
     def port(self) -> str:
@@ -241,6 +243,11 @@ class SerialSensorTransport:
             self._samples.clear()
             return found
 
+    def request_arm(self) -> None:
+        """Queue one ``PSF/1 ARM``. The worker writes it on the next pass."""
+        with self._lock:
+            self._arm_requested = True
+
     def request_sync(self, rounds: int = 5) -> None:
         """Queue a few clock exchanges. The worker writes them between reads."""
         if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
@@ -260,6 +267,7 @@ class SerialSensorTransport:
         if not self._identified and self._clock() - self._opened_ns > _HANDSHAKE_TIMEOUT_NS:
             self._fail("handshake_timeout")
             return
+        self._write_arm()
         self._write_sync()
         try:
             data = self._stream.read(self._read_amount())
@@ -296,6 +304,19 @@ class SerialSensorTransport:
         self._fault = code
         self._identified = False
         self._running = False
+
+    def _write_arm(self) -> None:
+        stream = self._stream
+        if stream is None or not self._identified or self._fault is not None:
+            return
+        with self._lock:
+            if not self._arm_requested:
+                return
+            self._arm_requested = False
+        try:
+            stream.write((format_arm_command() + "\n").encode("ascii"))
+        except Exception:
+            self._fail("disconnected")
 
     def _write_sync(self) -> None:
         stream = self._stream

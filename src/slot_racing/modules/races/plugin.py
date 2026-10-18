@@ -22,6 +22,7 @@ from slot_racing.core.plugin import (
     PluginManifest,
     SettingsSection,
 )
+from slot_racing.core.start_window import StartWindowWatch
 from slot_racing.core.storage import Database
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.core.timing_registry import TimingProviderRegistry
@@ -130,6 +131,7 @@ class RacesPlugin(Plugin):
                 hud_store,
                 context.config,
                 broadcast,
+                start_window=lambda: context.find_service(StartWindowWatch),
             )
 
         def hud_settings() -> QWidget:

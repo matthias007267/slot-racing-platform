@@ -284,7 +284,7 @@ def test_migration_adds_championship_tables_and_keeps_existing_races() -> None:
             {"track_id": track.id},
         )
     database.migrate()
-    assert database.schema_revision() == "0025"
+    assert database.schema_revision() == "0026"
     tables = set(inspect(database.engine).get_table_names())
     assert {
         "championships",
@@ -307,7 +307,7 @@ def test_migration_adds_championship_tables_and_keeps_existing_races() -> None:
         assert session.scalar(select(Race.name)) == "Historisch"
         assert session.scalar(select(Driver.name)) == "Anna"
     database.migrate()
-    assert database.schema_revision() == "0025"
+    assert database.schema_revision() == "0026"
     database.dispose()
 
 

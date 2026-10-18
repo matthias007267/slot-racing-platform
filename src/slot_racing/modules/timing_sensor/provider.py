@@ -48,6 +48,9 @@ class SensorTimingSource(TimingSource):
         self._lanes = lanes
         self._sink: SensorSink | None = None
         self._started = False
+        # The lights are still counting, so the race is not bound yet. The page
+        # timer must not replace this snapshot before the first crossing.
+        link.remember_race_view(assignments, logical_ids)
 
     @property
     def source_id(self) -> str:

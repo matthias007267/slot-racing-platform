@@ -27,7 +27,13 @@ from slot_racing.core.domain import (
     default_timing_setup,
 )
 from slot_racing.core.errors import ValidationError
-from slot_racing.core.events import EventDispatcher, LapCompleted, RaceFinished, Subscription
+from slot_racing.core.events import (
+    EventDispatcher,
+    HeatAttemptDiscarded,
+    LapCompleted,
+    RaceFinished,
+    Subscription,
+)
 from slot_racing.core.timing import TimingSessionSpec, TimingSetupService
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.engine import RaceConfig, RaceEngine
@@ -348,6 +354,31 @@ class RaceController:
             return False
         runner.reassign_lane(info, at_ns=self._clock.now_ns())
         return True
+
+    def repeat_heat(self) -> int:
+        """Throw away the current or just finished heat and keep its place in the plan.
+
+        The runner is detached without a finish event, so the plan does not gain
+        another copy of the rotation. The sensor reader is released by that
+        detach; a holder that is still open keeps the connection and the clock.
+        """
+        runner = self.active
+        if runner is None or runner.race.mode is RaceMode.FREE:
+            raise ValidationError("error.race.not_repeatable")
+        if not self._service.has_heat_plan(runner.race.id):
+            raise ValidationError("error.race.not_repeatable")
+        race_id = runner.race.id
+        runner.close()
+        self.active = None
+        heat_id = self._service.reopen_current_heat(race_id)
+        self._bus.publish(
+            HeatAttemptDiscarded(
+                timestamp_ns=self._clock.now_ns(),
+                race_id=race_id,
+                heat_id=heat_id,
+            )
+        )
+        return heat_id
 
     def reset_measurements(self) -> None:
         """Clear the current free session's times. Assignments and the race stay."""

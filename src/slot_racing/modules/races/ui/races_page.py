@@ -19,6 +19,7 @@ from slot_racing.core.catalog import DriverCatalog, TrackCatalog, VehicleCatalog
 from slot_racing.core.config import AppConfig
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.i18n import Translator
+from slot_racing.core.start_window import StartWindowWatch
 from slot_racing.core.timing_registry import TimingProviderRegistry
 from slot_racing.modules.races.hud import HudConfigurationStore
 from slot_racing.modules.races.runner import RaceController
@@ -65,6 +66,7 @@ class RacesPage(QWidget):
         hud_store: HudConfigurationStore | None = None,
         config: AppConfig | None = None,
         broadcast: LiveBroadcast | None = None,
+        start_window: Callable[[], StartWindowWatch | None] | None = None,
     ) -> None:
         super().__init__()
         self.translator = translator
@@ -137,6 +139,7 @@ class RacesPage(QWidget):
             broadcast,
             drivers=drivers,
             vehicles=vehicles,
+            start_window=start_window,
         )
         self.results = ResultsView(translator, service, hud_store)
         self.stack = QStackedWidget()

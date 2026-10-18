@@ -6,6 +6,10 @@
 // rising edge. Each sensor locks on its own. It arms again only after 1000 ms
 // from that edge and 20 ms of continuous free signal. Those 20 ms may overlap
 // the end of the lock. A later edge while locked does not move the deadline.
+// PSF/1 ARM drops every current lock without emitting a crossing. A sensor
+// that is already free stays free. A locked sensor then needs only the usual
+// 20 ms of continuous free signal; it does not also wait out the 1000 ms.
+// The lock during a running race is unchanged.
 //
 // At startup a sensor that is already broken waits until it has been free for
 // 20 ms. That blocked state is not a crossing.
@@ -196,7 +200,38 @@ struct Engine {
     }
     return true;
   }
+
+  // Drop locks at the race release. No crossing is emitted and accepted_ns
+  // is not moved, so a hidden edge does not become a new deadline.
+  void rearm() {
+    for (int index = 0; index < sensor_count; ++index) {
+      Channel& channel = channels[index];
+      if (channel.state != kLocked) {
+        continue;
+      }
+      channel.state = kWaitFree;
+      channel.timing_stable = false;
+    }
+  }
 };
+
+// Host line "PSF/1 ARM". Exact, apart from one optional trailing CR.
+inline bool parse_arm_command(const char* line) {
+  if (line == nullptr) {
+    return false;
+  }
+  const char* expected = "PSF/1 ARM";
+  for (size_t index = 0; expected[index] != '\0'; ++index) {
+    if (line[index] != expected[index]) {
+      return false;
+    }
+  }
+  const char* cursor = line + 9;
+  if (*cursor == '\r') {
+    cursor += 1;
+  }
+  return *cursor == '\0';
+}
 
 // Host line "PSF/1 SYNC <seq>". Returns false for every other line, including
 // event lines and comments. The sketch answers a rejected line with ERROR PROTOCOL.

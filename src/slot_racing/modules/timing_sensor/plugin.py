@@ -6,6 +6,7 @@ from typing import ClassVar
 from slot_racing.core.catalog import TrackCatalog
 from slot_racing.core.events import RaceFinished, RaceStarted, TimingDecision
 from slot_racing.core.plugin import NavigationItem, Plugin, PluginContext, PluginManifest
+from slot_racing.core.start_window import StartWindowWatch
 from slot_racing.core.storage import Database
 from slot_racing.core.timing import TimingSetupService
 from slot_racing.modules.timing_sensor.devices import attach_remembered_serial, list_serial_devices
@@ -152,7 +153,8 @@ class SensorTimingPlugin(Plugin):
             "sensor.delivery.received": "Empfangen",
             "sensor.delivery.published": "Veröffentlicht",
             "sensor.delivery.lap": "Runde abgeschlossen",
-            "sensor.engine.started": "Von der Engine empfangen: Rundenstart",
+            "sensor.engine.started": "Initialisierung: Runde begonnen, nicht gezählt",
+            "sensor.observation.false_start": "Frühstart vor der Rennfreigabe, keine Runde",
             "sensor.engine.sector": "Von der Engine empfangen: Sektor, keine volle Runde",
             "sensor.engine.completed": "Runde abgeschlossen",
             "sensor.engine.invalid_timestamp": "Von der Engine abgelehnt: Zeit vor dem Rennstart",
@@ -240,6 +242,7 @@ class SensorTimingPlugin(Plugin):
         self._link: SensorLink | None = link
         self._remember_device(link, store)
         self._watch_race(context, link)
+        context.register_service(StartWindowWatch, link)
         context.register_timing_provider(
             SensorTimingFactory(link, store, lambda: context.find_service(TrackCatalog))
         )
@@ -285,6 +288,11 @@ class SensorTimingPlugin(Plugin):
                 event.timing_provider,
                 event.timestamp_ns,
             )
+            # The engine publishes this before it binds the reader. Lines already
+            # in the buffer are classified by their capture time, not by now.
+            link.close_start_window(event.timestamp_ns)
+            if event.timing_provider == "sensor":
+                link.request_arm()
 
         def finished(event: RaceFinished) -> None:
             link.note_race_finished(int(event.race_id))
