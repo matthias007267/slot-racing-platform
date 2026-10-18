@@ -162,6 +162,11 @@ class SerialSensorTransport:
         self._lines: deque[str] = deque()
         self._warnings: deque[str] = deque()
         self._samples: deque[SyncSample] = deque()
+        self._line_times: deque[int] = deque()
+        self._sync_rejections: deque[tuple[int, str, int, int, int]] = deque(maxlen=_MAX_LINES)
+        self.last_receive_times: tuple[int, ...] = ()
+        self._line_clock = 0
+        self._session_id: str | None = None
         self._pending_send: dict[int, int] = {}
         self._rounds_left = 0
         self._host_seq = 0
@@ -195,6 +200,7 @@ class SerialSensorTransport:
         self._fault = None
         self._identified = False
         self._opened_ns = self._clock()
+        self._session_id = None
         self._buffer.clear()
         if self._stream is None:
             self._stream = _open_serial(self._port)
@@ -219,16 +225,32 @@ class SerialSensorTransport:
             thread.join(timeout=2)
         with self._lock:
             self._lines.clear()
+            self._line_times.clear()
             self._samples.clear()
+            self._sync_rejections.clear()
             self._pending_send.clear()
             self._rounds_left = 0
 
     def read_available(self) -> tuple[str, ...]:
+        """Lines waiting now. ``last_receive_times`` holds the host read time of each.
+
+        The read time is diagnostic. It is never the capture time of a crossing.
+        """
         if not self._identified or self._fault is not None:
+            self.last_receive_times = ()
             return ()
         with self._lock:
             found = tuple(self._lines)
+            self.last_receive_times = tuple(self._line_times)
             self._lines.clear()
+            self._line_times.clear()
+            return found
+
+    def take_sync_rejections(self) -> tuple[tuple[int, str, int, int, int], ...]:
+        """Replies that did not become a sample: request id, reason, host receive, device rx, tx."""
+        with self._lock:
+            found = tuple(self._sync_rejections)
+            self._sync_rejections.clear()
             return found
 
     def take_warnings(self) -> tuple[str, ...]:
@@ -343,6 +365,7 @@ class SerialSensorTransport:
             self._fail("disconnected")
 
     def _consume(self, data: bytes) -> None:
+        self._line_clock = self._clock()
         self._buffer.extend(data)
         while True:
             newline = self._buffer.find(b"\n")
@@ -373,6 +396,8 @@ class SerialSensorTransport:
             if self._identified:
                 self._queue_line(text)
             return
+        if isinstance(message, HelloFrame):
+            self._note_session(message.session_id)
         if not self._identified:
             if isinstance(message, HelloFrame):
                 self._identified = True
@@ -382,15 +407,49 @@ class SerialSensorTransport:
             self._complete_sync(message)
         self._queue_line(text)
 
+    def _note_session(self, session_id: str) -> None:
+        """A new controller session ends every exchange that was started in the old one."""
+        if self._session_id is not None and self._session_id != session_id:
+            with self._lock:
+                self._pending_send.clear()
+                self._samples.clear()
+        self._session_id = session_id
+
     def _complete_sync(self, message: SyncReply) -> None:
+        received = self._clock()
         with self._lock:
             sent = self._pending_send.pop(message.host_seq, None)
-        if sent is None:
-            return
-        received = self._clock()
+            mismatch = self._session_id is not None and message.session_id != self._session_id
+            if sent is None or mismatch:
+                self._sync_rejections.append(
+                    (
+                        message.host_seq,
+                        "session_mismatch" if mismatch else "unknown_request",
+                        received,
+                        message.device_rx_ns,
+                        message.device_tx_ns,
+                    )
+                )
+                return
         try:
-            sample = SyncSample(sent, received, message.device_rx_ns, message.device_tx_ns)
+            sample = SyncSample(
+                sent,
+                received,
+                message.device_rx_ns,
+                message.device_tx_ns,
+                request_id=message.host_seq,
+            )
         except (TypeError, ValueError):
+            with self._lock:
+                self._sync_rejections.append(
+                    (
+                        message.host_seq,
+                        "invalid_stamps",
+                        received,
+                        message.device_rx_ns,
+                        message.device_tx_ns,
+                    )
+                )
             return
         with self._lock:
             self._samples.append(sample)
@@ -401,6 +460,7 @@ class SerialSensorTransport:
                 self._warnings.append("host_overflow")
                 return
             self._lines.append(text)
+            self._line_times.append(self._line_clock)
 
     def _warn(self, code: str) -> None:
         with self._lock:

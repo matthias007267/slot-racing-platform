@@ -41,6 +41,7 @@ class SyncSample:
     host_recv_ns: int
     device_rx_ns: int
     device_tx_ns: int
+    request_id: int = 0
 
     def __post_init__(self) -> None:
         for name in ("host_send_ns", "host_recv_ns", "device_rx_ns", "device_tx_ns"):
@@ -49,6 +50,8 @@ class SyncSample:
                 raise TypeError(f"{name} must be an int")
         if self.host_recv_ns < self.host_send_ns or self.device_tx_ns < self.device_rx_ns:
             raise ValueError("clock sample times must not run backwards")
+        if isinstance(self.request_id, bool) or not isinstance(self.request_id, int):
+            raise TypeError("request_id must be an int")
 
     @property
     def uncertainty_ns(self) -> int:
@@ -66,6 +69,11 @@ class SyncSample:
     def host_mid_ns(self) -> int:
         return (self.host_send_ns + self.host_recv_ns) // 2
 
+    @property
+    def offset_ns(self) -> int:
+        """Host minus device at the middle of the exchange. Not the installed mapping."""
+        return self.host_mid_ns - self.device_mid_ns
+
 
 @dataclass(frozen=True, slots=True)
 class SyncQuality:
@@ -76,6 +84,27 @@ class SyncQuality:
     numerator: int
     denominator: int
     accepted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ClockReport:
+    """Why the window has the rate it has. Diagnostic only; the mapping does not read it.
+
+    ``rate_status`` is ``fitted`` when the slope was used, ``too_few_samples``,
+    ``span_too_short`` while the samples cover less than the minimum span, and
+    ``skew_rejected`` when the raw slope is beyond the allowed error and the rate
+    stays 1. ``skew_ppm`` is host time over device time minus one, in parts per
+    million, whenever it could be computed, even when it was rejected. A positive
+    value means the device clock runs slow.
+    """
+
+    rate_status: str
+    skew_ppm: int | None
+    span_ns: int
+    window_samples: int
+    anchor_host_mid_ns: int | None
+    anchor_device_mid_ns: int | None
+    anchor_uncertainty_ns: int | None
 
 
 class ClockSync:
@@ -93,6 +122,10 @@ class ClockSync:
         self.quality = SyncQuality(0, 0, 1, 1, False)
         self.mapping = None
         self.rewound = False
+
+    def report(self) -> ClockReport:
+        """The rate decision and the anchor of the current window."""
+        return clock_report(tuple(self._samples))
 
     def add(self, sample: SyncSample) -> str | None:
         """Add one sample. A device clock that steps backwards clears the window.
@@ -130,6 +163,38 @@ def evaluate(samples: tuple[SyncSample, ...]) -> SyncQuality:
         numerator,
         denominator,
         len(good) >= MIN_SAMPLES,
+    )
+
+
+def clock_report(samples: tuple[SyncSample, ...]) -> ClockReport:
+    """The rate decision for ``samples`` and the sample the offset is anchored on."""
+    good = tuple(sample for sample in samples if sample.uncertainty_ns <= MAX_UNCERTAINTY_NS)
+    if not good:
+        return ClockReport("too_few_samples", None, 0, 0, None, None, None)
+    earliest = min(good, key=lambda sample: sample.device_mid_ns)
+    latest = max(good, key=lambda sample: sample.device_mid_ns)
+    device_delta = latest.device_mid_ns - earliest.device_mid_ns
+    host_delta = latest.host_mid_ns - earliest.host_mid_ns
+    skew = None
+    if device_delta > 0:
+        skew = (host_delta - device_delta) * 1_000_000 // device_delta
+    anchor = min(good, key=lambda sample: sample.uncertainty_ns)
+    if len(good) < MIN_SAMPLES:
+        status = "too_few_samples"
+    elif device_delta < MIN_RATE_SPAN_NS or host_delta <= 0:
+        status = "span_too_short"
+    elif _rate(good) == (1, 1) and host_delta != device_delta:
+        status = "skew_rejected"
+    else:
+        status = "fitted"
+    return ClockReport(
+        status,
+        skew,
+        device_delta,
+        len(good),
+        anchor.host_mid_ns,
+        anchor.device_mid_ns,
+        anchor.uncertainty_ns,
     )
 
 

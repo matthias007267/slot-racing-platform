@@ -42,6 +42,13 @@ class StartWindowWatch(Protocol):
     def cancel_start_window(self, race_id: int | None = None) -> None:
         """The start sequence ended without a release. No crossing is a false start any more."""
 
+    def note_start_marker(self, race_id: int, name: str, at_ns: int) -> None:
+        """Record one instant of the start sequence for the diagnostic export only.
+
+        The names are ``ui_release_requested``, ``ui_lights_out`` (the view changed its state,
+        not a measured screen paint), ``timer_start`` and ``engine_release``.
+        """
+
     def clear_false_starts(self) -> None:
         """Drop the notices. The open window, if any, stays open."""
 

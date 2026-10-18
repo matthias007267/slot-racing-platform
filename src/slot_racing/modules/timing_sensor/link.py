@@ -9,8 +9,9 @@ until the next race is bound; the clock is not carried across that break.
 
 from __future__ import annotations
 
+import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -19,7 +20,9 @@ from slot_racing.core.start_window import FalseStartNotice
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
 from slot_racing.modules.timing_sensor.clock_sync import (
     MAX_UNCERTAINTY_NS,
+    ClockReport,
     ClockSync,
+    SyncSample,
     continuous_mapping,
 )
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment
@@ -40,6 +43,12 @@ from slot_racing.modules.timing_sensor.transport import (
 SENSOR_SOURCE_ID = "sensor"
 _LOG_LIMIT = 400
 _CHANGE_LIMIT = 80
+_SYNC_LOG_LIMIT = 64
+_MAPPING_LOG_LIMIT = 24
+_START_HISTORY_LIMIT = 8
+START_MARKERS = frozenset(
+    {"ui_release_requested", "ui_lights_out", "timer_start", "engine_release"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,14 +78,24 @@ class SensorLink:
         *,
         mode: TransportMode = TransportMode.SIMULATION,
         source_id: str = SENSOR_SOURCE_ID,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         if not isinstance(mode, TransportMode):
             raise TypeError("mode must be a TransportMode")
         self._transport = transport if transport is not None else SimulatedSensorTransport()
         self._mode = mode
         self._source_id = source_id
+        self._clock = clock if clock is not None else time.perf_counter_ns
         self._holders = 0
         self._state = IntakeState()
+        self._sync_log: deque[dict[str, object]] = deque(maxlen=_SYNC_LOG_LIMIT)
+        self._mapping_log: deque[dict[str, object]] = deque(maxlen=_MAPPING_LOG_LIMIT)
+        self._mapping_serial = 0
+        self._mapping_id: int | None = None
+        self._mapping_installed_ns: int | None = None
+        self._window_sequence = 0
+        self._start_markers: dict[str, int] = {}
+        self._start_history: deque[dict[str, object]] = deque(maxlen=_START_HISTORY_LIMIT)
         self._assignments: dict[str, SensorAssignment] = {}
         self._logical: dict[str, str] = {}
         self._race_lanes: frozenset[int] = frozenset()
@@ -222,6 +241,7 @@ class SensorLink:
         *,
         resume: bool = True,
         origin: str = "manual",
+        source: str = "",
     ) -> None:
         """Replace the clock assignment. Arrival time is not an input.
 
@@ -235,6 +255,7 @@ class SensorLink:
         self._state = with_mapping(self._state, mapping)
         self._mapping_key = (mapping.offset_ns, mapping.numerator, mapping.denominator)
         self._mapping_origin = origin
+        self._record_mapping(mapping, origin, source or origin)
         if origin == "manual":
             self._last_device_ns = None
             self._last_host_ns = None
@@ -243,11 +264,33 @@ class SensorLink:
             self._mute_race = False
             self._mute_reason = ""
 
+    def _record_mapping(self, mapping: DeviceClockMapping, origin: str, source: str) -> None:
+        """Give the installed mapping an id and keep what it was made from."""
+        self._mapping_serial += 1
+        self._mapping_id = self._mapping_serial
+        self._mapping_installed_ns = self._clock()
+        report = self._estimator.report() if origin == "measured" else None
+        entry: dict[str, object] = {
+            "id": self._mapping_id,
+            "origin": origin,
+            "source": source,
+            "installed_host_ns": self._mapping_installed_ns,
+            "offset_ns": mapping.offset_ns,
+            "numerator": mapping.numerator,
+            "denominator": mapping.denominator,
+            "session_id": None if self._identity is None else self._identity.session_id,
+        }
+        if report is not None:
+            entry.update(_report_fields(report))
+        self._mapping_log.append(entry)
+
     def lose_time_mapping(self) -> None:
         """Lock capture. A mapping that was valid is shown as lost, not as a continued clock."""
         self._state = without_mapping(self._state)
         self._mapping_key = None
         self._mapping_origin = ""
+        self._mapping_id = None
+        self._mapping_installed_ns = None
         self._change("mapping", "cleared")
 
     def bind_view(
@@ -343,13 +386,28 @@ class SensorLink:
             raise ValueError("race_id must be a positive int")
         if isinstance(opened_ns, bool) or not isinstance(opened_ns, int) or opened_ns < 0:
             raise ValueError("opened_ns must be a non-negative int")
+        if self._window_opened_ns is not None:
+            self._start_history.append(self.start_window_state())
         self._false_starts.clear()
         self._held.clear()
+        self._window_sequence += 1
+        self._start_markers = {}
         self._window_race_id = race_id
         self._window_opened_ns = opened_ns
         self._window_released_ns = None
         self._window_open = True
         self._change("start_window", f"opened {opened_ns}")
+
+    def note_start_marker(self, race_id: int, name: str, at_ns: int) -> None:
+        """Remember one instant of the start sequence. It is a record and not an input.
+
+        ``ui_lights_out`` is when the view changed its state, not when the screen was painted.
+        """
+        if name not in START_MARKERS or race_id != self._window_race_id:
+            return
+        if isinstance(at_ns, bool) or not isinstance(at_ns, int) or at_ns < 0:
+            return
+        self._start_markers.setdefault(name, at_ns)
 
     def poll_start_window(self) -> tuple[FalseStartNotice, ...]:
         """Read waiting lines. Capture time, not the time this method runs, decides."""
@@ -382,9 +440,11 @@ class SensorLink:
             return
         if race_id is not None and race_id != self._window_race_id:
             return
+        self._start_history.append({**self.start_window_state(), "cancelled": True})
         self._window_race_id = None
         self._window_opened_ns = None
         self._window_open = False
+        self._start_markers = {}
         self._false_starts.clear()
         self._held.clear()
         self._change("start_window", "cancelled")
@@ -397,7 +457,27 @@ class SensorLink:
             "release_ns": self._window_released_ns,
             "active": self._window_open,
             "false_starts": len(self._false_starts),
+            "sequence_id": self._window_sequence,
+            "markers": dict(self._start_markers),
         }
+
+    def start_sequences(self) -> list[dict[str, object]]:
+        """The last start sequences, oldest first, ending with the current one."""
+        found = list(self._start_history)
+        if self._window_opened_ns is not None:
+            found.append(self.start_window_state())
+        return found
+
+    def sync_log(self) -> list[dict[str, object]]:
+        """Raw clock exchanges and why each was or was not used. Diagnostic only."""
+        return list(self._sync_log)
+
+    def mapping_log(self) -> list[dict[str, object]]:
+        """The mappings installed recently, with the window they came from."""
+        return list(self._mapping_log)
+
+    def clock_report(self) -> ClockReport:
+        return self._estimator.report()
 
     def clear_false_starts(self) -> None:
         """Drop the displayed notices. An open window keeps watching."""
@@ -424,7 +504,11 @@ class SensorLink:
         if not self._transport.connected:
             return
         lanes = self._race_lanes if self._race_bound else None
-        for line in self._transport.read_available():
+        lines = self._transport.read_available()
+        stamps = getattr(self._transport, "last_receive_times", ())
+        if not isinstance(stamps, tuple) or len(stamps) != len(lines):
+            stamps = ()
+        for position, line in enumerate(lines):
             sync_before = self._state.sync
             state, observation, event = consume_line(
                 self._state,
@@ -437,6 +521,10 @@ class SensorLink:
             self._state = state
             if observation is None:
                 continue
+            if observation.sequence is not None:
+                observation = self._with_provenance(
+                    observation, stamps[position] if stamps else None
+                )
             if event is not None and self._race_bound and self._mute_race:
                 observation = replace(
                     observation,
@@ -471,6 +559,20 @@ class SensorLink:
                 continue
             self._pending.append(event)
         self._apply_sync()
+
+    def _with_provenance(
+        self, observation: SensorObservation, received_ns: int | None
+    ) -> SensorObservation:
+        """Name the mapping that converted this line. Receive time is not a capture time."""
+        installed = self._mapping_installed_ns
+        reference = received_ns if received_ns is not None else self._clock()
+        age = None if installed is None else reference - installed
+        return replace(
+            observation,
+            receive_host_ns=received_ns,
+            mapping_id=self._mapping_id if observation.host_time_ns is not None else None,
+            mapping_age_ns=age if observation.host_time_ns is not None else None,
+        )
 
     def take_events(self) -> tuple[SensorTriggered, ...]:
         """Race events parsed since the last take. The diagnostic page does not call this."""
@@ -568,8 +670,21 @@ class SensorLink:
         if not isinstance(transport, SerialSensorTransport):
             return
         rewound = False
+        session = None if self._identity is None else self._identity.session_id
+        for request_id, why, received, device_rx, device_tx in transport.take_sync_rejections():
+            self._sync_log.append(
+                {
+                    "request_id": request_id,
+                    "session_id": session,
+                    "outcome": why,
+                    "host_recv_ns": received,
+                    "device_rx_ns": device_rx,
+                    "device_tx_ns": device_tx,
+                }
+            )
         for sample in transport.take_sync_samples():
             reason = self._estimator.add(sample)
+            self._sync_log.append(_sync_entry(sample, session, reason, self._estimator.report()))
             if reason == "uncertainty":
                 detail = f"{sample.uncertainty_ns} ns, Grenze {MAX_UNCERTAINTY_NS} ns"
                 self._observations.append(
@@ -597,6 +712,7 @@ class SensorLink:
         if race_holds_measured and (self._last_device_ns is None or self._last_host_ns is None):
             return
         installed = mapping
+        source = "sync_window"
         if (
             self._mapping_origin == "measured"
             and self._last_device_ns is not None
@@ -610,10 +726,11 @@ class SensorLink:
             if anchored is None:
                 return
             installed = anchored
+            source = "continuous"
         key = (installed.offset_ns, installed.numerator, installed.denominator)
         if key == self._mapping_key:
             return
-        self.set_time_mapping(installed, resume=False, origin="measured")
+        self.set_time_mapping(installed, resume=False, origin="measured", source=source)
         quality = self._estimator.quality
         detail = f"{quality.samples} {quality.uncertainty_ns}"
         self._change("sync", f"measured {detail}")
@@ -761,6 +878,35 @@ class SensorLink:
 
     def _change(self, kind: str, detail: str) -> None:
         self._changes.append((kind, detail))
+
+
+def _report_fields(report: ClockReport) -> dict[str, object]:
+    return {
+        "rate_status": report.rate_status,
+        "raw_skew_ppm": report.skew_ppm,
+        "window_span_ns": report.span_ns,
+        "window_samples": report.window_samples,
+        "anchor_host_mid_ns": report.anchor_host_mid_ns,
+        "anchor_device_mid_ns": report.anchor_device_mid_ns,
+        "anchor_uncertainty_ns": report.anchor_uncertainty_ns,
+    }
+
+
+def _sync_entry(
+    sample: SyncSample, session: str | None, reason: str | None, report: ClockReport
+) -> dict[str, object]:
+    return {
+        "request_id": sample.request_id,
+        "session_id": session,
+        "outcome": reason or "accepted",
+        "host_send_ns": sample.host_send_ns,
+        "host_recv_ns": sample.host_recv_ns,
+        "device_rx_ns": sample.device_rx_ns,
+        "device_tx_ns": sample.device_tx_ns,
+        "offset_ns": sample.offset_ns,
+        "uncertainty_ns": sample.uncertainty_ns,
+        "rate_status_after": report.rate_status,
+    }
 
 
 def _hello_from_observation(observation: SensorObservation) -> HelloFrame | None:

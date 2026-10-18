@@ -345,6 +345,8 @@ class LiveRaceView(QWidget):
     def _show_cue(self, step: object) -> None:
         if not isinstance(step, StartCueStep):
             return
+        if step.phase is StartPhase.START_SIGNAL:
+            self._mark_start("ui_lights_out")
         self.start_lights.show_lights(step.lit_lights, go=step.phase is StartPhase.START_SIGNAL)
         self._place_lights()
         if step.phase is StartPhase.COUNTING:
@@ -432,6 +434,7 @@ class LiveRaceView(QWidget):
         cue = self._cue
         if runner is None or runner.status is not RaceStatus.CREATED:
             return
+        self._mark_start("ui_release_requested")
         try:
             self._controller.start_prepared()
         except Exception as error:
@@ -443,6 +446,8 @@ class LiveRaceView(QWidget):
             self._cancel_cue()
             return
         started = runner.started_at_ns
+        if started is not None:
+            self._mark_start("engine_release", started)
         if cue is not None and started is not None:
             cue.record_actual_start(started)
             self._remember_deviation(cue)
@@ -454,7 +459,16 @@ class LiveRaceView(QWidget):
         ):
             self._hand_commit(cue.schedule.sequence_id, started)
         self._timer.start()
+        self._mark_start("timer_start")
         self.refresh()
+
+    def _mark_start(self, name: str, at_ns: int | None = None) -> None:
+        runner = self._runner
+        watch = self._start_watch()
+        if runner is None or watch is None:
+            return
+        stamp = self._controller.clock.now_ns() if at_ns is None else at_ns
+        watch.note_start_marker(int(runner.race.id), name, stamp)
 
     def _remember_deviation(self, cue: StartCue) -> None:
         deviation = cue.deviation

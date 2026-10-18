@@ -65,7 +65,7 @@ void load_session() {
 void send_hello() {
   Serial.print(F("PSF/1 HELLO "));
   print_session();
-  Serial.print(F(" mega2560 1.0.0 ns 2 s1 s2\n"));
+  Serial.print(F(" mega2560 1.1.0 ns 2 s1 s2\n"));
 }
 
 void send_status(const __FlashStringHelper* code) {
