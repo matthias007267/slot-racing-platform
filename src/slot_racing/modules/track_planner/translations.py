@@ -106,6 +106,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Neue Platzierungen erhalten ihre zugehörigen Bauteile. "
             "Bestehende Strecken bleiben unverändert, auch wenn sie geöffnet werden."
         ),
+        "planner.refresh_snap": "Snapping aktualisieren",
+        "planner.refresh_snap.hint": (
+            "Richtet jedes Bauteil an dem Nachbarn aus, an dem es schon anliegt. "
+            "Begonnen wird bei Rundenzähler, Blackbox und Control Unit. "
+            "Fehlt so ein Bauteil, startet die Ausrichtung an einem anderen Teil. "
+            "Der Andockabstand wird dafür nicht verwendet."
+        ),
+        "planner.refresh_snap.none": "Die Bauteile liegen bereits an ihren Nachbarn.",
+        "planner.refresh_snap.done": "Die Bauteile wurden an ihren Nachbarn ausgerichtet.",
         "planner.start_straight": "Startgerade",
         "planner.start_straight.missing": "Es ist keine Startgerade platziert.",
         "planner.missing_parts": (

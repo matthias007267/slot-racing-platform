@@ -38,6 +38,7 @@ from slot_racing.modules.track_planner.parts import (
     join_pose,
     neighbor_pose,
     origin_from_midpoint,
+    refresh_snap_poses,
     rotate_xy,
     signed_delta_deg,
     snap_pose,
@@ -933,6 +934,30 @@ def attach_accessory(
             attachment_slot=slot,
         ),
     )
+
+
+def refresh_snapping(plan: TrackPlan, catalog: Mapping[int, PartSpec]) -> TrackPlan:
+    """Seat every placed part on the neighbour it already touches.
+
+    Start and connection straights stay where they are and the walk begins
+    there. The plan dock radius is not used, so a part that merely lies inside
+    that radius is not carried to another joint.
+    """
+    poses = refresh_snap_poses(_placed(plan, catalog))
+    if not poses:
+        return plan
+    updated = tuple(
+        replace(
+            instance,
+            x_mm=poses[instance.id].x_mm,
+            y_mm=poses[instance.id].y_mm,
+            rotation_z_deg=poses[instance.id].rotation_z_deg,
+        )
+        if instance.id in poses
+        else instance
+        for instance in plan.instances
+    )
+    return _replace(plan, instances=updated)
 
 
 def reposition_instance(

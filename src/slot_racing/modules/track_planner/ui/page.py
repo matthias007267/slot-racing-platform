@@ -68,6 +68,7 @@ from slot_racing.modules.track_planner.document import (
     place_instance,
     place_start_finish,
     place_template,
+    refresh_snapping,
     remove_instances,
     remove_marker,
     remove_piece,
@@ -335,6 +336,11 @@ class PlannerPage(QWidget):
         set_role(self.auto_on_place, "ghost")
         self.auto_on_place.setToolTip(translate("planner.auto_on_place.hint"))
         self.auto_on_place.toggled.connect(self._auto_on_place_changed)
+        self.refresh_snap = QPushButton(translate("planner.refresh_snap"))
+        self.refresh_snap.setObjectName("planner-refresh-snap")
+        set_role(self.refresh_snap, "ghost")
+        self.refresh_snap.setToolTip(translate("planner.refresh_snap.hint"))
+        self.refresh_snap.clicked.connect(self._refresh_snapping)
         self.mode_unlimited = QPushButton(translate("planner.mode.unlimited"))
         self.mode_unlimited.setObjectName("planner-mode-unlimited")
         self.mode_unlimited.setCheckable(True)
@@ -573,6 +579,7 @@ class PlannerPage(QWidget):
             self.short_labels,
             self.auto_connect,
             self.auto_on_place,
+            self.refresh_snap,
             self.jump_button,
             self.discard_button,
             self.reset_button,
@@ -1238,6 +1245,7 @@ class PlannerPage(QWidget):
             self.delete_button,
             self.auto_connect,
             self.auto_on_place,
+            self.refresh_snap,
             self.place_part,
             self.add_part,
             self.edit_part,
@@ -1521,6 +1529,21 @@ class PlannerPage(QWidget):
             if instance.id not in {item.id for item in self._plan.instances}
         ]
         self._commit(updated, fresh)
+
+    def _refresh_snapping(self) -> None:
+        """One undo step. Parts move only onto the neighbour they already touch."""
+        if self._lane_count < 1:
+            return
+        try:
+            updated = refresh_snapping(self._plan, self._parts)
+        except Exception as error:
+            self._report(error)
+            return
+        if updated == self._plan:
+            self.status.show_info(self._translator.translate("planner.refresh_snap.none"))
+            return
+        self._commit(updated, self.canvas.selected_ids())
+        self.status.show_info(self._translator.translate("planner.refresh_snap.done"))
 
     def _auto_on_place_changed(self, enabled: bool) -> None:
         """Session switch. Turning it on does not rewrite the open plan."""

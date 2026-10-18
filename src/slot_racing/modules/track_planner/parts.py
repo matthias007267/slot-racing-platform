@@ -73,6 +73,25 @@ LANE_PITCH_MM = 100.0
 # land on the right joint. Occupancy stays at 1 mm and 20° of opposing heading.
 DEFAULT_GRID_MM = 100.0
 DEFAULT_SNAP_MM = 200.0
+# Refresh seating. A new drop still uses the plan dock radius above. This pass
+# only closes a joint that is already the neighbouring one, so a 200 mm search
+# cannot carry a part to a different place on the plan.
+REFRESH_SNAP_MM = 30.0
+REFRESH_SNAP_DEG = 15.0
+# A seated joint may sit away from the part origin. The origin itself still has
+# to stay near where the part already was.
+REFRESH_ORIGIN_MM = 80.0
+# Start and connection straights the refresh walks out from. The source ids are
+# Rundenzähler, Blackbox and Control Unit. The names cover a copy that kept the
+# designation, including the double-l spelling of Control Unit.
+SNAP_ANCHOR_SOURCE_IDS = frozenset(
+    {
+        "69dbddea-14d4-4de6-b9ad-c266f10d9e37",
+        "cf1dfdd3-1cfa-4b8f-8d7a-304232ee5de8",
+        "6e7e4f2a-a8c6-40ed-b70c-a5441b257fc0",
+    }
+)
+_SNAP_ANCHOR_NAMES = frozenset({"rundenzähler", "blackbox", "control unit", "controll unit"})
 # Untyped source edges whose lengths differ by more than this do not mate.
 EDGE_LENGTH_TOLERANCE_MM = 0.1
 # The current (since 2021) electronic connecting rail. Not the older plug piece 20515/20520.
@@ -1359,6 +1378,215 @@ def _grid_selection(
     }
 
 
+def refresh_snap_poses(
+    placed: Sequence[tuple[PartInstance, PartSpec]],
+) -> dict[str, Pose]:
+    """Seat every part on the neighbour it already touches.
+
+    Anchors are the start and connection straights. They stay put, and the
+    walk begins there. A plan with none of them starts at the first part.
+    Each later part moves only when one free joint is already within
+    :data:`REFRESH_SNAP_MM` and :data:`REFRESH_SNAP_DEG` of a compatible joint
+    on a seated part. The plan dock radius is not consulted. A separate run of
+    track that never comes that close keeps its own starting part.
+    """
+    if not placed:
+        return {}
+    current = {instance.id: instance for instance, _spec in placed}
+    specs = {instance.id: spec for instance, spec in placed}
+    order = [instance.id for instance, _spec in placed]
+    rank = {instance_id: index for index, instance_id in enumerate(order)}
+    anchors = [instance_id for instance_id in order if is_snap_anchor(specs[instance_id])]
+    seeds = anchors or [order[0]]
+    pending = set(order)
+    fixed: set[str] = set()
+    ends = _RefreshEnds()
+    moved: dict[str, Pose] = {}
+    for seed in seeds:
+        pending.discard(seed)
+        fixed.add(seed)
+        _index_refresh_part(ends, current[seed], specs[seed])
+    _consume_refresh_meetings(ends, seeds, current, specs)
+    while pending:
+        choice = _nearest_refresh(pending, ends, current, specs, rank)
+        if choice is None:
+            seed = next(instance_id for instance_id in order if instance_id in pending)
+            pending.remove(seed)
+            fixed.add(seed)
+            _index_refresh_part(ends, current[seed], specs[seed])
+            _consume_refresh_meetings(ends, (seed,), current, specs)
+            continue
+        instance_id, pose = choice
+        pending.remove(instance_id)
+        fixed.add(instance_id)
+        instance = current[instance_id]
+        if _refresh_pose_changed(instance, pose):
+            current[instance_id] = replace(
+                instance,
+                x_mm=pose.x_mm,
+                y_mm=pose.y_mm,
+                rotation_z_deg=pose.rotation_z_deg,
+            )
+            moved[instance_id] = pose
+        _index_refresh_part(ends, current[instance_id], specs[instance_id])
+        _consume_refresh_meetings(ends, (instance_id,), current, specs)
+    return moved
+
+
+@dataclass(frozen=True, slots=True)
+class _RefreshEnd:
+    instance_id: str
+    index: int
+    x_mm: float
+    y_mm: float
+    direction_deg: float
+
+
+class _RefreshEnds:
+    """Free joints of parts that are already seated, bucketed by the refresh radius."""
+
+    def __init__(self) -> None:
+        self._cells: dict[tuple[int, int], list[_RefreshEnd]] = {}
+        self._by_key: dict[tuple[str, int], _RefreshEnd] = {}
+
+    def add(self, end: _RefreshEnd) -> None:
+        key = (end.instance_id, end.index)
+        if key in self._by_key:
+            return
+        self._by_key[key] = end
+        self._cells.setdefault(_refresh_bucket(end.x_mm, end.y_mm), []).append(end)
+
+    def holds(self, instance_id: str, index: int) -> bool:
+        return (instance_id, index) in self._by_key
+
+    def discard(self, instance_id: str, index: int) -> None:
+        end = self._by_key.pop((instance_id, index), None)
+        if end is None:
+            return
+        bucket = _refresh_bucket(end.x_mm, end.y_mm)
+        stored = self._cells.get(bucket)
+        if stored is None:
+            return
+        self._cells[bucket] = [item for item in stored if item is not end]
+
+    def nearby(self, x_mm: float, y_mm: float, radius_mm: float) -> tuple[_RefreshEnd, ...]:
+        reach = math.floor(radius_mm / REFRESH_SNAP_MM) + 1
+        cx, cy = _refresh_bucket(x_mm, y_mm)
+        found: list[_RefreshEnd] = []
+        for ix in range(cx - reach, cx + reach + 1):
+            for iy in range(cy - reach, cy + reach + 1):
+                found.extend(self._cells.get((ix, iy), ()))
+        return tuple(found)
+
+
+def _refresh_bucket(x_mm: float, y_mm: float) -> tuple[int, int]:
+    return (math.floor(x_mm / REFRESH_SNAP_MM), math.floor(y_mm / REFRESH_SNAP_MM))
+
+
+def _opposing_turn(left_deg: float, right_deg: float) -> float:
+    return abs(((left_deg - right_deg) % 360.0) - 180.0)
+
+
+def _refresh_pose_changed(instance: PartInstance, pose: Pose) -> bool:
+    return (
+        abs(instance.x_mm - pose.x_mm) > 0.05
+        or abs(instance.y_mm - pose.y_mm) > 0.05
+        or abs(signed_delta_deg(instance.rotation_z_deg, pose.rotation_z_deg)) > 0.05
+    )
+
+
+def _index_refresh_part(ends: _RefreshEnds, instance: PartInstance, spec: PartSpec) -> None:
+    for index, joint in enumerate(spec.connectors):
+        x_mm, y_mm = world_xy(instance, joint.x_mm, joint.y_mm)
+        ends.add(
+            _RefreshEnd(
+                instance.id,
+                index,
+                x_mm,
+                y_mm,
+                normalize_deg(joint.direction_deg + instance.rotation_z_deg),
+            )
+        )
+
+
+def _consume_refresh_meetings(
+    ends: _RefreshEnds,
+    instance_ids: Sequence[str],
+    current: Mapping[str, PartInstance],
+    specs: Mapping[str, PartSpec],
+) -> None:
+    """Drop joints that already meet a seated neighbour, so a third part cannot take them."""
+    for instance_id in instance_ids:
+        spec = specs[instance_id]
+        instance = current[instance_id]
+        for index, joint in enumerate(spec.connectors):
+            if not ends.holds(instance_id, index):
+                continue
+            point = world_xy(instance, joint.x_mm, joint.y_mm)
+            direction = normalize_deg(joint.direction_deg + instance.rotation_z_deg)
+            for other in ends.nearby(point[0], point[1], 1.0):
+                if other.instance_id == instance_id:
+                    continue
+                if math.hypot(point[0] - other.x_mm, point[1] - other.y_mm) > 1.0:
+                    continue
+                if _opposing_turn(direction, other.direction_deg) > 20.0:
+                    continue
+                other_joint = specs[other.instance_id].connectors[other.index]
+                if not connectors_compatible(
+                    joint,
+                    other_joint,
+                    left_source=spec.source_id,
+                    right_source=specs[other.instance_id].source_id,
+                ):
+                    continue
+                ends.discard(instance_id, index)
+                ends.discard(other.instance_id, other.index)
+                break
+
+
+def _nearest_refresh(
+    pending: set[str],
+    ends: _RefreshEnds,
+    current: Mapping[str, PartInstance],
+    specs: Mapping[str, PartSpec],
+    rank: Mapping[str, int],
+) -> tuple[str, Pose] | None:
+    best: tuple[tuple[float, float, int, int], str, Pose] | None = None
+    for moving_id in pending:
+        moving = current[moving_id]
+        spec = specs[moving_id]
+        for joint in spec.connectors:
+            point = world_xy(moving, joint.x_mm, joint.y_mm)
+            direction = normalize_deg(joint.direction_deg + moving.rotation_z_deg)
+            for other in ends.nearby(point[0], point[1], REFRESH_SNAP_MM):
+                distance = math.hypot(point[0] - other.x_mm, point[1] - other.y_mm)
+                if distance > REFRESH_SNAP_MM:
+                    continue
+                turn = _opposing_turn(direction, other.direction_deg)
+                if turn > REFRESH_SNAP_DEG:
+                    continue
+                target_joint = specs[other.instance_id].connectors[other.index]
+                if not connectors_compatible(
+                    joint,
+                    target_joint,
+                    left_source=spec.source_id,
+                    right_source=specs[other.instance_id].source_id,
+                ):
+                    continue
+                pose = join_pose(current[other.instance_id], target_joint, joint)
+                shift = math.hypot(pose.x_mm - moving.x_mm, pose.y_mm - moving.y_mm)
+                pose_turn = abs(signed_delta_deg(moving.rotation_z_deg, pose.rotation_z_deg))
+                if shift > REFRESH_ORIGIN_MM or pose_turn > REFRESH_SNAP_DEG:
+                    continue
+                key = (distance, turn, rank[moving_id], rank[other.instance_id])
+                if best is None or key < best[0]:
+                    best = (key, moving_id, pose)
+    if best is None:
+        return None
+    _key, moving_id, pose = best
+    return moving_id, pose
+
+
 def lane_world_point(
     instance: PartInstance, connector: ConnectorSpec, lane: int
 ) -> tuple[float, float]:
@@ -1649,6 +1877,13 @@ START_PIECE_KEY = "20509.2"
 def is_start_finish_part(spec: PartSpec) -> bool:
     """The start straight is the only start and finish piece."""
     return spec.piece_key == START_PIECE_KEY
+
+
+def is_snap_anchor(spec: PartSpec) -> bool:
+    """A start or connection straight the refresh leaves fixed and walks out from."""
+    if spec.source_id in SNAP_ANCHOR_SOURCE_IDS:
+        return True
+    return spec.name.casefold() in _SNAP_ANCHOR_NAMES
 
 
 def chicane_paths(length: float) -> tuple[SlotPath, ...]:
