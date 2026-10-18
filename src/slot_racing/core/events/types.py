@@ -77,6 +77,18 @@ class MeasurementsReset(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class HeatAttemptDiscarded(Event):
+    """One heat attempt was thrown away and will be driven again.
+
+    The heat keeps its sequence. Stored laps and times of that attempt are
+    removed. The following heats stay in their order.
+    """
+
+    race_id: RaceId
+    heat_id: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RaceFinished(Event):
     race_id: RaceId
     results: tuple[ParticipantResult, ...]

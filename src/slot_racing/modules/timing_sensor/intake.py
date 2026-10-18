@@ -19,6 +19,7 @@ from slot_racing.modules.timing_sensor.clock_map import (
 )
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment
 from slot_racing.modules.timing_sensor.protocol import (
+    ArmCommand,
     ErrorFrame,
     HelloFrame,
     SensorFrame,
@@ -84,7 +85,7 @@ def consume_line(
             SensorObservation(kind="parse_error", raw=line, detail=error.reason),
             None,
         )
-    if message is None or isinstance(message, SyncCommand):
+    if message is None or isinstance(message, (SyncCommand, ArmCommand)):
         return state, None, None
     if isinstance(message, HelloFrame):
         return _hello(state, message, line)

@@ -81,6 +81,8 @@ class Lap(Base):
     lap_number: Mapped[int]
     lap_time_ns: Mapped[int] = mapped_column(BigInteger)
     race_time_ns: Mapped[int] = mapped_column(BigInteger)
+    heat_id: Mapped[int | None] = mapped_column(ForeignKey("race_heats.id", ondelete="SET NULL"))
+    """Heat this lap belongs to. Empty for laps stored before heats were linked."""
     statistics_excluded: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false()
     )

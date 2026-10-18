@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from slot_racing.core.events import SensorTriggered
+from slot_racing.core.start_window import FalseStartNotice
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
 from slot_racing.modules.timing_sensor.clock_sync import (
     MAX_UNCERTAINTY_NS,
@@ -93,6 +94,14 @@ class SensorLink:
         self._mapping_origin = ""
         self._changes: deque[tuple[str, str]] = deque(maxlen=_CHANGE_LIMIT)
         self._race_watch = RaceWatch()
+        self._window_race_id: int | None = None
+        self._window_opened_ns: int | None = None
+        self._window_released_ns: int | None = None
+        self._window_open = False
+        self._false_starts: list[FalseStartNotice] = []
+        self._held: deque[SensorTriggered] = deque()
+        self._race_view: tuple[dict[str, SensorAssignment], dict[str, str]] | None = None
+        self._restore_race_view = False
 
     @property
     def mode(self) -> TransportMode:
@@ -252,20 +261,47 @@ class SensorLink:
         self._assignments = {item.physical_id: item for item in assignments}
         self._logical = dict(logical_ids)
 
+    def remember_race_view(
+        self,
+        assignments: tuple[SensorAssignment, ...] | list[SensorAssignment],
+        logical_ids: Mapping[str, str],
+    ) -> None:
+        """Keep the race map until the race binds it.
+
+        The diagnostic page repaints its own map while the lights are counting.
+        That repaint must not hide the sensors this race is about to use.
+        """
+        self._race_view = (
+            {item.physical_id: item for item in assignments},
+            dict(logical_ids),
+        )
+        self._restore_race_view = True
+        self._restore_race_view_now()
+
     def bind_race(
         self,
         assignments: tuple[SensorAssignment, ...] | list[SensorAssignment],
         logical_ids: Mapping[str, str],
         lanes: frozenset[int],
     ) -> None:
-        """Snapshot used until :meth:`unbind_race`. Events queued earlier are dropped."""
+        """Snapshot used until :meth:`unbind_race`.
+
+        A crossing captured at or after the release and already read stays queued.
+        Anything else that was waiting is dropped.
+        """
         self._assignments = {item.physical_id: item for item in assignments}
         self._logical = dict(logical_ids)
         self._race_lanes = lanes
         self._race_bound = True
+        self._restore_race_view = False
         self._mute_race = False
         self._mute_reason = ""
         self._pending.clear()
+        # A crossing captured at or after the release can already be in the
+        # reader. It is a race event. One captured earlier was held back as a
+        # false start and is not put back.
+        self._pending.extend(self._held)
+        self._held.clear()
         self._change("race_bound", "bound")
 
     def unbind_race(self) -> None:
@@ -284,6 +320,48 @@ class SensorLink:
             raise RuntimeError("simulation mode requires the simulator transport")
         transport.inject(line)
 
+    def request_arm(self) -> None:
+        """Ask a serial controller to clear its sensor locks. Other readers ignore this."""
+        transport = self._transport
+        if isinstance(transport, SerialSensorTransport):
+            transport.request_arm()
+
+    def open_start_window(self, race_id: int, opened_ns: int) -> None:
+        """Start watching for false starts. Notices from the previous attempt are dropped."""
+        if isinstance(race_id, bool) or not isinstance(race_id, int) or race_id < 1:
+            raise ValueError("race_id must be a positive int")
+        if isinstance(opened_ns, bool) or not isinstance(opened_ns, int) or opened_ns < 0:
+            raise ValueError("opened_ns must be a non-negative int")
+        self._false_starts.clear()
+        self._held.clear()
+        self._window_race_id = race_id
+        self._window_opened_ns = opened_ns
+        self._window_released_ns = None
+        self._window_open = True
+
+    def poll_start_window(self) -> tuple[FalseStartNotice, ...]:
+        """Read waiting lines. Capture time, not the time this method runs, decides."""
+        self.poll()
+        return self.false_starts()
+
+    def close_start_window(self, released_ns: int) -> tuple[FalseStartNotice, ...]:
+        """Release the race at ``released_ns`` and classify lines already in the reader."""
+        if isinstance(released_ns, bool) or not isinstance(released_ns, int) or released_ns < 0:
+            return self.false_starts()
+        if self._window_opened_ns is None:
+            return self.false_starts()
+        self._window_released_ns = released_ns
+        self._window_open = False
+        self.poll()
+        return self.false_starts()
+
+    def clear_false_starts(self) -> None:
+        """Drop the displayed notices. An open window keeps watching."""
+        self._false_starts.clear()
+
+    def false_starts(self) -> tuple[FalseStartNotice, ...]:
+        return tuple(self._false_starts)
+
     def request_sync(self, rounds: int = 5) -> None:
         """Ask the serial reader for a few clock exchanges."""
         transport = self._transport
@@ -297,6 +375,7 @@ class SensorLink:
         A line that would be a race event is not queued while this race is muted.
         The log then names that reason instead of calling the line accepted.
         """
+        self._restore_race_view_now()
         self._note_transport()
         if not self._transport.connected:
             return
@@ -328,6 +407,19 @@ class SensorLink:
                 )
             elif observation.kind in {"accepted", "gap"}:
                 observation = replace(observation, delivery="received")
+            notice = None if event is None else self._false_start_notice(event)
+            if notice is not None:
+                observation = replace(
+                    observation,
+                    kind="false_start",
+                    delivery="withheld",
+                    detail="before_release",
+                )
+                self._remember_false_start(notice)
+                event = None
+            elif event is not None and self._hold_until_bound(event):
+                self._held.append(event)
+                event = None
             self._remember(observation)
             self._observations.append(observation)
             if event is None or not self._race_bound or self._mute_race:
@@ -525,6 +617,58 @@ class SensorLink:
         self._mapping_key = None
         self._mapping_origin = ""
         self._pending.clear()
+        self._held.clear()
+        self._false_starts.clear()
+        self._window_race_id = None
+        self._window_opened_ns = None
+        self._window_released_ns = None
+        self._window_open = False
+        self._race_view = None
+        self._restore_race_view = False
+
+    def _false_start_notice(self, event: SensorTriggered) -> FalseStartNotice | None:
+        """A crossing inside the start window and before the release.
+
+        ``event.timestamp_ns`` is the mapped capture time. Lines read after the
+        release still count as false starts when that capture time is earlier.
+        """
+        opened = self._window_opened_ns
+        race_id = self._window_race_id
+        if opened is None or race_id is None or event.timestamp_ns < opened:
+            return None
+        released = self._window_released_ns
+        if released is None:
+            if not self._window_open:
+                return None
+        elif event.timestamp_ns >= released:
+            return None
+        return FalseStartNotice(
+            race_id=race_id,
+            lane=event.lane,
+            position_id=event.position_id,
+            captured_ns=event.timestamp_ns,
+        )
+
+    def _remember_false_start(self, notice: FalseStartNotice) -> None:
+        key = (notice.lane, notice.captured_ns)
+        if any((item.lane, item.captured_ns) == key for item in self._false_starts):
+            return
+        self._false_starts.append(notice)
+        self._change("false_start", str(notice.lane))
+
+    def _restore_race_view_now(self) -> None:
+        if self._race_bound or not self._restore_race_view or self._race_view is None:
+            return
+        assignments, logical = self._race_view
+        self._assignments = dict(assignments)
+        self._logical = dict(logical)
+
+    def _hold_until_bound(self, event: SensorTriggered) -> bool:
+        """Keep a post-release crossing that arrived before the race reader was bound."""
+        released = self._window_released_ns
+        if self._race_bound or released is None or self._window_open:
+            return False
+        return event.timestamp_ns >= released
 
     def _change(self, kind: str, detail: str) -> None:
         self._changes.append((kind, detail))

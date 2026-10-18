@@ -5,13 +5,21 @@ Races without heat rows keep the single session they had before heats existed.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from slot_racing.core.domain import RaceId, RaceMode, RaceStatus
 from slot_racing.core.domain.scoring import time_trial_stored_key
 from slot_racing.core.errors import ValidationError
-from slot_racing.modules.races.models import Lap, Race, RaceHeat, RaceHeatEntry, RaceParticipant
+from slot_racing.modules.races.models import (
+    Lap,
+    Race,
+    RaceHeat,
+    RaceHeatEntry,
+    RaceParticipant,
+    Sector,
+    TimeMeasurement,
+)
 from slot_racing.modules.races.planning import build_rotation, pairwise_cycle, plan_remaining
 from slot_racing.modules.races.types import HeatBriefing, HeatInfo, HeatSeat, LaneChange
 
@@ -156,6 +164,51 @@ def assign_next(session: Session, race: Race) -> bool:
     heat.status = RUNNING
     session.flush()
     return True
+
+
+def current_heat_id(session: Session, race_id: int) -> int | None:
+    """The heat that is on track, if one is."""
+    heat = _running(session, race_id)
+    return None if heat is None else heat.id
+
+
+def reopen_attempt(session: Session, race: Race) -> int:
+    """Put the current or just finished heat back on the plan and drop its attempt.
+
+    The heat keeps its sequence. Later heats are not moved and none is inserted.
+    Laps that have no heat id are left alone. A disqualification stays.
+    """
+    heat = _running(session, race.id)
+    if heat is None:
+        heat = session.scalar(
+            select(RaceHeat)
+            .where(RaceHeat.race_id == race.id, RaceHeat.status == COMPLETED)
+            .order_by(RaceHeat.sequence.desc())
+            .limit(1)
+        )
+    if heat is None:
+        raise ValidationError("error.race.not_repeatable")
+    lap_ids = list(session.scalars(select(Lap.id).where(Lap.heat_id == heat.id)))
+    if lap_ids:
+        session.execute(delete(Sector).where(Sector.lap_id.in_(lap_ids)))
+        session.execute(delete(TimeMeasurement).where(TimeMeasurement.lap_id.in_(lap_ids)))
+        session.execute(delete(Lap).where(Lap.id.in_(lap_ids)))
+        session.flush()
+    for participant in _participants(session, race.id):
+        laps = _laps(session, participant.id)
+        participant.laps_completed = len(laps)
+        participant.best_lap_ns = min((lap.lap_time_ns for lap in laps), default=None)
+        participant.total_time_ns = laps[-1].race_time_ns if laps else None
+        participant.finished = False
+        participant.final_position = None
+        participant.lane = None
+    for entry in _entries(session, heat.id):
+        entry.state = ASSIGNED
+    heat.status = PLANNED
+    race.status = RaceStatus.READY.value
+    race.finished_at = None
+    session.flush()
+    return heat.id
 
 
 def revert_running_heat(session: Session, race: Race) -> None:

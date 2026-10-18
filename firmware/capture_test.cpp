@@ -115,6 +115,47 @@ void test_buffer_overflow_keeps_the_sequence_and_the_lock() {
   expect(engine.buffer.dropped == 1, "ignored edge is not another drop");
 }
 
+void test_rearm_clears_a_lock_without_emitting() {
+  slot_sensor::Engine engine(2);
+  engine.service(0, 0, false);
+  engine.service(0, slot_sensor::kStableFreeNs, false);
+  engine.service(1, 0, false);
+  engine.service(1, slot_sensor::kStableFreeNs, false);
+  expect(engine.channels[0].state == slot_sensor::kOpen, "sensor 1 opens");
+  expect(engine.channels[1].state == slot_sensor::kOpen, "sensor 2 opens");
+  expect(engine.accept_rising(0, 1000), "false start locks sensor 1");
+  expect(engine.channels[0].state == slot_sensor::kLocked, "sensor 1 is locked");
+  uint64_t accepted = engine.channels[0].accepted_ns;
+  uint32_t sequence = engine.sequence;
+  expect(!engine.accept_rising(0, 2000), "the lock hides the next rising edge");
+  expect(engine.channels[0].accepted_ns == accepted, "a hidden edge does not move the lock");
+  engine.rearm();
+  expect(engine.buffer.count == 1, "rearm emits nothing");
+  expect(engine.sequence == sequence, "rearm takes no sequence");
+  expect(engine.channels[0].state == slot_sensor::kWaitFree, "locked sensor waits until it is free");
+  expect(engine.channels[0].accepted_ns == accepted, "rearm keeps the old deadline");
+  expect(engine.channels[1].state == slot_sensor::kOpen, "an open sensor stays open");
+  expect(!engine.accept_rising(0, 3000), "rearm does not invent an open sensor");
+  uint64_t reopen_ns = accepted + slot_sensor::kStableFreeNs;
+  expect(reopen_ns < accepted + slot_sensor::kLockoutNs, "stable free ends inside the old lock");
+  engine.service(0, accepted, false);
+  engine.service(0, reopen_ns, false);
+  expect(engine.channels[0].state == slot_sensor::kOpen, "free for 20 ms opens without the lock");
+  expect(engine.buffer.count == 1, "opening after rearm is not a crossing");
+  expect(engine.accept_rising(0, static_cast<uint32_t>(reopen_ns / slot_sensor::kNanosPerMicro) + 1),
+         "the next rising edge is captured");
+  expect(engine.accept_rising(1, 22000), "the sensor that stayed open still captures");
+}
+
+void test_arm_command_parser() {
+  expect(slot_sensor::parse_arm_command("PSF/1 ARM"), "arm command");
+  expect(slot_sensor::parse_arm_command("PSF/1 ARM\r"), "arm tolerates CR");
+  expect(!slot_sensor::parse_arm_command("PSF/1 ARM 1"), "arm has no arguments");
+  expect(!slot_sensor::parse_arm_command("PSF/1 SYNC 1"), "sync is not arm");
+  expect(!slot_sensor::parse_arm_command("PSF/1 b0001 1 10 s1"), "event is not arm");
+  expect(!slot_sensor::parse_arm_command(nullptr), "null is not arm");
+}
+
 void test_sync_command_parser() {
   uint32_t seq = 0;
   expect(slot_sensor::parse_sync_command("PSF/1 SYNC 12", &seq) && seq == 12, "sync command");
@@ -134,6 +175,8 @@ int main() {
   test_free_glitch_restarts_only_the_stable_window();
   test_sensors_are_independent();
   test_buffer_overflow_keeps_the_sequence_and_the_lock();
+  test_rearm_clears_a_lock_without_emitting();
+  test_arm_command_parser();
   test_sync_command_parser();
   if (g_failures != 0) {
     fprintf(stderr, "%d firmware capture checks failed\n", g_failures);

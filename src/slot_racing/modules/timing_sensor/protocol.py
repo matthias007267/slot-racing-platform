@@ -34,6 +34,13 @@ counter was extended; timestamps stay monotonic). Error codes are ``BUFFER``
 (detail is how many accepted edges were dropped), ``TIME`` (the clock was
 lost) and ``PROTOCOL``.
 
+The host may also write ``PSF/1 ARM`` once, when the race is released. The
+device then clears each sensor's lock without emitting a crossing. A sensor
+that is already free stays free. A locked sensor waits until the beam has been
+free for the usual stable interval before it can capture again. The in-race
+lock is unchanged. A device that does not know ``ARM`` answers ``ERROR PROTOCOL``;
+that answer does not drop the clock mapping.
+
 Clock exchange. The host writes::
 
     PSF/1 SYNC <host_seq>
@@ -69,7 +76,7 @@ PROVISIONAL_PROTOCOL_NOTE = (
 BAUD_RATE = 115200
 TIME_UNIT = "ns"
 _TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-_RESERVED = frozenset({"HELLO", "STATUS", "ERROR", "SYNC"})
+_RESERVED = frozenset({"HELLO", "STATUS", "ERROR", "SYNC", "ARM"})
 _STATUS_CODES = frozenset({"WAIT", "READY", "TIME"})
 _ERROR_CODES = frozenset({"BUFFER", "TIME", "PROTOCOL"})
 _MAX_SENSORS = 6
@@ -122,6 +129,11 @@ class ErrorFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class ArmCommand:
+    """Host request to clear sensor locks at the race release. It is not a crossing."""
+
+
+@dataclass(frozen=True, slots=True)
 class SyncCommand:
     """Host request. ``host_seq`` pairs the reply with the host send time."""
 
@@ -138,7 +150,9 @@ class SyncReply:
     device_tx_ns: int
 
 
-type SensorMessage = SensorFrame | HelloFrame | StatusFrame | ErrorFrame | SyncCommand | SyncReply
+type SensorMessage = (
+    SensorFrame | HelloFrame | StatusFrame | ErrorFrame | SyncCommand | SyncReply | ArmCommand
+)
 
 
 def is_sensor_token(value: str) -> bool:
@@ -180,6 +194,11 @@ def format_error(frame: ErrorFrame) -> str:
     return f"{PROTOCOL} ERROR {frame.session_id} {frame.code} {frame.detail}"
 
 
+def format_arm_command() -> str:
+    """Ask the device to clear sensor locks without emitting a crossing."""
+    return f"{PROTOCOL} ARM"
+
+
 def format_sync_command(host_seq: int) -> str:
     """The host's clock request. The device does not need the host's clock."""
     _require_seq(host_seq)
@@ -210,6 +229,8 @@ def parse_sensor_line(line: str) -> SensorMessage | None:
     parts = text.split()
     if parts[0] != PROTOCOL:
         raise SensorProtocolError("version")
+    if len(parts) == 2 and parts[1] == "ARM":
+        return ArmCommand()
     if len(parts) == 3 and parts[1] == "SYNC":
         return SyncCommand(_require_seq(_non_negative(parts[2], "sequence")))
     if len(parts) == 4 and parts[1] == "STATUS":

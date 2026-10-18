@@ -15,6 +15,7 @@ from slot_racing.uikit.theme import SPACE, set_role
 
 class HeatGate(QWidget):
     start_requested = Signal()
+    repeat_requested = Signal()
     postpone_requested = Signal(int)
     disqualify_requested = Signal(int)
 
@@ -39,8 +40,11 @@ class HeatGate(QWidget):
         self.postpone_button.setObjectName("heat-postpone")
         self.disqualify_button = QPushButton(tr("race.heat.disqualify"))
         self.disqualify_button.setObjectName("heat-disqualify")
+        self.repeat_button = QPushButton(tr("race.heat.repeat"))
+        self.repeat_button.setObjectName("heat-repeat")
         self.start_button = QPushButton(tr("race.heat.start"))
         self.start_button.setObjectName("heat-start")
+        set_role(self.repeat_button, "secondary")
         set_role(self.start_button, "primary")
         set_role(self.postpone_button, "secondary")
         set_role(self.disqualify_button, "danger")
@@ -53,9 +57,11 @@ class HeatGate(QWidget):
         layout.addWidget(self.driver_combo)
         layout.addWidget(self.postpone_button)
         layout.addWidget(self.disqualify_button)
+        layout.addWidget(self.repeat_button)
         layout.addWidget(self.start_button)
         self.postpone_button.clicked.connect(self._postpone)
         self.disqualify_button.clicked.connect(self._disqualify)
+        self.repeat_button.clicked.connect(self.repeat_requested.emit)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.hide()
 

@@ -748,6 +748,14 @@ class RaceService(RaceHistoryCatalog):
             return info
         return replace(info, participants=seated)
 
+    def reopen_current_heat(self, race_id: RaceId) -> int:
+        """Discard the current or just finished heat attempt and plan that same heat again."""
+        with self._database.session() as session:
+            race = self._load(session, race_id)
+            if race.mode == RaceMode.FREE.value or not heats.uses_heats(session, race.id):
+                raise ValidationError("error.race.not_repeatable")
+            return heats.reopen_attempt(session, race)
+
     def cancel_heat_start(self, race_id: RaceId) -> None:
         with self._database.session() as session:
             race = self._load(session, race_id)
@@ -1106,6 +1114,11 @@ class RaceService(RaceHistoryCatalog):
             if heats.uses_heats(session, race_id):
                 stored_number = heats.stored_lap_number(session, participant.id, lap_number)
                 race_time = heats.heat_time_base(session, race_id, participant) + race_time_ns
+            heat_id = (
+                heats.current_heat_id(session, race.id)
+                if heats.uses_heats(session, race.id)
+                else None
+            )
             lap = Lap(
                 race_id=race_id,
                 participant_id=participant.id,
@@ -1113,6 +1126,7 @@ class RaceService(RaceHistoryCatalog):
                 lap_number=stored_number,
                 lap_time_ns=lap_time_ns,
                 race_time_ns=race_time,
+                heat_id=heat_id,
             )
             session.add(lap)
             session.flush()

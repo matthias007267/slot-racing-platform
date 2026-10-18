@@ -114,6 +114,8 @@ def _event(item: SensorObservation, race_started_ns: int | None) -> dict[str, ob
 
 
 def _stage(item: SensorObservation) -> _Stage:
+    if item.kind == "false_start":
+        return {"stage": "false_start", "reason": "before_release"}
     if item.engine_result == "completed":
         return {"stage": "lap", "reason": "completed"}
     if item.engine_result:

@@ -3,6 +3,7 @@
 from slot_racing.core.events.base import Event
 from slot_racing.core.events.bus import EventBus, EventDispatcher, Subscription
 from slot_racing.core.events.types import (
+    HeatAttemptDiscarded,
     LapCompleted,
     LapStarted,
     MeasurementsReset,
@@ -24,6 +25,7 @@ __all__ = [
     "Event",
     "EventBus",
     "EventDispatcher",
+    "HeatAttemptDiscarded",
     "LapCompleted",
     "LapStarted",
     "MeasurementsReset",
