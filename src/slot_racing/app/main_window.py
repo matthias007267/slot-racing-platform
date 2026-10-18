@@ -25,6 +25,7 @@ from slot_racing.app.diagnostics_ui import (
     bind_crash_dialog,
     offer_previous_session,
 )
+from slot_racing.app.icon import install_application_icon
 from slot_racing.app.pages import MessagePage, SettingsPage
 from slot_racing.app.runtime import Runtime
 from slot_racing.app.shell import ShellHeader, Sidebar, timing_state
@@ -95,6 +96,7 @@ class MainWindow(QMainWindow):
         self._runtime = runtime
         self._tr = runtime.translator.translate
         self.setWindowTitle(self._tr("app.title"))
+        install_application_icon(self)
         self.setMinimumSize(_MIN_WINDOW_WIDTH, _MIN_WINDOW_HEIGHT)
         self._start_fullscreen = False
         self._restore_window_geometry()
