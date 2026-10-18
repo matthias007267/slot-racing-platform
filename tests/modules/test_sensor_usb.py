@@ -12,6 +12,7 @@ import pytest
 from slot_racing.core.events import SensorTriggered
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, SyncStatus
 from slot_racing.modules.timing_sensor.clock_sync import (
+    MAX_UNCERTAINTY_NS,
     MIN_RATE_SPAN_NS,
     SyncSample,
     continuous_mapping,
@@ -49,9 +50,10 @@ _HELLO = HelloFrame("b0001", "mega2560", "1.0.0", "ns", ("s1", "s2"))
 class _Clock:
     def __init__(self) -> None:
         self.now = 10_000_000_000
+        self.step = 1_000_000
 
     def __call__(self) -> int:
-        self.now += 1_000_000
+        self.now += self.step
         return self.now
 
 
@@ -164,8 +166,23 @@ def test_clock_exchange_uses_both_directions_and_does_not_jump_published_time() 
     assert mapping is not None
     assert quality.numerator == 1 and quality.denominator == 1
     assert quality.uncertainty_ns < 2_000_000
-    noisy = SyncSample(0, 100_000_000, 0, 1_000)
+    slow = tuple(
+        SyncSample(
+            host_send_ns=1_000_000_000 + index * 1_000_000_000,
+            host_recv_ns=1_000_000_000 + index * 1_000_000_000 + 80_000_000,
+            device_rx_ns=500_000_000 + index * 1_000_000_000,
+            device_tx_ns=500_000_000 + index * 1_000_000_000 + 200_000,
+        )
+        for index in range(4)
+    )
+    slow_quality, slow_mapping = mapping_for(slow)
+    assert slow_quality.accepted
+    assert slow_quality.uncertainty_ns > 20_000_000
+    assert slow_quality.uncertainty_ns <= MAX_UNCERTAINTY_NS
+    assert slow_mapping is not None
+    noisy = SyncSample(0, 800_000_000, 0, 1_000)
     quality, mapping = mapping_for((*samples, noisy))
+    assert noisy.uncertainty_ns > MAX_UNCERTAINTY_NS
     assert quality.samples == 4
     assert mapping is not None
     drifted = (
@@ -404,6 +421,86 @@ def test_a_manual_serial_mapping_does_not_stay_the_race_clock() -> None:
     assert link.mapping_origin == "measured"
     assert mapping is not None and mapping.offset_ns != 0
     link.release()
+
+
+def test_a_windows_paced_exchange_still_measures_the_usb_clock() -> None:
+    """A round trip slower than 20 ms is a real USB reply, not a missing clock."""
+    clock = _Clock()
+    clock.step = 80_000_000
+    stream = _Stream()
+    transport = SerialSensorTransport("COM7", stream=stream, clock=clock, sync_gap_ns=0)
+    link = SensorLink(transport, mode=TransportMode.SERIAL)
+    link.acquire()
+    _identify(link, transport, stream)
+    _sync(link, transport)
+    samples, uncertainty, _numerator, _denominator, accepted = link.sync_quality
+    assert accepted
+    assert samples >= 4
+    assert uncertainty > 20_000_000
+    assert link.mapping_origin == "measured"
+    factory = SensorTimingFactory(link, SensorConfigurationStore(migrated_database()))
+    assert factory.availability().available is True
+    link.release()
+
+
+def test_an_absurdly_slow_exchange_is_reported_and_not_used() -> None:
+    clock = _Clock()
+    clock.step = 800_000_000
+    stream = _Stream()
+    transport = SerialSensorTransport("COM7", stream=stream, clock=clock, sync_gap_ns=0)
+    link = SensorLink(transport, mode=TransportMode.SERIAL)
+    link.acquire()
+    _identify(link, transport, stream)
+    _sync(link, transport)
+    assert link.mapping_origin == ""
+    assert link.sync is SyncStatus.UNSYNCHRONIZED
+    rejected = [item for item in link.observations if item.kind == "sync_rejected"]
+    assert rejected
+    assert all(int(item.detail.split()[0]) > MAX_UNCERTAINTY_NS for item in rejected)
+    factory = SensorTimingFactory(link, SensorConfigurationStore(migrated_database()))
+    availability = factory.availability()
+    assert availability.available is False
+    assert availability.reason_key == "error.timing_provider.sensor_time_unmeasured"
+    link.release()
+
+
+def test_a_short_reply_is_read_without_waiting_for_a_full_buffer() -> None:
+    class _Port:
+        def __init__(self) -> None:
+            self.buf = bytearray()
+            self.sizes: list[int] = []
+            self.closed = False
+
+        @property
+        def in_waiting(self) -> int:
+            return len(self.buf)
+
+        def read(self, size: int) -> bytes:
+            self.sizes.append(size)
+            if not self.buf:
+                return b""
+            take = min(size, len(self.buf))
+            found = bytes(self.buf[:take])
+            del self.buf[:take]
+            return found
+
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+        def close(self) -> None:
+            self.closed = True
+
+    port = _Port()
+    hello = (format_hello(_HELLO) + "\n").encode("ascii")
+    port.buf.extend(hello)
+    transport = SerialSensorTransport("COM7", stream=port, clock=_Clock(), sync_gap_ns=0)
+    transport.open()
+    transport.pump()
+    assert transport.connected is True
+    assert port.sizes == [len(hello)]
+    transport.pump()
+    assert port.sizes[-1] == 1
+    transport.close()
 
 
 def test_a_finished_exchange_is_applied_when_a_race_checks_availability() -> None:

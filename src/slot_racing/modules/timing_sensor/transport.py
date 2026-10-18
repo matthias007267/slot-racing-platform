@@ -262,12 +262,31 @@ class SerialSensorTransport:
             return
         self._write_sync()
         try:
-            data = self._stream.read(_READ_SIZE)
+            data = self._stream.read(self._read_amount())
         except Exception:
             self._fail("disconnected")
             return
         if data:
             self._consume(data)
+
+    def _read_amount(self) -> int:
+        """How many bytes to ask for on this pass.
+
+        pyserial waits until the requested count arrives or the timeout ends.
+        A sync reply is much shorter than 256 bytes, so that wait was added to
+        every exchange and the sample looked too uncertain to keep. When the
+        port can say how many bytes are already buffered, read those. Otherwise
+        read one byte, which returns as soon as the reply starts.
+        """
+        stream = self._stream
+        if stream is None:
+            return _READ_SIZE
+        waiting = getattr(stream, "in_waiting", None)
+        if isinstance(waiting, bool) or not isinstance(waiting, int):
+            return _READ_SIZE
+        if waiting > 0:
+            return min(waiting, _READ_SIZE)
+        return 1
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -394,6 +413,17 @@ class _SerialPort:
 
     def __init__(self, port: object) -> None:
         self._port = port
+
+    @property
+    def in_waiting(self) -> int:
+        """Bytes already buffered. Zero when the port cannot answer."""
+        try:
+            waiting = self._port.in_waiting  # type: ignore[attr-defined]
+        except Exception:
+            return 0
+        if isinstance(waiting, bool) or not isinstance(waiting, int) or waiting < 1:
+            return 0
+        return waiting
 
     def read(self, size: int) -> bytes:
         data = self._port.read(size)  # type: ignore[attr-defined]

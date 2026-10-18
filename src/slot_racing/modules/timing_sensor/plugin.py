@@ -179,6 +179,7 @@ class SensorTimingPlugin(Plugin):
             "sensor.observation.time_fault": "Geräteuhr verloren",
             "sensor.observation.protocol": "Protokollfehler",
             "sensor.observation.sync": "Zeittausch {detail}",
+            "sensor.observation.sync_rejected": "Zeittausch verworfen: Unsicherheit {detail}",
             "sensor.observation.disconnect": "Verbindung verloren",
             "sensor.observation.handshake": "Handshake: {detail}",
             "sensor.observation.partial": "Unvollständige Zeile",
