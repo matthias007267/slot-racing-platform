@@ -194,7 +194,8 @@ def test_an_open_port_is_not_replaced_when_the_page_is_shown(qtbot: QtBot) -> No
     assert link._state.mapping == mapping
     assert link.mapping_origin == "measured"
     assert stream.closed is False
-    page.port_combo.setCurrentText("COM11")
+    assert page.port_combo.findData("COM11") >= 0
+    page.port_combo.setCurrentIndex(page.port_combo.findData("COM11"))
     _click(page, "sensor-connect")
     assert page.status.text() == "Der USB-Leser ist bereits verbunden."
     assert link._state.mapping == mapping

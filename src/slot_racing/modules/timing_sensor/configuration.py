@@ -92,7 +92,7 @@ class TrackSensorMap(BaseModel):
 class DeviceHint(BaseModel):
     """Stable facts used to recognise one USB device again.
 
-    A display name is not an identity and is not stored. ``port`` is only the
+    A display name is not an identity and is not stored here. ``port`` is only the
     last port name. It is not enough when more than one candidate matches.
     """
 
@@ -128,6 +128,28 @@ class DeviceHint(BaseModel):
         return text
 
 
+class BoardName(BaseModel):
+    """A name the user gave one USB sensor board.
+
+    The name is the label shown in the program. The device hint is the identity.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    device: DeviceHint
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("board name must be text")
+        text = " ".join(value.split())
+        if not text or len(text) > 40:
+            raise ValueError("board name must be 1 to 40 characters")
+        return text
+
+
 class SensorConfiguration(BaseModel):
     """Sensor preferences and every track's physical sensor map.
 
@@ -142,6 +164,7 @@ class SensorConfiguration(BaseModel):
     mode: OperatingMode = "simulation"
     port: str = ""
     device: DeviceHint = Field(default_factory=DeviceHint)
+    board_names: tuple[BoardName, ...] = ()
     track_id: int | None = None
     developer_expanded: bool = False
     developer_offset_ns: int | None = None
@@ -210,6 +233,16 @@ class SensorConfiguration(BaseModel):
             raise ValueError("developer numerator must be positive")
         if self.developer_denominator is not None and self.developer_denominator < 1:
             raise ValueError("developer denominator must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def _unique_board_names(self) -> SensorConfiguration:
+        seen: set[str] = set()
+        for board in self.board_names:
+            key = board.name.casefold()
+            if key in seen:
+                raise ValueError("board names must be unique")
+            seen.add(key)
         return self
 
     @model_validator(mode="after")

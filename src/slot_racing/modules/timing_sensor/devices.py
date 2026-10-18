@@ -4,6 +4,9 @@ A unique serial number wins even when the port name changed. Without one, a
 unique vendor/product pair and USB location can still match. A port name is
 only used when exactly one listed port has it and the stored vendor ids do not
 contradict that port. Several candidates are not guessed.
+
+A name the user gave the board is only a label. It follows the same identity
+and is never used to decide which port matches.
 """
 
 from __future__ import annotations
@@ -12,7 +15,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from slot_racing.modules.timing_sensor.configuration import DeviceHint, SensorConfiguration
+from pydantic import ValidationError
+
+from slot_racing.modules.timing_sensor.configuration import (
+    BoardName,
+    DeviceHint,
+    SensorConfiguration,
+)
 from slot_racing.modules.timing_sensor.link import SensorLink, TransportMode
 from slot_racing.modules.timing_sensor.transport import SensorTransport, SerialSensorTransport
 
@@ -27,13 +36,18 @@ class PortMatch(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SerialPortFacts:
-    """Stable OS facts for one serial port. The friendly name is intentionally absent."""
+    """OS facts for one serial port.
+
+    ``product`` and ``manufacturer`` are display titles. They are not an identity.
+    """
 
     device: str
     vid: int | None = None
     pid: int | None = None
     serial_number: str = ""
     location: str = ""
+    product: str = ""
+    manufacturer: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -52,6 +66,14 @@ class SerialPortFacts:
             value = getattr(self, name)
             if not isinstance(value, str) or any(character.isspace() for character in value):
                 raise ValueError(f"{name} must be a single token")
+        for name in ("product", "manufacturer"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or len(value) > 128
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ValueError(f"{name} must be a short display title")
 
 
 def list_serial_devices() -> tuple[SerialPortFacts, ...]:
@@ -73,6 +95,12 @@ def list_serial_devices() -> tuple[SerialPortFacts, ...]:
                     pid=_usb_id(getattr(port, "pid", None)),
                     serial_number=_token(getattr(port, "serial_number", None)),
                     location=_token(getattr(port, "location", None)),
+                    product=_usb_title(
+                        getattr(port, "product", None),
+                        getattr(port, "description", None),
+                        device,
+                    ),
+                    manufacturer=_display(getattr(port, "manufacturer", None)),
                 )
             )
         except ValueError:
@@ -115,6 +143,65 @@ def classify_port(
             return PortMatch.ABSENT, None
         return PortMatch.UNIQUE, only
     return PortMatch.ABSENT, None
+
+
+def usb_interface_label(facts: SerialPortFacts) -> str:
+    """A label for one listed interface before the user has named that board."""
+    title = facts.product or facts.manufacturer
+    detail = facts.serial_number or facts.location
+    if title and detail:
+        return f"{title} · {detail}"
+    if title or detail:
+        return title or detail
+    return facts.device
+
+
+def port_choice_label(
+    facts: SerialPortFacts, boards: Sequence[BoardName], ports: Sequence[SerialPortFacts]
+) -> str:
+    """The user's name for this board, or the USB interface label."""
+    named = board_name_for(facts, boards, ports)
+    if named:
+        return named
+    return usb_interface_label(facts)
+
+
+def board_name_for(
+    facts: SerialPortFacts, boards: Sequence[BoardName], ports: Sequence[SerialPortFacts]
+) -> str:
+    """The one stored name that uniquely identifies ``facts``. Empty when none does."""
+    found = [board.name for board in boards if _same_board(board, facts, ports)]
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def assign_board_name(
+    boards: Sequence[BoardName],
+    facts: SerialPortFacts,
+    name: str,
+    ports: Sequence[SerialPortFacts],
+) -> tuple[BoardName, ...]:
+    """Replace the name of this board. A name already used by another board is refused.
+
+    ``ValueError`` with ``invalid`` means the text is not a usable name.
+    ``ValueError`` with ``taken`` means another board already has that name.
+    """
+    hint = _hint_from_facts(facts)
+    try:
+        named = BoardName(name=name, device=hint)
+    except ValidationError as error:
+        raise ValueError("invalid") from error
+    listed = ports if any(port.device == facts.device for port in ports) else (*ports, facts)
+    kept: list[BoardName] = []
+    for board in boards:
+        if _same_board(board, facts, listed):
+            continue
+        if board.name.casefold() == named.name.casefold():
+            raise ValueError("taken")
+        kept.append(board)
+    kept.append(named)
+    return tuple(kept)
 
 
 def remembered_hint(configuration: SensorConfiguration) -> DeviceHint:
@@ -163,6 +250,43 @@ def _one(found: list[SerialPortFacts]) -> tuple[PortMatch, SerialPortFacts | Non
 def _id_agrees(expected: int | None, actual: int | None) -> bool:
     """A missing id does not contradict. Two present ids must be equal."""
     return expected is None or actual is None or expected == actual
+
+
+def _same_board(board: BoardName, facts: SerialPortFacts, ports: Sequence[SerialPortFacts]) -> bool:
+    status, match = classify_port(board.device, ports)
+    return status is PortMatch.UNIQUE and match is not None and match.device == facts.device
+
+
+def _hint_from_facts(facts: SerialPortFacts) -> DeviceHint:
+    return DeviceHint(
+        vid=facts.vid,
+        pid=facts.pid,
+        serial_number=facts.serial_number,
+        location=facts.location,
+        port=facts.device,
+    )
+
+
+def _usb_title(product: object, description: object, device: str) -> str:
+    title = _display(product)
+    if title:
+        return title
+    described = _display(description)
+    suffix = f"({device})"
+    if described.endswith(suffix):
+        described = described[: -len(suffix)].strip()
+    if not described or described == device:
+        return ""
+    return described
+
+
+def _display(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split())
+    if len(text) > 128:
+        return ""
+    return text
 
 
 def _usb_id(value: object) -> int | None:
