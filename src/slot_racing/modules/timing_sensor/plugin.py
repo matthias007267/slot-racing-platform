@@ -135,6 +135,7 @@ class SensorTimingPlugin(Plugin):
             "sensor.connected_serial": (
                 "USB-Leser geöffnet. Das Board setzt sich beim Öffnen zurück."
             ),
+            "sensor.already_open": "Der USB-Leser ist bereits verbunden.",
             "sensor.quality.none": "Noch keine gültige Messung",
             "sensor.quality.value": (
                 "{samples} Messungen, Unsicherheit {uncertainty} ns, Gang {numerator}/{denominator}"

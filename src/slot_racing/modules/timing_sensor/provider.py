@@ -109,6 +109,10 @@ class SensorTimingFactory(TimingSourceFactory):
         return ProviderCapabilities(supports_test_mode=False, supports_multiple_lanes=True)
 
     def availability(self) -> ProviderAvailability:
+        # The race wizard asks after the diagnostic page has stopped drawing.
+        # Exchanges already sitting in the reader have to count, or a finished
+        # USB sync still looks unavailable.
+        self._link.poll()
         # A typed developer offset is not a USB race clock. Only a mapping
         # produced by the protocol exchange makes the serial provider usable.
         if self._link.mode is TransportMode.SERIAL and self._link.mapping_origin != "measured":

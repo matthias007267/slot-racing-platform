@@ -99,6 +99,14 @@ class SensorLink:
         return self._transport.connected
 
     @property
+    def port_open(self) -> bool:
+        """True while the reader is open, even before the protocol hello identifies it."""
+        opened = getattr(self._transport, "opened", None)
+        if isinstance(opened, bool):
+            return opened
+        return self.connected
+
+    @property
     def sync(self) -> SyncStatus:
         return self._state.sync
 

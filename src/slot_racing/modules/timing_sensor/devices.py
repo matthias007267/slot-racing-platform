@@ -138,7 +138,9 @@ def attach_remembered_serial(
     The caller still has to read a protocol hello. Opening the port is not proof
     that the remembered controller is the device that answered.
     """
-    if link.connected or link.race_bound or configuration.mode != "serial":
+    # ``connected`` stays false until the hello. The port can already be open.
+    # Replacing it would reset the board and drop a clock exchange in progress.
+    if link.port_open or link.race_bound or configuration.mode != "serial":
         return None
     _status, match = classify_port(remembered_hint(configuration), ports)
     if match is None:

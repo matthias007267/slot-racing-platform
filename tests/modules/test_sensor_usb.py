@@ -37,7 +37,10 @@ from slot_racing.modules.timing_sensor.protocol import (
     format_sync_reply,
     parse_sensor_line,
 )
+from slot_racing.modules.timing_sensor.provider import SensorTimingFactory
+from slot_racing.modules.timing_sensor.store import SensorConfigurationStore
 from slot_racing.modules.timing_sensor.transport import SerialSensorTransport
+from tests.database import migrated_database
 from tests.modules.test_sensor_timing import _LOGICAL, _assignment, _frame
 
 _HELLO = HelloFrame("b0001", "mega2560", "1.0.0", "ns", ("s1", "s2"))
@@ -400,6 +403,20 @@ def test_a_manual_serial_mapping_does_not_stay_the_race_clock() -> None:
     mapping = link._state.mapping
     assert link.mapping_origin == "measured"
     assert mapping is not None and mapping.offset_ns != 0
+    link.release()
+
+
+def test_a_finished_exchange_is_applied_when_a_race_checks_availability() -> None:
+    link, transport, stream = _reader()
+    link.acquire()
+    _identify(link, transport, stream)
+    assert link.sync is SyncStatus.UNSYNCHRONIZED
+    for _ in range(5):
+        transport.pump()
+    assert link.sync is SyncStatus.UNSYNCHRONIZED
+    factory = SensorTimingFactory(link, SensorConfigurationStore(migrated_database()))
+    assert factory.availability().available is True
+    assert link.mapping_origin == "measured"
     link.release()
 
 

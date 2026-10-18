@@ -29,4 +29,4 @@ def provider_item_text(translator: Translator, info: TimingProviderInfo) -> str:
     label = provider_label(translator, info.provider_id)
     if info.available:
         return label
-    return f"{label} - {translator.translate('timing.provider.unavailable')}"
+    return f"{label} - {availability_text(translator, info)}"
