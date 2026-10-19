@@ -111,3 +111,15 @@ def test_a_failing_plugin_does_not_prevent_startup() -> None:
         assert nav_ids(runtime) == ["good"]
     finally:
         runtime.shutdown()
+
+
+def test_the_smoke_test_fails_when_a_module_did_not_load() -> None:
+    from slot_racing.app.main import _smoke_test_result
+
+    runtime = create()
+    try:
+        assert _smoke_test_result(runtime) == 0
+        runtime.plugins.record_load_failure("broken", "ImportError: missing")
+        assert _smoke_test_result(runtime) == 1
+    finally:
+        runtime.shutdown()

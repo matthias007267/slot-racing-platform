@@ -1,8 +1,8 @@
 """Picture shown for the running program.
 
 ``resources/icons`` holds the picture. The window and the taskbar use it while
-the program is open. A later installer or program executable can use the same
-file. Those executables are not built here.
+the program is open. The Windows build converts the same file into the icon of the
+program file and of the installer (``packaging/windows``).
 """
 
 from __future__ import annotations
