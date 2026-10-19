@@ -4,7 +4,9 @@ Each sample carries the host send and receive times and the device receive and
 transmit times. The crossing time is never one of those host stamps. A sample
 whose round trip is too uncertain is ignored. The rate is estimated only when
 the samples span enough device time for the slope to be distinguishable from
-the round-trip noise; otherwise the rate stays 1.
+the round-trip noise; otherwise the rate stays 1. The slope is the exact least
+squares fit over the window and is used only when every sample lies on the fitted
+line within its own round-trip bound.
 
 Nanoseconds are the integer unit of the mapping. The reported uncertainty is
 the median one-way delay bound of the accepted samples, not a claim that a
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from math import gcd
+from fractions import Fraction
 
 from slot_racing.modules.timing_sensor.clock_map import DeviceClockMapping, to_host_ns
 
@@ -28,8 +30,14 @@ MAX_UNCERTAINTY_NS = 250_000_000
 MIN_SAMPLES = 4
 # Below this span a rate fit is smaller than the delay noise, so the rate stays 1.
 MIN_RATE_SPAN_NS = 2_000_000_000
-# A fit beyond one percent is a bad sample, not a crystal. Keep rate 1.
-_MAX_RATE_ERROR_PERCENT = 1
+# Plausibility limit for the device clock rate, not a tolerance to hide drift in.
+# A Mega 2560 on a ceramic resonator or a clone board can run a percent or more
+# off, and a rate of 1 would then move every crossing by that fraction of the
+# time since the first event. A slope beyond this is a bad sample, not a crystal.
+MAX_RATE_ERROR_PERCENT = 5
+# The slope is a ratio of integers. Bounding the denominator keeps it exact enough
+# (a part per trillion) without carrying the full least squares fraction around.
+_RATE_DENOMINATOR_LIMIT = 10**12
 _WINDOW = 16
 
 
@@ -91,11 +99,13 @@ class ClockReport:
     """Why the window has the rate it has. Diagnostic only; the mapping does not read it.
 
     ``rate_status`` is ``fitted`` when the slope was used, ``too_few_samples``,
-    ``span_too_short`` while the samples cover less than the minimum span, and
-    ``skew_rejected`` when the raw slope is beyond the allowed error and the rate
-    stays 1. ``skew_ppm`` is host time over device time minus one, in parts per
-    million, whenever it could be computed, even when it was rejected. A positive
-    value means the device clock runs slow.
+    ``span_too_short`` while the samples cover less than the minimum span,
+    ``skew_rejected`` when the raw slope is beyond the plausibility limit, and
+    ``fit_inconsistent`` when a sample does not lie on the fitted line within its
+    round-trip bound. In both rejected cases the rate stays 1. ``skew_ppm`` is the
+    fitted host time over device time minus one, in parts per million, whenever it
+    could be computed, even when it was rejected. A positive value means the device
+    clock runs slow.
     """
 
     rate_status: str
@@ -175,18 +185,15 @@ def clock_report(samples: tuple[SyncSample, ...]) -> ClockReport:
     latest = max(good, key=lambda sample: sample.device_mid_ns)
     device_delta = latest.device_mid_ns - earliest.device_mid_ns
     host_delta = latest.host_mid_ns - earliest.host_mid_ns
-    skew = None
-    if device_delta > 0:
-        skew = (host_delta - device_delta) * 1_000_000 // device_delta
+    slope = _slope(good)
+    skew = None if slope is None else round((slope - 1) * 1_000_000)
     anchor = min(good, key=lambda sample: sample.uncertainty_ns)
     if len(good) < MIN_SAMPLES:
         status = "too_few_samples"
     elif device_delta < MIN_RATE_SPAN_NS or host_delta <= 0:
         status = "span_too_short"
-    elif _rate(good) == (1, 1) and host_delta != device_delta:
-        status = "skew_rejected"
     else:
-        status = "fitted"
+        status = _fit(good)[1]
     return ClockReport(
         status,
         skew,
@@ -245,17 +252,48 @@ def continuous_mapping(
     return candidate
 
 
-def _rate(samples: tuple[SyncSample, ...]) -> tuple[int, int]:
+def _slope(samples: tuple[SyncSample, ...]) -> Fraction | None:
+    """Exact least squares slope of host time over device time, or ``None``."""
+    if len(samples) < 2:
+        return None
+    count = len(samples)
+    mean_device = Fraction(sum(sample.device_mid_ns for sample in samples), count)
+    mean_host = Fraction(sum(sample.host_mid_ns for sample in samples), count)
+    spread = sum((sample.device_mid_ns - mean_device) ** 2 for sample in samples)
+    if spread == 0:
+        return None
+    cross = sum(
+        (sample.device_mid_ns - mean_device) * (sample.host_mid_ns - mean_host)
+        for sample in samples
+    )
+    return Fraction(cross) / Fraction(spread)
+
+
+def _fit(samples: tuple[SyncSample, ...]) -> tuple[tuple[int, int], str]:
+    """The rate and the status that explains it. Rate 1 whenever the fit is not trusted."""
     earliest = min(samples, key=lambda sample: sample.device_mid_ns)
     latest = max(samples, key=lambda sample: sample.device_mid_ns)
     device_delta = latest.device_mid_ns - earliest.device_mid_ns
     host_delta = latest.host_mid_ns - earliest.host_mid_ns
     if device_delta < MIN_RATE_SPAN_NS or host_delta <= 0:
-        return 1, 1
-    if abs(host_delta - device_delta) * 100 > device_delta * _MAX_RATE_ERROR_PERCENT:
-        return 1, 1
-    divisor = gcd(host_delta, device_delta)
-    return host_delta // divisor, device_delta // divisor
+        return (1, 1), "span_too_short"
+    slope = _slope(samples)
+    if slope is None or abs(slope - 1) * 100 > MAX_RATE_ERROR_PERCENT:
+        return (1, 1), "skew_rejected"
+    count = len(samples)
+    mean_device = Fraction(sum(sample.device_mid_ns for sample in samples), count)
+    mean_host = Fraction(sum(sample.host_mid_ns for sample in samples), count)
+    worst_uncertainty = max(sample.uncertainty_ns for sample in samples)
+    for sample in samples:
+        expected = mean_host + slope * (sample.device_mid_ns - mean_device)
+        if abs(sample.host_mid_ns - expected) > sample.uncertainty_ns + worst_uncertainty:
+            return (1, 1), "fit_inconsistent"
+    rate = slope.limit_denominator(_RATE_DENOMINATOR_LIMIT)
+    return (rate.numerator, rate.denominator), "fitted"
+
+
+def _rate(samples: tuple[SyncSample, ...]) -> tuple[int, int]:
+    return _fit(samples)[0]
 
 
 def _median_uncertainty(samples: tuple[SyncSample, ...]) -> int:

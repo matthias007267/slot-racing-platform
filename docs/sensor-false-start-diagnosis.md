@@ -21,7 +21,7 @@ die alte Version `1.0.0` läuft.
 | --- | --- |
 | `build.code_id` | Hash des Python-Codes, der den Export geschrieben hat. |
 | `firmware.version`, `firmware.capabilities.arm` | Von der Platine gemeldete Version und ob sie `ARM` kennt. |
-| `connection.clock.rate_status` | `fitted`: Steigung der Platinenuhr wird verwendet. `span_too_short`: Fenster zu kurz. `skew_rejected`: Die gemessene Steigung weicht um mehr als 1 % ab und wird deshalb verworfen. Dann gilt Rate 1/1, und die Zuordnung driftet. |
+| `connection.clock.rate_status` | `fitted`: Steigung der Platinenuhr wird verwendet. `span_too_short`: Fenster zu kurz. `skew_rejected`: Die Steigung weicht um mehr als 5 % ab und gilt als unplausibel. `fit_inconsistent`: Eine Messung liegt nicht innerhalb ihrer Rundlaufgrenze auf der angepassten Geraden. In beiden Fällen gilt Rate 1/1, und die Zuordnung driftet. |
 | `connection.clock.raw_skew_ppm` | Gemessene Abweichung (Host- über Platinenzeit) in ppm. Positiv heißt: Die Platinenuhr läuft langsam. |
 | `connection.sync_log` | Jeder Zeitabgleich: Anfrage-Id, Sitzung, Sende- und Empfangszeit am Host, Empfangs- und Sendezeit der Platine, Versatz, Unsicherheit und Ergebnis (`accepted`, `uncertainty`, `rewind`, `unknown_request`, `session_mismatch`, `invalid_stamps`). |
 | `connection.mappings` | Jede eingebaute Zuordnung mit Id, Versatz, Rate, Quelle (`sync_window` oder `continuous`), Ankerabgleich und Zeitpunkt. |
@@ -39,8 +39,9 @@ Die Marker in `start_sequences[].markers` sind Instants der Host-Monotonuhr:
 
 ## Auswertung
 
-* Ist `rate_status` bei jedem Export `skew_rejected` und `raw_skew_ppm` über 10 000, läuft die Platinenuhr
-  mehr als ein Prozent abweichend. Dann sind die Erfassungszeiten nach dem ersten Ereignis einer Sitzung
+* Ist `rate_status` bei jedem Export `skew_rejected` oder `fit_inconsistent` und `raw_skew_ppm` groß, läuft
+  die Platinenuhr abweichend und die Rate wird nicht verwendet. (Bis Version nach dem Export 7986 wurde jede
+  Steigung über 1 % verworfen; ein Board mit 1,09 % langsamer Uhr blieb daher bei Rate 1/1.) Dann sind die Erfassungszeiten nach dem ersten Ereignis einer Sitzung
   um `raw_skew_ppm` mal vergangener Zeit verschoben. Das erklärt Frühstarts nach der Freigabe.
 * Liegt `engine_release` deutlich vor `ui_lights_out` (mehr als etwa 100 ms), ist die Anzeige später als
   die Freigabe. Dann ist die Freigabe richtig, aber die Anzeige zu spät.

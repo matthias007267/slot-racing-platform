@@ -170,7 +170,7 @@ def _classified(rig: _Rig) -> dict[int, tuple[str, str]]:
     }
 
 
-@pytest.mark.parametrize("skew", [-0.004, 0.0, 0.004])
+@pytest.mark.parametrize("skew", [-0.0109, -0.004, 0.0, 0.004, 0.015])
 def test_capture_time_follows_the_true_time_over_a_long_race(skew: float) -> None:
     rig = _Rig({"skew": skew})
     rig.warm_up(60)
@@ -182,18 +182,70 @@ def test_capture_time_follows_the_true_time_over_a_long_race(skew: float) -> Non
     assert clock.rate_status == "fitted"
 
 
-def test_a_skew_beyond_the_rate_limit_is_reported_and_not_hidden() -> None:
-    rig = _Rig({"skew": -0.02})
+def test_a_skew_beyond_the_plausibility_limit_is_reported_and_not_hidden() -> None:
+    rig = _Rig({"skew": -0.08})
     rig.warm_up(60)
     clock = rig.link.clock_report()
     assert clock.rate_status == "skew_rejected"
-    assert clock.skew_ppm is not None and abs(clock.skew_ppm - 20_408) < 200
+    assert clock.skew_ppm is not None and abs(clock.skew_ppm - 86_957) < 500
     assert rig.link.sync_quality[2:4] == (1, 1)
     payload = sensor_diagnostic(rig.link, track_id=None, positions=(), assignments=())
     connection = payload["connection"]
     assert isinstance(connection, dict)
     assert connection["clock"]["rate_status"] == "skew_rejected"
     assert connection["clock"]["raw_skew_ppm"] == clock.skew_ppm
+
+
+def test_a_board_clock_one_percent_slow_is_fitted_and_not_left_at_rate_one() -> None:
+    rig = _Rig({"skew": -0.01087})
+    rig.warm_up(30)
+    clock = rig.link.clock_report()
+    assert clock.rate_status == "fitted"
+    assert clock.skew_ppm is not None and abs(clock.skew_ppm - 10_990) < 150
+    numerator, denominator = rig.link.sync_quality[2:4]
+    assert abs(numerator / denominator - 1.01099) < 0.0002
+
+
+def test_lap_times_are_not_shortened_by_a_slow_board_clock() -> None:
+    rig = _Rig({"skew": -0.01087})
+    rig.warm_up(30)
+    start = rig.world.now
+    for index in range(1, 9):
+        rig.cross("s1", start + index * 12_345 * _MS)
+    for index in range(2, 9):
+        lap = rig.mapped(index) - rig.mapped(index - 1)
+        assert abs(lap - 12_345 * _MS) < 5 * _MS
+
+
+def test_a_slow_board_clock_does_not_turn_a_late_trigger_into_a_false_start() -> None:
+    rig = _Rig({"skew": -0.01087})
+    rig.warm_up(30)
+    start = rig.world.now
+    for index in range(1, 11):
+        rig.cross("s1", start + index * 20 * _SECOND)
+    rig.warm_up(10)
+    _opened, released = _windowed(rig)
+    rig.run_until(released)
+    rig.link.close_start_window(released, 1)
+    rig.cross("s2", released + 600 * _MS)
+    assert _classified(rig)[rig.board.sequence] == ("race_crossing", "at_or_after_release")
+    assert rig.link.false_starts() == ()
+
+
+def test_a_sample_off_the_fitted_line_keeps_the_rate_out_of_use() -> None:
+    from slot_racing.modules.timing_sensor.clock_sync import SyncSample, clock_report, evaluate
+
+    samples = []
+    for index in range(8):
+        device = index * _SECOND
+        host = 100 * _SECOND + int(device * 1.01)
+        if index == 4:
+            host += 200 * _MS
+        samples.append(
+            SyncSample(host - _MS, host + _MS, device - 500_000, device + 500_000, index)
+        )
+    assert clock_report(tuple(samples)).rate_status == "fit_inconsistent"
+    assert (evaluate(tuple(samples)).numerator, evaluate(tuple(samples)).denominator) == (1, 1)
 
 
 def test_the_burst_alone_does_not_claim_a_fitted_rate() -> None:
