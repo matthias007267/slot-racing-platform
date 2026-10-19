@@ -73,6 +73,10 @@ See [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/README.
 - Linux only: Qt needs a few system libraries, for example on Ubuntu
   `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0 libpulse0`
 
+## Windows-Installer
+
+Für Anwender ohne Python und uv gibt es einen Windows-Installer mit Startmenüeintrag. Bauen und Prüfen: [docs/windows-installer.md](docs/windows-installer.md).
+
 ## Installation
 
 ```bash
