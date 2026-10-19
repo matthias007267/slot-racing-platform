@@ -67,6 +67,9 @@ class SensorObservation:
     window_opened_ns: int | None = None
     released_ns: int | None = None
     release_delta_ns: int | None = None
+    receive_host_ns: int | None = None
+    mapping_id: int | None = None
+    mapping_age_ns: int | None = None
 
 
 def consume_line(

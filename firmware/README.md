@@ -54,6 +54,12 @@ arduino-cli core install arduino:avr
 make -C firmware firmware
 ```
 
+## Version
+
+`HELLO` meldet `1.1.0`. Ab dieser Version beantwortet die Firmware `PSF/1 ARM`. Eine Platine mit `1.0.0`
+kennt den Befehl nicht; die Plattform zeigt das im Diagnoseexport (`firmware.capabilities.arm`).
+Die Anleitung zur Frühstart-Diagnose steht in `docs/sensor-false-start-diagnosis.md`.
+
 ## Hochladen unter Windows
 
 1. Den seriellen Monitor und jedes andere Programm schließen, das COM-Port des Boards offen hat. Auch die Plattform darf den Port zu diesem Zeitpunkt nicht verbunden haben.

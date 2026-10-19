@@ -303,3 +303,27 @@ def test_a_crossing_already_in_the_reader_at_the_release_is_a_race_crossing(
     live.refresh()
     assert _laps(live, 1) == (1, (3 * _SECOND,))
     assert [item["classification"] for item in _events(page)] == ["race_crossing"] * 2
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_start_sequence_records_release_lights_out_timer_and_engine(
+    qtbot: QtBot, env: Env, mode: str
+) -> None:
+    page, link, transport, stream, track = _shared(qtbot, env)
+    live, _race_id = _start(qtbot, env, link, int(track.id), mode)
+    assert link.start_window_state()["markers"] == {}
+    _release(live, transport, stream)
+    state = link.start_window_state()
+    markers = state["markers"]
+    assert isinstance(markers, dict)
+    assert set(markers) == {
+        "ui_release_requested",
+        "ui_lights_out",
+        "timer_start",
+        "engine_release",
+    }
+    assert markers["engine_release"] == state["release_ns"] == _started(live)
+    assert markers["ui_release_requested"] <= markers["engine_release"] <= markers["timer_start"]
+    assert markers["ui_lights_out"] >= markers["ui_release_requested"]
+    shown = page.diagnostic_payload()["start_sequences"]
+    assert isinstance(shown, list) and shown[-1]["markers"] == markers

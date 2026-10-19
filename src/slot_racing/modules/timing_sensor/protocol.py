@@ -68,6 +68,22 @@ import re
 from dataclasses import dataclass
 
 PROTOCOL = "PSF/1"
+# The firmware that answers ``PSF/1 ARM`` reports this version or a later one.
+ARM_FIRMWARE_VERSION = (1, 1, 0)
+
+
+def firmware_supports_arm(version: str) -> bool | None:
+    """Whether the reported firmware version knows ``PSF/1 ARM``; ``None`` if it cannot be read."""
+    parts = version.split(".")
+    try:
+        numbers = tuple(int(part) for part in parts)
+    except ValueError:
+        return None
+    if len(numbers) != 3:
+        return None
+    return numbers >= ARM_FIRMWARE_VERSION
+
+
 PROVISIONAL_PROTOCOL = PROTOCOL
 PROVISIONAL_PROTOCOL_NOTE = (
     "PSF/1 is the sensor text protocol: events, identity, status, errors and clock sync. "

@@ -6,13 +6,16 @@ the mode and the timing provider.
 
 from __future__ import annotations
 
+import hashlib
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import TypedDict
 
 from slot_racing.modules.timing_sensor.configuration import SensorAssignment
 from slot_racing.modules.timing_sensor.intake import SensorObservation
 from slot_racing.modules.timing_sensor.link import SensorLink
-from slot_racing.modules.timing_sensor.protocol import PROTOCOL
+from slot_racing.modules.timing_sensor.protocol import PROTOCOL, firmware_supports_arm
 
 _EVENT_LIMIT = 200
 
@@ -28,6 +31,17 @@ def application_version() -> str:
         return version("slot-racing-platform")
     except PackageNotFoundError:
         return "0.1.0"
+
+
+@lru_cache(maxsize=1)
+def code_id() -> str:
+    """Short hash of the installed Python sources. It names the code that wrote the export."""
+    root = Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
 
 
 def sensor_diagnostic(
@@ -48,7 +62,12 @@ def sensor_diagnostic(
             "version": identity.firmware,
             "session_id": identity.session_id,
             "sensors": list(identity.sensors),
+            "capabilities": {
+                "arm": firmware_supports_arm(identity.firmware),
+                "arm_basis": "reported firmware version",
+            },
         }
+    report = link.clock_report()
     race: dict[str, object] | None = None
     if watch.race_id is not None:
         race = {
@@ -63,6 +82,7 @@ def sensor_diagnostic(
     return {
         "kind": "sensor-timing-diagnostic",
         "application_version": application_version(),
+        "build": {"application_version": application_version(), "code_id": code_id()},
         "protocol": PROTOCOL,
         "firmware": firmware,
         "connection": {
@@ -76,6 +96,17 @@ def sensor_diagnostic(
             "numerator": numerator,
             "denominator": denominator,
             "sync_accepted": accepted,
+            "clock": {
+                "rate_status": report.rate_status,
+                "raw_skew_ppm": report.skew_ppm,
+                "window_span_ns": report.span_ns,
+                "window_samples": report.window_samples,
+                "anchor_host_mid_ns": report.anchor_host_mid_ns,
+                "anchor_device_mid_ns": report.anchor_device_mid_ns,
+                "anchor_uncertainty_ns": report.anchor_uncertainty_ns,
+            },
+            "sync_log": link.sync_log(),
+            "mappings": link.mapping_log(),
         },
         "changes": [{"kind": kind, "detail": detail} for kind, detail in link.changes],
         "timing": {
@@ -92,6 +123,7 @@ def sensor_diagnostic(
         },
         "race": race,
         "start_window": link.start_window_state(),
+        "start_sequences": link.start_sequences(),
         "event_limit": _EVENT_LIMIT,
         "events": [_event(item, watch.started_at_ns) for item in crossings[-_EVENT_LIMIT:]],
     }
@@ -118,6 +150,14 @@ def _event(item: SensorObservation, race_started_ns: int | None) -> dict[str, ob
         "sync_status": item.sync_status,
         "classification": item.classification,
         "classification_reason": item.classification_reason,
+        "receive_host_ns": item.receive_host_ns,
+        "receive_minus_capture_ns": (
+            None
+            if item.receive_host_ns is None or item.host_time_ns is None
+            else item.receive_host_ns - item.host_time_ns
+        ),
+        "mapping_id": item.mapping_id,
+        "mapping_age_ns": item.mapping_age_ns,
     }
 
 
