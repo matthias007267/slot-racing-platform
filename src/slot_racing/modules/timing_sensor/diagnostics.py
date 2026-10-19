@@ -7,6 +7,7 @@ the mode and the timing provider.
 from __future__ import annotations
 
 import hashlib
+import sys
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -36,8 +37,12 @@ def application_version() -> str:
 @lru_cache(maxsize=1)
 def code_id() -> str:
     """Short hash of the installed Python sources. It names the code that wrote the export."""
-    root = Path(__file__).resolve().parents[2]
     digest = hashlib.sha256()
+    if getattr(sys, "frozen", False):
+        # The sources are inside the program file, so the program file names the code.
+        digest.update(Path(sys.executable).read_bytes())
+        return digest.hexdigest()[:16]
+    root = Path(__file__).resolve().parents[2]
     for path in sorted(root.rglob("*.py")):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())

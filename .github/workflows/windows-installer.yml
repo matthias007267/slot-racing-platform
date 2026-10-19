@@ -1,0 +1,46 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/windows-installer.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Build and check the installer
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+      - name: Build the program and the installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+      - name: Install, start, uninstall
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem build/installer/SlotRacingPlatform-Setup-*.exe | Select-Object -First 1
+          ./packaging/windows/verify-installer.ps1 -Installer $setup.FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlotRacingPlatform-Setup
+          path: build/installer/SlotRacingPlatform-Setup-*.exe
+          if-no-files-found: error

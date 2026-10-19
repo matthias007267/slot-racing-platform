@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -18,6 +19,8 @@ from slot_racing.core.config import app_data_dir, default_config_path, load_conf
 from slot_racing.core.diagnostics import install, mark_clean, note_fact, shutdown
 from slot_racing.core.plugin import PluginState
 from slot_racing.uikit.theme import apply_theme
+
+logger = logging.getLogger(__name__)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -62,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             loop.exec()
             window.close()
             completed = True
-            return 0
+            return _smoke_test_result(runtime)
         code = app.exec()
         completed = True
         return code
@@ -74,6 +77,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             if completed:
                 mark_clean()
             shutdown()
+
+
+def _smoke_test_result(runtime: Runtime) -> int:
+    """Non-zero when a module did not load, so a broken installation fails its own check."""
+    statuses = runtime.plugins.statuses()
+    failed = [status.name for status in statuses if status.state is PluginState.FAILED]
+    if failed or not statuses:
+        logger.error("Smoke test failed. Modules that did not load: %s", ", ".join(failed))
+        return 1
+    return 0
 
 
 def _remember_runtime(runtime: Runtime) -> None:
